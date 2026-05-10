@@ -5,7 +5,7 @@ const router = express.Router();
 const ctrl = require('../controllers/transportController');
 const { requireRole } = require('../middlewares/auth');
 
-router.use(requireRole(['admin', 'accountant']));
+router.use(requireRole('admin', 'accountant'));
 
 router.get('/routes', ctrl.getRoutes);
 router.post('/routes', ctrl.createRoute);

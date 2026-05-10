@@ -64,11 +64,6 @@ router.post('/chat/conversations', requirePermission('classes.view'), chatCtrl.t
 router.get('/chat/conversations/:id/messages', requirePermission('classes.view'), chatCtrl.teacherConversationMessages);
 router.post('/chat/conversations/:id/messages', requirePermission('classes.view'), chatCtrl.teacherSendMessage);
 
-router.get('/notices', requirePermission('notices.view'), ctrl.noticeList);
-router.post('/notices', requirePermission('notices.post'), ctrl.createNotice);
-router.patch('/notices/:id', requirePermission('notices.post'), ctrl.updateNotice);
-router.post('/notices/:id/read', requirePermission('notices.view'), ctrl.readNotice);
-
 router.get('/leave/balance', ctrl.leaveBalance);
 router.get('/leave/applications', ctrl.leaveApplications);
 router.post('/leave/apply', ctrl.applyLeave);

@@ -51,11 +51,6 @@ router.post('/chat/conversations/:id/messages', [
   body('message_text').isString().notEmpty(),
 ], validate, chatCtrl.studentSendMessage);
 
-router.get('/notices', ctrl.noticeList);
-router.post('/notices/:id/read', [param('id').isInt()], validate, ctrl.noticeRead);
-router.post('/notices/:id/pin', [param('id').isInt()], validate, ctrl.noticePin);
-router.delete('/notices/:id/pin', [param('id').isInt()], validate, ctrl.noticeUnpin);
-
 router.get('/profile', ctrl.profile);
 router.get('/profile/history', ctrl.academicHistory);
 router.post('/profile/correction-request', [

@@ -17,6 +17,12 @@ router.patch ('/:id/permissions',     requirePermission('users.permissions'), ct
 router.post  ('/:id/reset-password',  requirePermission('users.edit'),        ctrl.resetPassword);
 router.get   ('/:id/audit',           requirePermission('audit.view'),        ctrl.getUserAudit);
 
+// Permission Templates
+router.get   ('/permission-templates',     requirePermission('users.permissions'), ctrl.listPermissionTemplates);
+router.post  ('/permission-templates',     requirePermission('users.permissions'), ctrl.createPermissionTemplate);
+router.patch ('/permission-templates/:id', requirePermission('users.permissions'), ctrl.updatePermissionTemplate);
+router.delete('/permission-templates/:id', requirePermission('users.permissions'), ctrl.deletePermissionTemplate);
+
 // Bulk import
 router.get  ('/import/template',  ctrl.downloadImportTemplate);
 router.post ('/import/preview',   requirePermission('users.create'), ctrl.previewImport);

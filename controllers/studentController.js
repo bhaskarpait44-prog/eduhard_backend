@@ -173,7 +173,7 @@ exports.list = async (req, res, next) => {
 // ── POST /api/students ────────────────────────────────────────────────────────
 exports.admit = async (req, res, next) => {
   try {
-    const { admission_no, first_name, last_name, date_of_birth, gender, profile } = req.body;
+    const { admission_no, first_name, last_name, date_of_birth, gender, profile, password } = req.body;
     const schoolId = req.user.school_id;
     const studentEmail = profile?.email?.trim().toLowerCase();
 
@@ -181,7 +181,7 @@ exports.admit = async (req, res, next) => {
       return res.fail('Student email is required at admission.', [], 422);
     }
 
-    const generatedPassword = generateStudentPassword();
+    const generatedPassword = password || generateStudentPassword();
     const passwordHash = await bcrypt.hash(generatedPassword, 12);
 
     const result = await sequelize.transaction(async (t) => {
@@ -273,7 +273,7 @@ exports.admit = async (req, res, next) => {
 };
 
 // ── GET /api/students/:id ─────────────────────────────────────────────────────
-exports.getClassIDCardsData = async (req, res, next) => {
+exports.getBulkIdCardsData = async (req, res, next) => {
   try {
     const { class_id, section_id, session_id } = req.query;
     const schoolId = req.user.school_id;
@@ -318,7 +318,7 @@ exports.getClassIDCardsData = async (req, res, next) => {
     } catch (err) { next(err); }
     };
 
-    exports.getTCData = async (req, res, next) => {
+    exports.getTcData = async (req, res, next) => {
     try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -350,7 +350,7 @@ exports.getClassIDCardsData = async (req, res, next) => {
     } catch (err) { next(err); }
     };
 
-    exports.getIDCardData = async (req, res, next) => {
+    exports.getIdCardData = async (req, res, next) => {
     try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -747,3 +747,4 @@ exports.deleteDocument = async (req, res, next) => {
     res.ok({}, 'Document deleted.');
   } catch (err) { next(err); }
 };
+

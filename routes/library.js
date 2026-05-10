@@ -18,25 +18,25 @@ router.get('/dashboard', dashboardController.getDashboardStats);
 
 // Settings
 router.get('/settings', settingsController.getSettings);
-router.put('/settings', requireRole(['admin', 'librarian']), settingsController.updateSettings);
+router.put('/settings', requireRole('admin', 'librarian'), settingsController.updateSettings);
 
 // Books
 router.get('/books', bookController.getBooks);
 router.get('/books/:id', bookController.getBook);
-router.post('/books', requireRole(['admin', 'librarian']), bookController.createBook);
-router.put('/books/:id', requireRole(['admin', 'librarian']), bookController.updateBook);
-router.delete('/books/:id', requireRole(['admin', 'librarian']), bookController.deleteBook);
+router.post('/books', requireRole('admin', 'librarian'), bookController.createBook);
+router.put('/books/:id', requireRole('admin', 'librarian'), bookController.updateBook);
+router.delete('/books/:id', requireRole('admin', 'librarian'), bookController.deleteBook);
 
 // Issues
 router.get('/issues', issueController.getIssues);
 router.get('/issues/my', issueController.getMyIssues);
-router.post('/issues', requireRole(['admin', 'librarian']), issueController.issueBook);
-router.patch('/issues/:id/return', requireRole(['admin', 'librarian']), issueController.returnBook);
-router.patch('/issues/mark-overdue', requireRole(['admin', 'librarian']), issueController.markOverdue);
+router.post('/issues', requireRole('admin', 'librarian'), issueController.issueBook);
+router.patch('/issues/:id/return', requireRole('admin', 'librarian'), issueController.returnBook);
+router.patch('/issues/mark-overdue', requireRole('admin', 'librarian'), issueController.markOverdue);
 
 // Fines
 router.get('/fines', fineController.getFines);
 router.get('/fines/summary', fineController.getFineSummary);
-router.patch('/fines/:id', requireRole(['admin', 'librarian']), fineController.updateFineStatus);
+router.patch('/fines/:id', requireRole('admin', 'librarian'), fineController.updateFineStatus);
 
 module.exports = router;

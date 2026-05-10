@@ -44,7 +44,7 @@ router.post('/bulk-calculate',
     body('release').optional().isBoolean(),
   ],
   validate,
-  ctrl.bulkCalculateAndRelease
+  ctrl.bulkCalculate
 );
 
 // ─────────────────────────────────────────────
@@ -68,7 +68,7 @@ router.patch('/release',
     body('release').isBoolean(),
   ],
   validate,
-  ctrl.releaseResult
+  ctrl.release
 );
 
 router.patch('/marks/override',
@@ -97,7 +97,7 @@ router.get('/class',
 
 router.get('/class/download',
   requirePermission('results.view'),
-  ctrl.downloadClassResultSheetPdf
+  ctrl.downloadClassResultSheet
 );
 
 // ─────────────────────────────────────────────

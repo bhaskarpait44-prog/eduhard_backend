@@ -34,13 +34,13 @@ router.get('/:id',                requireAdminOrTeacher, [
 
 router.get('/:id/id-card/data',   requireAdminOrTeacher, [
   param('id').isInt(),
-], validate, ctrl.getIDCardData);
+], validate, ctrl.getIdCardData);
 
 router.get('/:id/tc/data',        requireAdminOrTeacher, [
   param('id').isInt(),
-], validate, ctrl.getTCData);
+], validate, ctrl.getTcData);
 
-router.get('/bulk/id-cards/data', requireAdminOrTeacher, ctrl.getClassIDCardsData);
+router.get('/bulk/id-cards/data', requireAdminOrTeacher, ctrl.getBulkIdCardsData);
 
 router.patch('/:id/identity',     requireAdmin, [
   param('id').isInt(),

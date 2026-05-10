@@ -17,7 +17,7 @@ router.post('/',          requireAdmin, [
 ], validate, ctrl.enroll);
 
 router.get('/promotion/candidates', requireAdmin, ctrl.promotionCandidates);
-router.get('/promotion/summary/download', requireAdmin, ctrl.downloadPromotionSummaryPdf);
+router.get('/promotion/summary/download', requireAdmin, ctrl.downloadPromotionSummary);
 router.post('/promotion/process', requireAdmin, ctrl.processPromotions);
 router.get('/:id',                     [param('id').isInt()], validate, ctrl.getById);
 router.post('/promote', requireAdmin,  ctrl.promote);

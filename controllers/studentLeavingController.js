@@ -1,60 +1,55 @@
 'use strict';
 
 const sequelize = require('../config/database');
-const { Student, Enrollment, Session, Class, Section, StudentResult } = require('../models');
 
 /**
  * Mark a student as left.
  * Updates student status and closes active enrollment.
  */
 exports.markAsLeft = async (req, res, next) => {
-  const transaction = await sequelize.transaction();
   try {
     const { id } = req.params;
     const { left_date, leaving_reason, leaving_remarks } = req.body;
     const schoolId = req.user.school_id;
 
-    const student = await Student.findOne({ 
-      where: { id, school_id: schoolId },
-      transaction
-    });
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId
+    `, { replacements: { id, schoolId } });
 
-    if (!student) {
-      await transaction.rollback();
-      return res.fail('Student not found.', [], 404);
-    }
+    if (!student) return res.fail('Student not found.', [], 404);
 
-    const activeEnrollment = await Enrollment.findOne({
-      where: { student_id: id, status: 'active' },
-      transaction
-    });
+    const [[activeEnrollment]] = await sequelize.query(`
+      SELECT id FROM enrollments WHERE student_id = :id AND status = 'active'
+    `, { replacements: { id } });
 
     if (!activeEnrollment) {
-      await transaction.rollback();
       return res.fail('Student has no active enrollment. Cannot mark as left.', [], 400);
     }
 
-    await activeEnrollment.update({
-      status: 'inactive',
-      left_date: left_date || new Date(),
-      leaving_type: 'left'
-    }, { transaction });
+    const finalLeftDate = left_date || new Date().toISOString().split('T')[0];
 
-    await student.update({
-      status: 'left',
-      left_date: left_date || new Date(),
-      leaving_reason,
-      leaving_remarks,
-      is_active: false
-    }, { transaction });
+    await sequelize.query(`
+      UPDATE enrollments
+      SET status = 'inactive',
+          left_date = :finalLeftDate,
+          leaving_type = 'left',
+          updated_at = NOW()
+      WHERE id = :enrollmentId;
+    `, { replacements: { enrollmentId: activeEnrollment.id, finalLeftDate } });
 
-    await transaction.commit();
+    await sequelize.query(`
+      UPDATE students
+      SET status = 'left',
+          left_date = :finalLeftDate,
+          leaving_reason = :leaving_reason,
+          leaving_remarks = :leaving_remarks,
+          is_active = false,
+          updated_at = NOW()
+      WHERE id = :id;
+    `, { replacements: { id, finalLeftDate, leaving_reason, leaving_remarks } });
+
     res.ok({}, 'Student marked as left successfully.');
-  } catch (err) {
-    await transaction.rollback();
-    console.error('[MarkAsLeft] Error:', err);
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 exports.getLeftStudents = async (req, res, next) => {
@@ -125,10 +120,7 @@ exports.getLeftStudents = async (req, res, next) => {
         totalPages: Math.max(Math.ceil(count / limitNum), 1)
       }
     }, 'Left students retrieved.');
-  } catch (err) { 
-    console.error('[GetLeftStudents] Error:', err);
-    next(err); 
-  }
+  } catch (err) { next(err); }
 };
 
 exports.getGraduatedStudents = async (req, res, next) => {
@@ -191,10 +183,7 @@ exports.getGraduatedStudents = async (req, res, next) => {
         totalPages: Math.max(Math.ceil(count / limitNum), 1)
       }
     }, 'Graduated students retrieved.');
-  } catch (err) { 
-    console.error('[GetGraduatedStudents] Error:', err);
-    next(err); 
-  }
+  } catch (err) { next(err); }
 };
 
 exports.getEnrollmentHistory = async (req, res, next) => {
@@ -218,62 +207,52 @@ exports.getEnrollmentHistory = async (req, res, next) => {
     `, { replacements: { id, schoolId } });
 
     res.ok(history, 'Enrollment history retrieved.');
-  } catch (err) { 
-    console.error('[GetEnrollmentHistory] Error:', err);
-    next(err); 
-  }
+  } catch (err) { next(err); }
 };
 
 exports.readmitStudent = async (req, res, next) => {
-  const transaction = await sequelize.transaction();
   try {
     const { id } = req.params;
     const { session_id, class_id, section_id, joined_date, roll_number } = req.body;
     const schoolId = req.user.school_id;
 
-    const student = await Student.findOne({ 
-      where: { id, school_id: schoolId },
-      transaction
-    });
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId
+    `, { replacements: { id, schoolId } });
 
-    if (!student) {
-      await transaction.rollback();
-      return res.fail('Student not found.', [], 404);
-    }
+    if (!student) return res.fail('Student not found.', [], 404);
 
-    const lastEnrollment = await Enrollment.findOne({
-      where: { student_id: id },
-      order: [['joined_date', 'DESC']],
-      transaction
-    });
+    const [[lastEnrollment]] = await sequelize.query(`
+      SELECT id FROM enrollments WHERE student_id = :id ORDER BY joined_date DESC LIMIT 1
+    `, { replacements: { id } });
 
-    await Enrollment.create({
-      student_id: id,
-      session_id,
-      class_id,
-      section_id,
-      roll_number,
-      joined_date: joined_date || new Date(),
-      joining_type: 'rejoined',
-      status: 'active',
-      previous_enrollment_id: lastEnrollment ? lastEnrollment.id : null
-    }, { transaction });
+    await sequelize.query(`
+      INSERT INTO enrollments (
+        student_id, session_id, class_id, section_id, roll_number, 
+        joined_date, joining_type, status, previous_enrollment_id, created_at, updated_at
+      ) VALUES (
+        :id, :session_id, :class_id, :section_id, :roll_number, 
+        :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
+      )
+    `, { replacements: { 
+      id, session_id, class_id, section_id, roll_number, 
+      joined_date: joined_date || new Date().toISOString().split('T')[0],
+      prevId: lastEnrollment ? lastEnrollment.id : null
+    } });
 
-    await student.update({
-      status: 'active',
-      left_date: null,
-      leaving_reason: null,
-      leaving_remarks: null,
-      is_active: true
-    }, { transaction });
+    await sequelize.query(`
+      UPDATE students
+      SET status = 'active',
+          left_date = null,
+          leaving_reason = null,
+          leaving_remarks = null,
+          is_active = true,
+          updated_at = NOW()
+      WHERE id = :id;
+    `, { replacements: { id } });
 
-    await transaction.commit();
     res.ok({}, 'Student re-admitted successfully.');
-  } catch (err) {
-    await transaction.rollback();
-    console.error('[ReadmitStudent] Error:', err);
-    next(err);
-  }
+  } catch (err) { next(err); }
 };
 
 exports.getLeavingSummary = async (req, res, next) => {
@@ -295,8 +274,5 @@ exports.getLeavingSummary = async (req, res, next) => {
     `, { replacements });
 
     res.ok(stats || { total_active: 0, left_this_session: 0, graduated_this_session: 0, readmissions_this_session: 0 }, 'Leaving summary retrieved.');
-  } catch (err) { 
-    console.error('[GetLeavingSummary] Error:', err);
-    next(err); 
-  }
+  } catch (err) { next(err); }
 };

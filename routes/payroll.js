@@ -6,7 +6,7 @@ const ctrl = require('../controllers/payrollController');
 const { authenticate, requireRole } = require('../middlewares/auth');
 
 router.use(authenticate);
-router.use(requireRole(['admin', 'accountant']));
+router.use(requireRole('admin', 'accountant'));
 
 router.get('/structures', ctrl.getStructures);
 router.patch('/structures/:user_id', ctrl.updateStructure);

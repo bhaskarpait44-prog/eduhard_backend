@@ -58,14 +58,6 @@ router.get('/defaulters', requirePermission('fees.view'), ctrl.getDefaulters);
 router.post('/defaulters/remind', requirePermission('fees.collect'), ctrl.sendDefaulterReminder);
 router.post('/defaulters/remind-bulk', requirePermission('fees.collect'), ctrl.sendBulkDefaulterReminder);
 
-router.get('/notices', requirePermission('fees.view'), ctrl.getNotices);
-router.post('/notices', 
-  requirePermission('fees.collect'), 
-  accountantValidators.createNoticeRules, 
-  validate, 
-  ctrl.createNotice
-);
-
 router.get('/concessions', requirePermission('fees.waive'), ctrl.getConcessions);
 router.post('/concessions/apply', 
   requirePermission('fees.waive'), 

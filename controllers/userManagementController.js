@@ -905,3 +905,78 @@ exports.importStatus = async (req, res, next) => {
     return res.ok(log);
   } catch (err) { next(err); }
 };
+
+// ── Permission Templates ──────────────────────────────────────────────────
+
+exports.listPermissionTemplates = async (req, res, next) => {
+  try {
+    const schoolId = req.user.school_id;
+    const [templates] = await sequelize.query(`
+      SELECT pt.*, 
+             COALESCE(
+               JSON_AGG(p.name) FILTER (WHERE p.id IS NOT NULL), 
+               '[]'::json
+             ) AS permission_names
+      FROM permission_templates pt
+      LEFT JOIN LATERAL UNNEST(pt.permissions) AS p_name ON true
+      LEFT JOIN permissions p ON p.name = p_name
+      WHERE pt.school_id = :schoolId
+      GROUP BY pt.id
+      ORDER BY pt.name ASC;
+    `, { replacements: { schoolId } });
+
+    res.ok(templates);
+  } catch (err) { next(err); }
+};
+
+exports.createPermissionTemplate = async (req, res, next) => {
+  try {
+    const schoolId = req.user.school_id;
+    const { name, description, permissions } = req.body;
+
+    const [template] = await sequelize.query(`
+      INSERT INTO permission_templates (school_id, name, description, permissions, created_at, updated_at)
+      VALUES (:schoolId, :name, :description, :permissions, NOW(), NOW())
+      RETURNING *;
+    `, { replacements: { schoolId, name, description, permissions: permissions || [] } });
+
+    res.ok(template[0], 'Permission template created.', 201);
+  } catch (err) { next(err); }
+};
+
+exports.updatePermissionTemplate = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+    const { name, description, permissions } = req.body;
+
+    const [result] = await sequelize.query(`
+      UPDATE permission_templates SET
+        name = :name,
+        description = :description,
+        permissions = :permissions,
+        updated_at = NOW()
+      WHERE id = :id AND school_id = :schoolId
+      RETURNING *;
+    `, { replacements: { id, schoolId, name, description, permissions: permissions || [] } });
+
+    if (result.length === 0) return res.fail('Template not found.', [], 404);
+
+    res.ok(result[0], 'Permission template updated.');
+  } catch (err) { next(err); }
+};
+
+exports.deletePermissionTemplate = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [result] = await sequelize.query(`
+      DELETE FROM permission_templates WHERE id = :id AND school_id = :schoolId RETURNING id;
+    `, { replacements: { id, schoolId } });
+
+    if (result.length === 0) return res.fail('Template not found.', [], 404);
+
+    res.ok(null, 'Permission template deleted.');
+  } catch (err) { next(err); }
+};

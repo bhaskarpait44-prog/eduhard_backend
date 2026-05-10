@@ -7,7 +7,7 @@ const { authenticate, requireRole } = require('../middlewares/auth');
 
 // All staff attendance routes require authentication and admin/accountant role
 router.use(authenticate);
-router.use(requireRole(['admin', 'accountant']));
+router.use(requireRole('admin', 'accountant'));
 
 router.get('/daily',    ctrl.getDailyAttendance);
 router.post('/bulk',    ctrl.markBulk);

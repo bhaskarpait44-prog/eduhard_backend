@@ -73,14 +73,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
 
 app.use('/api/students', require('./routes/students'));
-app.use('/api/student-leaving', require('./routes/studentLeaving'));
-app.use('/api/health', require('./routes/health'));
 app.use('/api/sessions', require('./routes/sessions'));
-app.use('/api/families', require('./routes/families'));
-app.use('/api/parent', require('./routes/parent'));
-app.use('/api/inventory', require('./routes/inventory'));
-app.use('/api/transport', require('./routes/transport'));
-app.use('/api/feedback', require('./routes/feedback'));
 app.use('/api/classes', require('./routes/classes'));
 app.use('/api/sections', require('./routes/sections'));
 app.use('/api/enrollments', require('./routes/enrollments'));
@@ -91,24 +84,9 @@ app.use('/api/attendance',
   require('./routes/attendance')
 );
 
-app.use('/api/staff-attendance',
-  requireRole('admin', 'accountant'),
-  require('./routes/staffAttendance')
-);
-
 app.use('/api/fees',
   requirePermission('fees.view'),
   require('./routes/fees')
-);
-
-app.use('/api/expenses',
-  requireRole('admin', 'accountant'),
-  require('./routes/expenses')
-);
-
-app.use('/api/payroll',
-  requireRole('admin', 'accountant'),
-  require('./routes/payroll')
 );
 
 app.use('/api/accountant',
@@ -146,7 +124,20 @@ app.use('/api/audit',
   require('./routes/audit')
 );
 
+app.use('/api/notices', require('./routes/notices'));
+
+// Missing or regrouped routes as requested in PART 1
 app.use('/api/library', require('./routes/library'));
+app.use('/api/payroll', require('./routes/payroll'));
+app.use('/api/transport', require('./routes/transport'));
+app.use('/api/health', require('./routes/health'));
+app.use('/api/inventory', require('./routes/inventory'));
+app.use('/api/families', require('./routes/families'));
+app.use('/api/expenses', require('./routes/expenses'));
+app.use('/api/feedback', require('./routes/feedback'));
+app.use('/api/parent', require('./routes/parent'));
+app.use('/api/staff-attendance', require('./routes/staffAttendance'));
+app.use('/api/student-leaving', require('./routes/studentLeaving'));
 
 app.use((req, res) =>
   res.fail(`Route ${req.method} ${req.path} not found.`, [], 404)

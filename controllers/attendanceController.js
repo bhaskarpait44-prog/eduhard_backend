@@ -312,7 +312,7 @@ exports.getClassRegister = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.downloadAttendanceRegisterPdf = async (req, res, next) => {
+exports.downloadRegisterPdf = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
     const { session_id, class_id, section_id, month, year } = req.query;

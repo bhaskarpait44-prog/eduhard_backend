@@ -625,7 +625,7 @@ exports.transfer = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.downloadPromotionSummaryPdf = async (req, res, next) => {
+exports.downloadPromotionSummary = async (req, res, next) => {
   try {
     const { session_id } = req.query;
     const schoolId = req.user.school_id;

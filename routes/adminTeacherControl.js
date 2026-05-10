@@ -20,10 +20,6 @@ router.patch('/timetable/:id', ctrl.updateTimetableSlot);
 router.get('/homework', ctrl.homework);
 router.patch('/homework/:id', ctrl.updateHomework);
 
-router.get('/notices', ctrl.notices);
-router.post('/notices', ctrl.createNotice);
-router.patch('/notices/:id', ctrl.updateNotice);
-
 router.get('/attendance', ctrl.attendance);
 router.patch('/attendance/:id', ctrl.updateAttendance);
 

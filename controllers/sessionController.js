@@ -179,3 +179,20 @@ exports.getHolidays = async (req, res, next) => {
     res.ok(holidays, `${holidays.length} holiday(s) found.`);
   } catch (err) { next(err); }
 };
+
+exports.lock = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [[session]] = await sequelize.query(`
+      UPDATE sessions SET is_locked = true, updated_at = NOW()
+      WHERE id = :id AND school_id = :schoolId
+      RETURNING id, name, is_locked;
+    `, { replacements: { id, schoolId } });
+
+    if (!session) return res.fail('Session not found.', [], 404);
+
+    res.ok(session, `Session "${session.name}" has been locked.`);
+  } catch (err) { next(err); }
+};

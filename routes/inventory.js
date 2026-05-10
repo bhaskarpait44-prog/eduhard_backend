@@ -5,7 +5,7 @@ const router = express.Router();
 const ctrl = require('../controllers/inventoryController');
 const { requireRole } = require('../middlewares/auth');
 
-router.use(requireRole(['admin', 'accountant']));
+router.use(requireRole('admin', 'accountant'));
 
 router.get('/items', ctrl.getItems);
 router.post('/items', ctrl.createItem);

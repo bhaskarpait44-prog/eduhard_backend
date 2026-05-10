@@ -1,7 +1,6 @@
 'use strict';
 
 const sequelize = require('../config/database');
-const { StudentHealthProfile, StudentVaccination, StudentHealthIncident } = require('../models');
 
 exports.getHealthProfile = async (req, res, next) => {
   try {
@@ -15,13 +14,26 @@ exports.getHealthProfile = async (req, res, next) => {
 
     if (!student) return res.fail('Student not found.', [], 404);
 
-    let profile = await StudentHealthProfile.findOne({ where: { student_id } });
+    let [[profile]] = await sequelize.query(`
+      SELECT * FROM student_health_profiles WHERE student_id = :student_id
+    `, { replacements: { student_id } });
+
     if (!profile) {
-      profile = await StudentHealthProfile.create({ student_id });
+      const [newProfile] = await sequelize.query(`
+        INSERT INTO student_health_profiles (student_id, created_at, updated_at)
+        VALUES (:student_id, NOW(), NOW())
+        RETURNING *
+      `, { replacements: { student_id } });
+      profile = newProfile[0];
     }
 
-    const vaccinations = await StudentVaccination.findAll({ where: { student_id }, order: [['date_administered', 'DESC']] });
-    const incidents = await StudentHealthIncident.findAll({ where: { student_id }, order: [['incident_date', 'DESC'], ['incident_time', 'DESC']] });
+    const [vaccinations] = await sequelize.query(`
+      SELECT * FROM student_vaccinations WHERE student_id = :student_id ORDER BY date_administered DESC
+    `, { replacements: { student_id } });
+
+    const [incidents] = await sequelize.query(`
+      SELECT * FROM student_health_incidents WHERE student_id = :student_id ORDER BY incident_date DESC, incident_time DESC
+    `, { replacements: { student_id } });
 
     res.ok({ profile, vaccinations, incidents });
   } catch (err) { next(err); }
@@ -32,14 +44,44 @@ exports.updateHealthProfile = async (req, res, next) => {
     const { student_id } = req.params;
     const { blood_group, height_cm, weight_kg, allergies, medical_conditions } = req.body;
     
-    let profile = await StudentHealthProfile.findOne({ where: { student_id } });
-    if (!profile) {
-      profile = await StudentHealthProfile.create({ student_id, blood_group, height_cm, weight_kg, allergies, medical_conditions });
+    const [[existing]] = await sequelize.query(`
+      SELECT id FROM student_health_profiles WHERE student_id = :student_id
+    `, { replacements: { student_id } });
+
+    let profile;
+    if (existing) {
+      [profile] = await sequelize.query(`
+        UPDATE student_health_profiles SET
+          blood_group = :blood_group,
+          height_cm = :height_cm,
+          weight_kg = :weight_kg,
+          allergies = :allergies,
+          medical_conditions = :medical_conditions,
+          updated_at = NOW()
+        WHERE student_id = :student_id
+        RETURNING *
+      `, { replacements: { 
+        student_id, blood_group, 
+        height_cm: height_cm || null, 
+        weight_kg: weight_kg || null, 
+        allergies, medical_conditions 
+      } });
     } else {
-      profile = await profile.update({ blood_group, height_cm, weight_kg, allergies, medical_conditions });
+      [profile] = await sequelize.query(`
+        INSERT INTO student_health_profiles (
+          student_id, blood_group, height_cm, weight_kg, allergies, medical_conditions, created_at, updated_at
+        ) VALUES (
+          :student_id, :blood_group, :height_cm, :weight_kg, :allergies, :medical_conditions, NOW(), NOW()
+        ) RETURNING *
+      `, { replacements: { 
+        student_id, blood_group, 
+        height_cm: height_cm || null, 
+        weight_kg: weight_kg || null, 
+        allergies, medical_conditions 
+      } });
     }
 
-    res.ok(profile, 'Health profile updated.');
+    res.ok(profile[0], 'Health profile updated.');
   } catch (err) { next(err); }
 };
 
@@ -48,18 +90,32 @@ exports.addVaccination = async (req, res, next) => {
     const { student_id } = req.params;
     const { vaccine_name, date_administered, next_due_date, remarks } = req.body;
 
-    const vaccination = await StudentVaccination.create({
-      student_id, vaccine_name, date_administered: date_administered || null, next_due_date: next_due_date || null, remarks
-    });
+    const [vaccination] = await sequelize.query(`
+      INSERT INTO student_vaccinations (
+        student_id, vaccine_name, date_administered, next_due_date, remarks, created_at, updated_at
+      ) VALUES (
+        :student_id, :vaccine_name, :date_administered, :next_due_date, :remarks, NOW(), NOW()
+      ) RETURNING *
+    `, { replacements: { 
+      student_id, vaccine_name, 
+      date_administered: date_administered || null, 
+      next_due_date: next_due_date || null, 
+      remarks 
+    } });
 
-    res.ok(vaccination, 'Vaccination recorded.', 201);
+    res.ok(vaccination[0], 'Vaccination recorded.', 201);
   } catch (err) { next(err); }
 };
 
 exports.deleteVaccination = async (req, res, next) => {
   try {
     const { id } = req.params;
-    await StudentVaccination.destroy({ where: { id } });
+    const [result] = await sequelize.query(`
+      DELETE FROM student_vaccinations WHERE id = :id RETURNING id
+    `, { replacements: { id } });
+
+    if (result.length === 0) return res.fail('Vaccination record not found.', [], 404);
+
     res.ok(null, 'Vaccination deleted.');
   } catch (err) { next(err); }
 };
@@ -69,18 +125,32 @@ exports.addIncident = async (req, res, next) => {
     const { student_id } = req.params;
     const { incident_date, incident_time, type, description, action_taken } = req.body;
 
-    const incident = await StudentHealthIncident.create({
-      student_id, incident_date, incident_time: incident_time || null, type, description, action_taken, reported_by: req.user.id
-    });
+    const [incident] = await sequelize.query(`
+      INSERT INTO student_health_incidents (
+        student_id, incident_date, incident_time, type, description, action_taken, reported_by, created_at, updated_at
+      ) VALUES (
+        :student_id, :incident_date, :incident_time, :type, :description, :action_taken, :reported_by, NOW(), NOW()
+      ) RETURNING *
+    `, { replacements: { 
+      student_id, incident_date, 
+      incident_time: incident_time || null, 
+      type, description, action_taken, 
+      reported_by: req.user.id 
+    } });
 
-    res.ok(incident, 'Incident recorded.', 201);
+    res.ok(incident[0], 'Incident recorded.', 201);
   } catch (err) { next(err); }
 };
 
 exports.deleteIncident = async (req, res, next) => {
   try {
     const { id } = req.params;
-    await StudentHealthIncident.destroy({ where: { id } });
+    const [result] = await sequelize.query(`
+      DELETE FROM student_health_incidents WHERE id = :id RETURNING id
+    `, { replacements: { id } });
+
+    if (result.length === 0) return res.fail('Incident record not found.', [], 404);
+
     res.ok(null, 'Incident deleted.');
   } catch (err) { next(err); }
 };

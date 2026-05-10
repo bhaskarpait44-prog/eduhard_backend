@@ -449,7 +449,7 @@ exports.getClassResults = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.downloadClassResultSheetPdf = async (req, res, next) => {
+exports.downloadClassResultSheet = async (req, res, next) => {
   try {
     const { session_id, class_id } = req.query;
     const schoolId = req.user.school_id;
@@ -636,7 +636,7 @@ exports.calculate = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.bulkCalculateAndRelease = async (req, res, next) => {
+exports.bulkCalculate = async (req, res, next) => {
   try {
     const { session_id, class_id, calculate = true, release = true } = req.body;
 
@@ -704,7 +704,7 @@ exports.bulkCalculateAndRelease = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.releaseResult = async (req, res, next) => {
+exports.release = async (req, res, next) => {
   try {
     const { enrollment_id, release } = req.body;
 

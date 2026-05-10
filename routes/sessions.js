@@ -21,6 +21,10 @@ router.patch('/:id/activate', requireAdmin, [
   param('id').isInt().withMessage('Session id must be integer'),
 ], validate, ctrl.activate);
 
+router.patch('/:id/lock', requireAdmin, [
+  param('id').isInt().withMessage('Session id must be integer'),
+], validate, ctrl.lock);
+
 router.get('/:id/holidays',      [param('id').isInt()], validate, ctrl.getHolidays);
 
 router.post('/:id/holidays',  requireAdmin, [

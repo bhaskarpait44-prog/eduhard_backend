@@ -6,7 +6,7 @@ const ctrl = require('../controllers/expenseController');
 const { authenticate, requireRole } = require('../middlewares/auth');
 
 router.use(authenticate);
-router.use(requireRole(['admin', 'accountant']));
+router.use(requireRole('admin', 'accountant'));
 
 router.get('/', ctrl.list);
 router.get('/summary', ctrl.summary);

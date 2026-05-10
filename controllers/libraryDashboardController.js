@@ -1,7 +1,6 @@
 'use strict';
 
-const { LibraryBook, LibraryIssue, Student, User, sequelize } = require('../models');
-const { Op } = require('sequelize');
+const sequelize = require('../config/database');
 
 exports.getDashboardStats = async (req, res, next) => {
   try {
@@ -10,77 +9,44 @@ exports.getDashboardStats = async (req, res, next) => {
     startOfMonth.setDate(1);
     startOfMonth.setHours(0, 0, 0, 0);
 
-    // Using ORM for safety and stability
-    const totalBooks = await LibraryBook.count({ where: { school_id: schoolId, is_deleted: false } });
-    const totalAvailableCopies = await LibraryBook.sum('available_copies', { where: { school_id: schoolId, is_deleted: false } }) || 0;
-    const totalCurrentlyIssued = await LibraryIssue.count({ where: { school_id: schoolId, status: { [Op.ne]: 'returned' } } });
-    const totalOverdue = await LibraryIssue.count({ where: { school_id: schoolId, status: 'overdue' } });
-    const totalFineThisMonth = await LibraryIssue.sum('fine_amount', { 
-      where: { 
-        school_id: schoolId, 
-        fine_status: 'paid', 
-        updated_at: { [Op.gte]: startOfMonth } 
-      } 
-    }) || 0;
+    const [[stats]] = await sequelize.query(`
+      SELECT 
+        (SELECT COUNT(*)::int FROM library_books WHERE school_id = :schoolId AND is_deleted = false) AS total_books,
+        (SELECT COALESCE(SUM(available_copies), 0)::int FROM library_books WHERE school_id = :schoolId AND is_deleted = false) AS total_available_copies,
+        (SELECT COUNT(*)::int FROM library_issues WHERE school_id = :schoolId AND status != 'returned') AS total_currently_issued,
+        (SELECT COUNT(*)::int FROM library_issues WHERE school_id = :schoolId AND status = 'overdue') AS total_overdue,
+        (SELECT COALESCE(SUM(fine_amount), 0)::float FROM library_issues WHERE school_id = :schoolId AND fine_status = 'paid' AND updated_at >= :startOfMonth) AS total_fine_this_month
+    `, { replacements: { schoolId, startOfMonth } });
 
-    const recentIssues = await LibraryIssue.findAll({
-      where: { school_id: schoolId },
-      include: [
-        { model: LibraryBook, as: 'book', attributes: ['title'] },
-        // These associations might need to be verified in models/index.js
-      ],
-      order: [['issue_date', 'DESC']],
-      limit: 5,
-    });
+    const [recentIssues] = await sequelize.query(`
+      SELECT li.*, 
+             lb.title AS book_title,
+             CASE 
+               WHEN li.borrower_type = 'student' THEN CONCAT(s.first_name, ' ', s.last_name)
+               ELSE u.name 
+             END AS borrower_name
+      FROM library_issues li
+      JOIN library_books lb ON lb.id = li.book_id
+      LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
+      LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
+      WHERE li.school_id = :schoolId
+      ORDER BY li.issue_date DESC
+      LIMIT 5
+    `, { replacements: { schoolId } });
 
-    // Formatting for frontend expectations
-    const formattedIssues = await Promise.all(recentIssues.map(async (issue) => {
-      const plain = issue.toJSON();
-      let borrower_name = 'Unknown';
-      
-      if (issue.borrower_type === 'student') {
-        const student = await Student.findByPk(issue.borrower_id);
-        if (student) borrower_name = `${student.first_name} ${student.last_name}`;
-      } else {
-        const user = await User.findByPk(issue.borrower_id);
-        if (user) borrower_name = user.name;
-      }
-
-      return {
-        ...plain,
-        book_title: plain.book?.title || 'Unknown Book',
-        borrower_name
-      };
-    }));
-
-    // Top books - simpler aggregate for stability
-    const topBooksRaw = await LibraryIssue.findAll({
-      attributes: [
-        'book_id',
-        [sequelize.fn('COUNT', sequelize.col('LibraryIssue.id')), 'borrow_count']
-      ],
-      where: { school_id: schoolId },
-      group: ['book_id', 'book.id'],
-      order: [[sequelize.literal('borrow_count'), 'DESC']],
-      limit: 5,
-      include: [{ model: LibraryBook, as: 'book', attributes: ['title', 'author'] }]
-    });
-
-    const topBooks = topBooksRaw.map(b => ({
-      title: b.book?.title || 'Unknown',
-      author: b.book?.author || 'Unknown',
-      borrow_count: parseInt(b.getDataValue('borrow_count'))
-    }));
+    const [topBooks] = await sequelize.query(`
+      SELECT lb.title, lb.author, COUNT(li.id)::int AS borrow_count
+      FROM library_issues li
+      JOIN library_books lb ON lb.id = li.book_id
+      WHERE li.school_id = :schoolId
+      GROUP BY lb.id, lb.title, lb.author
+      ORDER BY borrow_count DESC
+      LIMIT 5
+    `, { replacements: { schoolId } });
 
     res.ok({
-      stats: {
-        total_books: totalBooks,
-        total_available_copies: parseInt(totalAvailableCopies),
-        total_currently_issued: totalCurrentlyIssued,
-        total_overdue: totalOverdue,
-        total_fine_this_month: parseFloat(totalFineThisMonth)
-      },
-      recentIssues: formattedIssues,
+      stats,
+      recentIssues,
       topBooks
     });
   } catch (err) { next(err); }

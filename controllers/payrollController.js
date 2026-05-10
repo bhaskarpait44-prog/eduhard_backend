@@ -1,7 +1,6 @@
 'use strict';
 
 const sequelize = require('../config/database');
-const { SalaryStructure, Payroll, User } = require('../models');
 
 // ── Salary Structures ────────────────────────────────────────────────────────
 
@@ -31,29 +30,48 @@ exports.updateStructure = async (req, res, next) => {
     const { basic, hra, da, allowances, deductions } = req.body;
     const schoolId = req.user.school_id;
 
-    let structure = await SalaryStructure.findOne({ where: { user_id, school_id: schoolId } });
-    
-    if (structure) {
-      structure = await structure.update({
-        basic: basic || 0,
-        hra: hra || 0,
-        da: da || 0,
-        allowances: allowances || 0,
-        deductions: deductions || 0
-      });
+    const [[existing]] = await sequelize.query(`
+      SELECT id FROM salary_structures WHERE user_id = :user_id AND school_id = :schoolId
+    `, { replacements: { user_id, schoolId } });
+
+    let structure;
+    if (existing) {
+      [structure] = await sequelize.query(`
+        UPDATE salary_structures SET
+          basic = :basic,
+          hra = :hra,
+          da = :da,
+          allowances = :allowances,
+          deductions = :deductions,
+          updated_at = NOW()
+        WHERE user_id = :user_id AND school_id = :schoolId
+        RETURNING *
+      `, { replacements: { 
+        user_id, schoolId, 
+        basic: basic || 0, 
+        hra: hra || 0, 
+        da: da || 0, 
+        allowances: allowances || 0, 
+        deductions: deductions || 0 
+      } });
     } else {
-      structure = await SalaryStructure.create({
-        school_id: schoolId,
-        user_id,
-        basic: basic || 0,
-        hra: hra || 0,
-        da: da || 0,
-        allowances: allowances || 0,
-        deductions: deductions || 0
-      });
+      [structure] = await sequelize.query(`
+        INSERT INTO salary_structures (
+          school_id, user_id, basic, hra, da, allowances, deductions, created_at, updated_at
+        ) VALUES (
+          :schoolId, :user_id, :basic, :hra, :da, :allowances, :deductions, NOW(), NOW()
+        ) RETURNING *
+      `, { replacements: { 
+        schoolId, user_id, 
+        basic: basic || 0, 
+        hra: hra || 0, 
+        da: da || 0, 
+        allowances: allowances || 0, 
+        deductions: deductions || 0 
+      } });
     }
 
-    res.ok(structure, 'Salary structure updated successfully.');
+    res.ok(structure[0], 'Salary structure updated successfully.');
   } catch (err) { next(err); }
 };
 
@@ -150,7 +168,7 @@ exports.markPaid = async (req, res, next) => {
     const { payment_mode, payment_date, remarks } = req.body;
     const schoolId = req.user.school_id;
 
-    const [[updated]] = await sequelize.query(`
+    const [result] = await sequelize.query(`
       UPDATE payrolls
       SET status = 'paid', payment_mode = :payment_mode, payment_date = :payment_date, remarks = :remarks, updated_at = NOW()
       WHERE id = :id AND school_id = :schoolId AND status = 'generated'
@@ -165,9 +183,9 @@ exports.markPaid = async (req, res, next) => {
       } 
     });
 
-    if (!updated) return res.fail('Payroll record not found or already paid.', [], 404);
+    if (result.length === 0) return res.fail('Payroll record not found or already paid.', [], 404);
 
-    res.ok(updated, 'Salary marked as paid.');
+    res.ok(result[0], 'Salary marked as paid.');
   } catch (err) { next(err); }
 };
 
