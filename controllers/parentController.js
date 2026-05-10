@@ -1,0 +1,144 @@
+'use strict';
+
+const sequelize = require('../config/database');
+
+exports.getWards = async (req, res, next) => {
+  try {
+    const parentUserId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    const [wards] = await sequelize.query(`
+      SELECT 
+        s.id, s.admission_no, s.first_name, s.last_name, sp.photo_path AS photo_url,
+        e.id AS enrollment_id, e.class_id, e.section_id, e.roll_number,
+        c.name AS class_name, sec.name AS section_name
+      FROM students s
+      JOIN families f ON f.id = s.family_id
+      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      LEFT JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      WHERE f.user_id = :parentUserId AND f.school_id = :schoolId AND s.is_deleted = false
+    `, { replacements: { parentUserId, schoolId } });
+
+    res.ok(wards);
+  } catch (err) { next(err); }
+};
+
+exports.getWardAttendance = async (req, res, next) => {
+  try {
+    const { student_id } = req.params;
+    const parentUserId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    // Verify ownership
+    const [[isValid]] = await sequelize.query(`
+      SELECT s.id 
+      FROM students s 
+      JOIN families f ON f.id = s.family_id 
+      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
+    `, { replacements: { student_id, parentUserId, schoolId } });
+
+    if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
+
+    const [attendance] = await sequelize.query(`
+      SELECT a.date, a.status 
+      FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      WHERE e.student_id = :student_id
+      ORDER BY a.date DESC
+      LIMIT 60;
+    `, { replacements: { student_id } });
+
+    res.ok(attendance);
+  } catch (err) { next(err); }
+};
+
+exports.getWardFees = async (req, res, next) => {
+  try {
+    const { student_id } = req.params;
+    const parentUserId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    // Verify ownership
+    const [[isValid]] = await sequelize.query(`
+      SELECT s.id 
+      FROM students s 
+      JOIN families f ON f.id = s.family_id 
+      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
+    `, { replacements: { student_id, parentUserId, schoolId } });
+
+    if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
+
+    const [fees] = await sequelize.query(`
+      SELECT f.*, fs.name AS fee_name
+      FROM fee_invoices f
+      JOIN enrollments e ON e.id = f.enrollment_id
+      JOIN fee_structures fs ON fs.id = f.fee_structure_id
+      WHERE e.student_id = :student_id
+      ORDER BY f.due_date DESC;
+    `, { replacements: { student_id } });
+
+    res.ok(fees);
+  } catch (err) { next(err); }
+};
+
+exports.getWardResults = async (req, res, next) => {
+  try {
+    const { student_id } = req.params;
+    const parentUserId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    // Verify ownership
+    const [[isValid]] = await sequelize.query(`
+      SELECT s.id 
+      FROM students s 
+      JOIN families f ON f.id = s.family_id 
+      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
+    `, { replacements: { student_id, parentUserId, schoolId } });
+
+    if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
+
+    const [results] = await sequelize.query(`
+      SELECT sr.*, s.name AS session_name 
+      FROM student_results sr
+      JOIN enrollments e ON e.id = sr.enrollment_id
+      JOIN sessions s ON s.id = sr.session_id
+      WHERE e.student_id = :student_id AND sr.release_result = true
+      ORDER BY s.start_date DESC;
+    `, { replacements: { student_id } });
+
+    res.ok(results);
+  } catch (err) { next(err); }
+};
+
+exports.getWardHomework = async (req, res, next) => {
+  try {
+    const { student_id } = req.params;
+    const parentUserId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    // Verify ownership
+    const [[isValid]] = await sequelize.query(`
+      SELECT s.id, e.id AS enrollment_id
+      FROM students s 
+      JOIN families f ON f.id = s.family_id 
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
+    `, { replacements: { student_id, parentUserId, schoolId } });
+
+    if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
+
+    const [homework] = await sequelize.query(`
+      SELECT h.*, s.name AS subject_name, u.name AS teacher_name
+      FROM homework h
+      JOIN subjects s ON s.id = h.subject_id
+      JOIN users u ON u.id = h.created_by
+      WHERE h.class_id = (SELECT class_id FROM enrollments WHERE id = :enrollment_id)
+        AND h.section_id = (SELECT section_id FROM enrollments WHERE id = :enrollment_id)
+      ORDER BY h.due_date DESC;
+    `, { replacements: { enrollment_id: isValid.enrollment_id } });
+
+    res.ok(homework);
+  } catch (err) { next(err); }
+};
