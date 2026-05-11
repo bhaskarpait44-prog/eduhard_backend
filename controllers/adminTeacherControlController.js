@@ -1448,3 +1448,139 @@ exports.updateRemark = async (req, res, next) => {
     res.ok({ id: Number(id) }, 'Remark updated by admin.');
   } catch (err) { next(err); }
 };
+
+exports.revokeLeave = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [[leave]] = await sequelize.query(`
+      SELECT id, status, teacher_id, leave_type, days_count
+      FROM teacher_leaves
+      WHERE id = :id;
+    `, { replacements: { id } });
+
+    if (!leave) return res.fail('Leave application not found.', [], 404);
+    if (leave.status !== 'approved') {
+      return res.fail('Only approved leave applications can be revoked.', [], 422);
+    }
+
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        UPDATE teacher_leaves
+        SET status = 'cancelled', updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id }, transaction: t });
+
+      if (leave.leave_type !== 'without_pay') {
+        await sequelize.query(`
+          UPDATE leave_balances
+          SET used = GREATEST(used - :daysCount, 0),
+              remaining = remaining + :daysCount,
+              updated_at = NOW()
+          WHERE teacher_id = :teacherId
+            AND session_id = (
+              SELECT id FROM sessions
+              WHERE school_id = :schoolId
+              ORDER BY CASE WHEN is_current=true THEN 0 ELSE 1 END,
+                       start_date DESC
+              LIMIT 1
+            )
+            AND leave_type = :leaveType;
+        `, {
+          replacements: {
+            daysCount: leave.days_count,
+            teacherId: leave.teacher_id,
+            schoolId,
+            leaveType: leave.leave_type
+          },
+          transaction: t
+        });
+      }
+
+      await audit('teacher_leaves', Number(id), {
+        field: 'status',
+        oldValue: 'approved',
+        newValue: 'cancelled',
+        reason: 'Admin revoked approved leave application',
+      }, req);
+    });
+
+    res.ok({ id: Number(id) }, 'Leave application revoked.');
+  } catch (err) { next(err); }
+};
+
+exports.getLeaveBalances = async (req, res, next) => {
+  try {
+    const schoolId = req.user.school_id;
+
+    const [balances] = await sequelize.query(`
+      SELECT
+        t.id AS teacher_id,
+        CONCAT(t.first_name, ' ', t.last_name) AS name,
+        t.employee_id,
+        JSON_AGG(
+          JSON_BUILD_OBJECT(
+            'leave_type', lb.leave_type,
+            'total_allowed', lb.total_allowed,
+            'used', lb.used,
+            'remaining', lb.remaining,
+            'session_id', lb.session_id
+          )
+        ) FILTER (WHERE lb.id IS NOT NULL) AS balances
+      FROM teachers t
+      LEFT JOIN leave_balances lb ON lb.teacher_id = t.id
+      JOIN sessions s ON s.id = lb.session_id AND s.is_current = true
+      WHERE t.school_id = :schoolId
+        AND t.is_deleted = false
+      GROUP BY t.id, t.first_name, t.last_name, t.employee_id
+      ORDER BY t.first_name ASC;
+    `, { replacements: { schoolId } });
+
+    res.ok({ balances }, 'Teacher leave balances retrieved.');
+  } catch (err) { next(err); }
+};
+
+exports.updateLeaveBalance = async (req, res, next) => {
+  try {
+    const { teacher_id } = req.params;
+    const { leave_type, total_allowed, session_id } = req.body;
+    const schoolId = req.user.school_id;
+
+    if (!leave_type || total_allowed == null || !session_id) {
+      return res.fail('leave_type, total_allowed and session_id are required.', [], 422);
+    }
+
+    const [[balance]] = await sequelize.query(`
+      SELECT id, used FROM leave_balances
+      WHERE teacher_id = :teacher_id AND leave_type = :leave_type AND session_id = :session_id;
+    `, { replacements: { teacher_id, leave_type, session_id } });
+
+    if (!balance) return res.fail('Leave balance record not found.', [], 404);
+
+    const newRemaining = Math.max(0, Number(total_allowed) - Number(balance.used));
+
+    await sequelize.query(`
+      UPDATE leave_balances
+      SET total_allowed = :total_allowed,
+          remaining = :newRemaining,
+          updated_at = NOW()
+      WHERE id = :id;
+    `, {
+      replacements: {
+        total_allowed: Number(total_allowed),
+        newRemaining,
+        id: balance.id
+      }
+    });
+
+    await audit('leave_balances', balance.id, {
+      field: 'total_allowed',
+      oldValue: null,
+      newValue: total_allowed,
+      reason: `Admin updated ${leave_type} leave balance for teacher ${teacher_id}`,
+    }, req);
+
+    res.ok({ id: balance.id }, 'Leave balance updated.');
+  } catch (err) { next(err); }
+};

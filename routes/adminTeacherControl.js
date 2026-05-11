@@ -38,4 +38,9 @@ router.patch('/correction-requests/:id/review', ctrl.reviewCorrectionRequest);
 router.get('/student-correction-requests', ctrl.studentCorrectionRequests);
 router.patch('/student-correction-requests/:id/review', ctrl.reviewStudentCorrectionRequest);
 
+// Leaves
+router.patch('/leave/:id/revoke', ctrl.revokeLeave);
+router.get('/leave/balances', ctrl.getLeaveBalances);
+router.patch('/leave/balances/:teacher_id', ctrl.updateLeaveBalance);
+
 module.exports = router;

@@ -8,7 +8,7 @@ const ctrl = require('../controllers/studentLeavingController');
 
 // ── Dashboard / Summary ──────────────────────────────────────────────────────
 router.get('/leaving-summary', requireAdminOrTeacher, [
-  query('session_id').isInt().withMessage('session_id is required')
+  query('session_id').optional().isInt()
 ], validate, ctrl.getLeavingSummary);
 
 // ── Left Students (Alumni / Leavers) ─────────────────────────────────────────
@@ -26,6 +26,13 @@ router.patch('/:id/mark-left', requireAdmin, [
   body('leaving_reason').notEmpty().withMessage('leaving_reason is required'),
   body('leaving_remarks').optional({ checkFalsy: true })
 ], validate, ctrl.markAsLeft);
+
+// Mark as Graduated
+router.patch('/:id/mark-graduated', requireAdmin, [
+  param('id').isInt(),
+  body('graduated_date').isDate().withMessage('graduated_date is required'),
+  body('remarks').optional({ checkFalsy: true })
+], validate, ctrl.markAsGraduated);
 
 // Enrollment History
 router.get('/:id/enrollment-history', requireAdminOrTeacher, [

@@ -52,6 +52,70 @@ exports.markAsLeft = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.markAsGraduated = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { graduated_date, remarks } = req.body;
+    const schoolId = req.user.school_id;
+
+    const [[student]] = await sequelize.query(`
+      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
+    if (student.status !== 'active') {
+      return res.fail(`Cannot mark as graduated. Student status is already '${student.status}'.`, [], 400);
+    }
+
+    const [[activeEnrollment]] = await sequelize.query(`
+      SELECT id FROM enrollments WHERE student_id = :id AND status = 'active'
+    `, { replacements: { id } });
+
+    if (!activeEnrollment) {
+      return res.fail('Student has no active enrollment. Cannot mark as graduated.', [], 400);
+    }
+
+    const finalDate = graduated_date || new Date().toISOString().split('T')[0];
+
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        UPDATE enrollments
+        SET status = 'inactive',
+            left_date = :finalDate,
+            leaving_type = 'graduated',
+            updated_at = NOW()
+        WHERE id = :enrollmentId;
+      `, { replacements: { enrollmentId: activeEnrollment.id, finalDate }, transaction: t });
+
+      await sequelize.query(`
+        UPDATE students
+        SET status = 'graduated',
+            left_date = :finalDate,
+            leaving_remarks = :remarks,
+            is_active = false,
+            updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id, finalDate, remarks }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('students', :id, 'status', 'active', 'graduated',
+           :changedBy, 'Student marked as graduated manually', :ip, :device, NOW())
+      `, { replacements: {
+        id,
+        changedBy: req.user.id,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
+    });
+
+    res.ok({}, 'Student marked as graduated successfully.');
+  } catch (err) { next(err); }
+};
+
 exports.getLeftStudents = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
@@ -226,30 +290,49 @@ exports.readmitStudent = async (req, res, next) => {
       SELECT id FROM enrollments WHERE student_id = :id ORDER BY joined_date DESC LIMIT 1
     `, { replacements: { id } });
 
-    await sequelize.query(`
-      INSERT INTO enrollments (
-        student_id, session_id, class_id, section_id, roll_number, 
-        joined_date, joining_type, status, previous_enrollment_id, created_at, updated_at
-      ) VALUES (
-        :id, :session_id, :class_id, :section_id, :roll_number, 
-        :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
-      )
-    `, { replacements: { 
-      id, session_id, class_id, section_id, roll_number, 
-      joined_date: joined_date || new Date().toISOString().split('T')[0],
-      prevId: lastEnrollment ? lastEnrollment.id : null
-    } });
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        INSERT INTO enrollments (
+          student_id, session_id, class_id, section_id, roll_number, 
+          joined_date, joining_type, status, previous_enrollment_id, created_at, updated_at
+        ) VALUES (
+          :id, :session_id, :class_id, :section_id, :roll_number, 
+          :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
+        )
+      `, { replacements: { 
+        id, session_id, class_id, section_id, roll_number, 
+        joined_date: joined_date || new Date().toISOString().split('T')[0],
+        prevId: lastEnrollment ? lastEnrollment.id : null
+      }, transaction: t });
 
-    await sequelize.query(`
-      UPDATE students
-      SET status = 'active',
-          left_date = null,
-          leaving_reason = null,
-          leaving_remarks = null,
-          is_active = true,
-          updated_at = NOW()
-      WHERE id = :id;
-    `, { replacements: { id } });
+      const oldStatus = student.status || 'left';
+
+      await sequelize.query(`
+        UPDATE students
+        SET status = 'active',
+            left_date = null,
+            leaving_reason = null,
+            leaving_remarks = null,
+            is_active = true,
+            updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('students', :id, 'status', :oldStatus, 'active',
+           :changedBy, 'Student re-admitted', :ip, :device, NOW())
+      `, { replacements: {
+        id,
+        oldStatus,
+        changedBy: req.user.id,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
+    });
 
     res.ok({}, 'Student re-admitted successfully.');
   } catch (err) { next(err); }

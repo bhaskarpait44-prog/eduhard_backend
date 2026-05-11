@@ -122,11 +122,19 @@ exports.getMonthlyRegister = async (req, res, next) => {
     const toDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
 
     const [rows] = await sequelize.query(`
+      WITH staff_list AS (
+        SELECT id, name, role, employee_id, school_id, is_active, is_deleted
+        FROM users
+        WHERE role IN ('admin','staff','librarian','receptionist','accountant')
+        UNION ALL
+        SELECT id, CONCAT(first_name,' ',last_name) AS name, 'teacher' AS role, employee_id, school_id, is_active, is_deleted
+        FROM teachers
+      )
       SELECT
-        u.id AS user_id,
-        u.name,
-        u.role,
-        u.employee_id,
+        sl.id AS user_id,
+        sl.name,
+        sl.role,
+        sl.employee_id,
         COALESCE(
           JSON_AGG(
             JSON_BUILD_OBJECT(
@@ -136,14 +144,13 @@ exports.getMonthlyRegister = async (req, res, next) => {
           ) FILTER (WHERE sa.id IS NOT NULL),
           '[]'::json
         ) AS records
-      FROM users u
-      LEFT JOIN staff_attendance sa ON sa.user_id = u.id AND sa.date BETWEEN :fromDate AND :toDate
-      WHERE u.school_id = :schoolId
-        AND u.is_active = true
-        AND u.is_deleted = false
-        AND u.role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant', 'teacher')
-      GROUP BY u.id, u.name, u.role, u.employee_id
-      ORDER BY u.name ASC;
+      FROM staff_list sl
+      LEFT JOIN staff_attendance sa ON sa.user_id = sl.id AND sa.date BETWEEN :fromDate AND :toDate
+      WHERE sl.school_id = :schoolId
+        AND sl.is_active = true
+        AND sl.is_deleted = false
+      GROUP BY sl.id, sl.name, sl.role, sl.employee_id
+      ORDER BY sl.name ASC;
     `, { replacements: { schoolId, fromDate, toDate } });
 
     res.ok({

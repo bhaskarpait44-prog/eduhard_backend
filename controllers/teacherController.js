@@ -3230,27 +3230,62 @@ exports.applyLeave = async (req, res, next) => {
 exports.cancelLeave = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+    const teacherId = req.user.id;
+
     const [[leave]] = await sequelize.query(`
-      SELECT id, status
+      SELECT id, status, leave_type, days_count
       FROM teacher_leaves
       WHERE id = :id AND teacher_id = :teacherId;
-    `, { replacements: { id, teacherId: req.user.id } });
+    `, { replacements: { id, teacherId } });
 
     if (!leave) return res.fail('Leave application not found.', [], 404);
-    if (leave.status !== 'pending') return res.fail('Only pending leave applications can be cancelled.', [], 422);
+    if (!['pending', 'approved'].includes(leave.status)) {
+      return res.fail('Only pending or approved leave applications can be cancelled.', [], 422);
+    }
 
-    await sequelize.query(`
-      UPDATE teacher_leaves
-      SET status = 'cancelled', updated_at = NOW()
-      WHERE id = :id;
-    `, { replacements: { id } });
+    const oldStatus = leave.status;
 
-    await audit('teacher_leaves', Number(id), {
-      field: 'status',
-      oldValue: 'pending',
-      newValue: 'cancelled',
-      reason: 'Teacher cancelled own leave application',
-    }, req);
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        UPDATE teacher_leaves
+        SET status = 'cancelled', updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id }, transaction: t });
+
+      if (oldStatus === 'approved' && leave.leave_type !== 'without_pay') {
+        await sequelize.query(`
+          UPDATE leave_balances
+          SET used = GREATEST(used - :daysCount, 0),
+              remaining = remaining + :daysCount,
+              updated_at = NOW()
+          WHERE teacher_id = :teacherId
+            AND session_id = (
+              SELECT id FROM sessions
+              WHERE school_id = :schoolId
+              ORDER BY CASE WHEN is_current=true THEN 0 ELSE 1 END,
+                       start_date DESC
+              LIMIT 1
+            )
+            AND leave_type = :leaveType;
+        `, {
+          replacements: {
+            daysCount: leave.days_count,
+            teacherId,
+            schoolId,
+            leaveType: leave.leave_type
+          },
+          transaction: t
+        });
+      }
+
+      await audit('teacher_leaves', Number(id), {
+        field: 'status',
+        oldValue: oldStatus,
+        newValue: 'cancelled',
+        reason: 'Teacher cancelled own leave application',
+      }, req);
+    });
 
     res.ok({ id: Number(id) }, 'Leave application cancelled.');
   } catch (err) { next(err); }

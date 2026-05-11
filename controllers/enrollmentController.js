@@ -466,6 +466,14 @@ exports.processPromotions = async (req, res, next) => {
         });
 
         if (!targetClass) {
+          await sequelize.query(`
+            UPDATE students
+            SET status = 'graduated',
+                is_active = false,
+                updated_at = NOW()
+            WHERE id = :studentId;
+          `, { replacements: { studentId: enrollment.student_id }, transaction: t });
+
           processed.push({
             enrollment_id: enrollment.id,
             student_id: enrollment.student_id,

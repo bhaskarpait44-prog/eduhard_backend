@@ -325,7 +325,7 @@ exports.getBulkIdCardsData = async (req, res, next) => {
 
     const [[data]] = await sequelize.query(`
       SELECT
-        s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender,
+        s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.status AS student_status,
         sp.father_name, sp.mother_name,
         e.roll_number, e.joined_date, e.left_date, e.joining_type, e.leaving_type, e.status AS enrollment_status,
         c.name AS class_name,
@@ -345,6 +345,10 @@ exports.getBulkIdCardsData = async (req, res, next) => {
     `, { replacements: { id, schoolId } });
 
     if (!data) return res.fail('Student or Enrollment record not found.', [], 404);
+
+    if (!['left', 'graduated'].includes(data.student_status)) {
+      return res.fail('Transfer Certificate is only available for students who have left or graduated.', [], 400);
+    }
 
     res.ok(data);
     } catch (err) { next(err); }
@@ -561,26 +565,44 @@ exports.resetPassword = async (req, res, next) => {
 exports.toggleStatus = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
     const [[student]] = await sequelize.query(`
-      SELECT id, is_active FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
-    `, { replacements: { id, schoolId: req.user.school_id } });
+      SELECT id, is_active, status FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
+    `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);
 
-    const newStatus = !student.is_active;
+    if (student.status !== 'active') {
+      return res.fail(`Cannot activate or deactivate a student who has ${student.status}. Use Re-admit to restore access.`, [], 400);
+    }
 
-    await auditLogger.setContext(sequelize, {
-      changedBy  : req.user.id,
-      reason     : `Student status toggled to ${newStatus ? 'active' : 'inactive'}`,
-      ipAddress  : req.ip,
-      deviceInfo : req.headers['user-agent'],
+    const newIsActive = !student.is_active;
+
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        UPDATE students SET is_active = :newIsActive, updated_at = NOW() WHERE id = :id;
+      `, { replacements: { newIsActive, id }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('students', :id, 'is_active', :oldValue, :newValue,
+           :changedBy, :reason, :ip, :device, NOW())
+      `, { replacements: {
+        id,
+        oldValue: String(student.is_active),
+        newValue: String(newIsActive),
+        changedBy: req.user.id,
+        reason: `Student account ${newIsActive ? 'activated' : 'deactivated'}`,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
     });
 
-    await sequelize.query(`
-      UPDATE students SET is_active = :newStatus, updated_at = NOW() WHERE id = :id;
-    `, { replacements: { newStatus, id } });
-
-    res.ok({ is_active: newStatus }, `Student is now ${newStatus ? 'active' : 'inactive'}.`);
+    res.ok({ is_active: newIsActive }, `Student account ${newIsActive ? 'activated' : 'deactivated'} successfully.`);
   } catch (err) { next(err); }
 };
 

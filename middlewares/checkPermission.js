@@ -48,7 +48,7 @@ async function teacherHasActiveAssignment(userId) {
 // Call this after any permission change to clear the cache for a user
 function clearPermissionCache(userId, userRole = 'user') {
   if (userId) {
-    const cacheKey = `${userRole}:${userId}`;
+    const cacheKey = `${userRole}_${userId}`;
     permCache.delete(cacheKey);
   } else {
     permCache.clear();
