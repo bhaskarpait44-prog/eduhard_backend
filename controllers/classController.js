@@ -208,7 +208,7 @@ exports.list = async (req, res, next) => {
       WHERE c.school_id = :schoolId ${hasIsDeleted ? 'AND c.is_deleted = false' : ''};
     `, { replacements: { schoolId } });
 
-    return res.ok(classes);
+    return res.ok({ classes, stats: stats[0] });
   } catch (err) { next(err); }
 };
 

@@ -360,4 +360,27 @@ router.post('/push-token',
   }
 );
 
+router.post('/refresh', async (req, res) => {
+  try {
+    const { refresh_token } = req.body;
+    if (!refresh_token) return res.fail('Invalid refresh token.', [], 401);
+
+    const decoded = jwt.verify(refresh_token, process.env.JWT_SECRET || 'secret');
+    const payload = {
+      userId: decoded.userId,
+      schoolId: decoded.schoolId,
+      role: decoded.role,
+      name: decoded.name,
+      email: decoded.email,
+      studentId: decoded.studentId
+    };
+
+    const token = jwt.sign(payload, process.env.JWT_SECRET || 'secret', { expiresIn: '24h' });
+
+    return res.ok({ token, refresh_token }, 'Token refreshed successfully.');
+  } catch (err) {
+    return res.fail('Invalid refresh token.', [], 401);
+  }
+});
+
 module.exports = router;
