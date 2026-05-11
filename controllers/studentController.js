@@ -87,6 +87,7 @@ exports.list = async (req, res, next) => {
         s.last_name,
         s.date_of_birth,
         s.gender,
+        s.status,
         s.is_active,
         s.is_deleted,
         e.id AS enrollment_id,
@@ -137,6 +138,7 @@ exports.list = async (req, res, next) => {
       last_name: student.last_name,
       date_of_birth: student.date_of_birth,
       gender: student.gender,
+      status: student.status,
       is_active: student.is_active,
       is_deleted: student.is_deleted,
       enrollment_id: student.enrollment_id || null,
@@ -233,7 +235,7 @@ exports.admit = async (req, res, next) => {
           NOW(),
           NOW()
         )
-        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender;
+        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
       `, {
         replacements: {
           schoolId,
@@ -399,7 +401,7 @@ exports.getById = async (req, res, next) => {
 
     const [[student]] = await sequelize.query(`
       SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender,
-             s.created_at,
+             s.status, s.created_at,
              sp.address, sp.city, sp.state, sp.pincode, sp.phone, sp.email,
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
              sp.blood_group, sp.medical_notes, sp.photo_path
@@ -487,7 +489,7 @@ exports.updateIdentity = async (req, res, next) => {
     const [[updated]] = await sequelize.query(`
       UPDATE students SET ${setClauses}, updated_at = NOW()
       WHERE id = :id
-      RETURNING id, admission_no, first_name, last_name, date_of_birth, gender;
+      RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
     `, { replacements: { ...updates, id } });
 
     res.ok(updated, 'Student identity updated. Audit log written.');

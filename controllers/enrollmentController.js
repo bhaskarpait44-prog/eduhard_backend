@@ -32,13 +32,14 @@ async function getNextClass(classOrder, schoolId) {
     SELECT id, name, order_number
     FROM classes
     WHERE school_id = :schoolId
-      AND order_number = :orderNumber
+      AND order_number > :orderNumber
       AND COALESCE(is_deleted, false) = false
+    ORDER BY order_number ASC
     LIMIT 1;
   `, {
     replacements: {
       schoolId,
-      orderNumber: Number(classOrder) + 1,
+      orderNumber: Number(classOrder),
     },
   });
 
