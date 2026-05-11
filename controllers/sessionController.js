@@ -56,7 +56,7 @@ exports.list = async (req, res, next) => {
       ORDER BY s.start_date DESC;
     `, { replacements: { schoolId: req.user.school_id } });
 
-    res.ok(sessions, `${sessions.length} session(s) found.`);
+    res.ok(sessions);
   } catch (err) { next(err); }
 };
 

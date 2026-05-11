@@ -1975,3 +1975,47 @@ exports.materialDetail = async (req, res, next) => {
     res.ok(material, 'Study material detail loaded.');
   } catch (err) { next(err); }
 };
+
+exports.attendanceExport = async (req, res, next) => {
+  try {
+    const context = await getStudentContext(req);
+    const [records] = await sequelize.query(`
+      SELECT date, status, override_reason
+      FROM attendance
+      WHERE enrollment_id = :enrollmentId
+      ORDER BY date DESC;
+    `, { replacements: { enrollmentId: context.enrollmentId } });
+
+    // In a real app, this would generate a PDF or CSV. 
+    // For now, we return the data which the frontend can handle or we send a message.
+    res.ok({ records }, 'Attendance data for export loaded.');
+  } catch (err) { next(err); }
+};
+
+exports.resultsExport = async (req, res, next) => {
+  try {
+    const context = await getStudentContext(req);
+    const examId = Number(req.params.examId);
+    
+    // Use existing reportCard logic for data
+    const [rows] = await sequelize.query(`
+      SELECT
+        sub.name AS subject_name,
+        er.marks_obtained,
+        er.grade,
+        er.is_pass
+      FROM subjects sub
+      JOIN exam_results er ON er.subject_id = sub.id
+      WHERE er.exam_id = :examId
+        AND er.enrollment_id = :enrollmentId
+      ORDER BY sub.name ASC;
+    `, {
+      replacements: {
+        examId,
+        enrollmentId: context.enrollmentId
+      }
+    });
+
+    res.ok({ results: rows }, 'Exam results for export loaded.');
+  } catch (err) { next(err); }
+};

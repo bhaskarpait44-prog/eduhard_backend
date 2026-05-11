@@ -38,6 +38,11 @@ router.patch('/correction-requests/:id/review', ctrl.reviewCorrectionRequest);
 router.get('/student-correction-requests', ctrl.studentCorrectionRequests);
 router.patch('/student-correction-requests/:id/review', ctrl.reviewStudentCorrectionRequest);
 
+// Notices
+router.get('/notices', ctrl.notices);
+router.post('/notices', ctrl.createNotice);
+router.patch('/notices/:id', ctrl.updateNotice);
+
 // Leaves
 router.patch('/leave/:id/revoke', ctrl.revokeLeave);
 router.get('/leave/balances', ctrl.getLeaveBalances);

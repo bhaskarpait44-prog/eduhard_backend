@@ -18,7 +18,7 @@ const Enrollment = sequelize.define('Enrollment', {
   },
   left_date              : { type: DataTypes.DATEONLY, allowNull: true },
   leaving_type: {
-    type      : DataTypes.ENUM('promoted', 'failed', 'transfer_out', 'withdrawn', 'graduated', 'expelled'),
+    type      : DataTypes.ENUM('promoted', 'failed', 'transfer_out', 'withdrawn', 'graduated', 'expelled', 'left'),
     allowNull : true,
   },
   previous_enrollment_id : { type: DataTypes.INTEGER, allowNull: true },

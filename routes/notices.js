@@ -50,7 +50,13 @@ router.delete('/teacher/:id', requireRole('teacher'), [
   param('id').isInt()
 ], validate, ctrl.deleteTeacherNotice);
 
+router.post('/teacher/:id/read', requireRole('teacher'), [
+  param('id').isInt()
+], validate, ctrl.markTeacherRead);
+
 // ── Accountant ───────────────────────────────────────────────────────────────
+router.get('/accountant', requireRole('admin', 'accountant'), ctrl.listAccountantNotices);
+
 router.post('/accountant', requireRole('admin', 'accountant'), [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),

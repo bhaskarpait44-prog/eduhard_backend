@@ -54,7 +54,7 @@ exports.createNotice = async (req, res, next) => {
     const userId = req.user.id;
 
     const [notice] = await sequelize.query(`
-      INSERT INTO teacher_notices (
+      INSERT INTO notices (
         school_id, title, body, posted_by_user_id, posted_by_role, audience, 
         target_class_id, target_section_id, target_student_id, priority, expires_at, created_at, updated_at
       ) VALUES (
@@ -99,17 +99,19 @@ exports.listAllNotices = async (req, res, next) => {
 
     const countReplacements = { ...replacements };
     const [[{ count }]] = await sequelize.query(`
-      SELECT COUNT(*)::int as count FROM teacher_notices n ${where}
+      SELECT COUNT(*)::int as count FROM notices n ${where}
     `, { replacements: countReplacements });
 
     const noticeReplacements = { ...replacements, limit: parseInt(perPage), offset };
     const [notices] = await sequelize.query(`
-      SELECT n.*, u.name as posted_by_name,
+      SELECT n.*, 
+             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
              (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
              c.name as class_name, s.name as section_name,
              CONCAT(st.first_name, ' ', st.last_name) as student_name
-      FROM teacher_notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id
+      FROM notices n
+      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
@@ -140,7 +142,7 @@ exports.updateNotice = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [result] = await sequelize.query(`
-      UPDATE teacher_notices SET
+      UPDATE notices SET
         title = COALESCE(:title, title),
         body = COALESCE(:body, body),
         priority = COALESCE(:priority, priority),
@@ -163,7 +165,7 @@ exports.deleteNotice = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [result] = await sequelize.query(`
-      UPDATE teacher_notices SET is_deleted = true, updated_at = NOW()
+      UPDATE notices SET is_deleted = true, updated_at = NOW()
       WHERE id = :id AND school_id = :schoolId AND is_deleted = false
       RETURNING id
     `, { replacements: { id, schoolId } });
@@ -206,7 +208,7 @@ exports.createTeacherNotice = async (req, res, next) => {
     }
 
     const [notice] = await sequelize.query(`
-      INSERT INTO teacher_notices (
+      INSERT INTO notices (
         school_id, title, body, posted_by_user_id, posted_by_role, audience, 
         target_class_id, target_section_id, priority, expires_at, created_at, updated_at
       ) VALUES (
@@ -242,7 +244,7 @@ exports.listTeacherNotices = async (req, res, next) => {
       SELECT n.*,
              (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
              c.name as class_name, s.name as section_name
-      FROM teacher_notices n
+      FROM notices n
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       WHERE n.posted_by_user_id = :teacherId AND n.posted_by_role = 'teacher' 
@@ -261,7 +263,7 @@ exports.updateTeacherNotice = async (req, res, next) => {
     const teacherId = req.user.id;
 
     const [result] = await sequelize.query(`
-      UPDATE teacher_notices SET
+      UPDATE notices SET
         title = COALESCE(:title, title),
         body = COALESCE(:body, body),
         priority = COALESCE(:priority, priority),
@@ -284,7 +286,7 @@ exports.deleteTeacherNotice = async (req, res, next) => {
     const teacherId = req.user.id;
 
     const [result] = await sequelize.query(`
-      UPDATE teacher_notices SET is_deleted = true, updated_at = NOW()
+      UPDATE notices SET is_deleted = true, updated_at = NOW()
       WHERE id = :id AND posted_by_user_id = :teacherId AND posted_by_role = 'teacher' AND is_deleted = false
       RETURNING id
     `, { replacements: { id, teacherId } });
@@ -307,7 +309,7 @@ exports.createAccountantNotice = async (req, res, next) => {
     }
 
     const [notice] = await sequelize.query(`
-      INSERT INTO teacher_notices (
+      INSERT INTO notices (
         school_id, title, body, posted_by_user_id, posted_by_role, audience, 
         target_class_id, priority, expires_at, created_at, updated_at
       ) VALUES (
@@ -333,6 +335,42 @@ exports.createAccountantNotice = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.listAccountantNotices = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    const [notices] = await sequelize.query(`
+      SELECT n.*,
+             (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
+             c.name as class_name
+      FROM notices n
+      LEFT JOIN classes c ON c.id = n.target_class_id
+      WHERE n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant' 
+        AND n.school_id = :schoolId AND n.is_deleted = false
+      ORDER BY n.created_at DESC
+    `, { replacements: { userId, schoolId } });
+
+    res.ok({ notices });
+  } catch (err) { next(err); }
+};
+
+exports.markTeacherRead = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    await sequelize.query(`
+      INSERT INTO notice_reads (notice_id, user_id, read_at)
+      VALUES (:noticeId, :userId, NOW())
+      ON CONFLICT (notice_id, user_id)
+      DO UPDATE SET read_at = NOW()
+    `, { replacements: { noticeId: id, userId } });
+
+    res.ok(null, 'Notice marked as read.');
+  } catch (err) { next(err); }
+};
+
 // ── Student Functions ────────────────────────────────────────────────────────
 
 exports.getStudentNotices = async (req, res, next) => {
@@ -353,11 +391,13 @@ exports.getStudentNotices = async (req, res, next) => {
     if (!student) return res.fail('Student record not found.', [], 404);
 
     const [notices] = await sequelize.query(`
-      SELECT n.*, u.name as posted_by_name,
+      SELECT n.*, 
+             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
              EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.student_id = :studentId) as is_read,
              EXISTS(SELECT 1 FROM notice_pins np WHERE np.notice_id = n.id AND np.student_id = :studentId) as is_pinned
-      FROM teacher_notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id
+      FROM notices n
+      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
       WHERE n.school_id = :schoolId 
         AND n.is_deleted = false
         AND (n.expires_at IS NULL OR n.expires_at > NOW())
@@ -388,20 +428,13 @@ exports.markRead = async (req, res, next) => {
     const { id } = req.params;
     const studentUserId = req.user.id;
 
-    // Get student ID
-    const [[student]] = await sequelize.query(`
-      SELECT id FROM students WHERE school_id = :schoolId AND id = (SELECT student_id FROM students s JOIN users u ON u.id = :studentUserId WHERE s.id = s.id LIMIT 1)
-      LIMIT 1
-    `, { replacements: { studentUserId, schoolId: req.user.school_id } });
-    
-    // Simplification for markRead/Pin/Unpin: usually student role in req.user has direct link.
-    // Let's assume we can find it via subquery.
-    
     await sequelize.query(`
       INSERT INTO notice_reads (notice_id, student_id, read_at)
       SELECT :id, s.id, NOW()
       FROM students s
-      WHERE s.id = (SELECT s2.id FROM students s2 JOIN users u ON u.id = :studentUserId LIMIT 1)
+      JOIN users u ON u.id = :studentUserId
+      WHERE s.id = s.id -- Just to keep it a join
+      LIMIT 1
       ON CONFLICT (notice_id, student_id) DO UPDATE SET read_at = NOW()
     `, { replacements: { id, studentUserId } });
 
@@ -418,7 +451,9 @@ exports.pinNotice = async (req, res, next) => {
       INSERT INTO notice_pins (notice_id, student_id, pinned_at)
       SELECT :id, s.id, NOW()
       FROM students s
-      WHERE s.id = (SELECT s2.id FROM students s2 JOIN users u ON u.id = :studentUserId LIMIT 1)
+      JOIN users u ON u.id = :studentUserId
+      WHERE s.id = s.id
+      LIMIT 1
       ON CONFLICT (notice_id, student_id) DO NOTHING
     `, { replacements: { id, studentUserId } });
 
@@ -449,12 +484,14 @@ exports.getNoticeById = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[notice]] = await sequelize.query(`
-      SELECT n.*, u.name as posted_by_name,
+      SELECT n.*, 
+             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
              (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
              c.name as class_name, s.name as section_name,
              CONCAT(st.first_name, ' ', st.last_name) as student_name
-      FROM teacher_notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id
+      FROM notices n
+      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
