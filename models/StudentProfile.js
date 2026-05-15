@@ -18,6 +18,13 @@ const StudentProfile = sequelize.define('StudentProfile', {
   mother_name       : { type: DataTypes.STRING(150), allowNull: true },
   mother_phone      : { type: DataTypes.STRING(20), allowNull: true },
   mother_email      : { type: DataTypes.STRING(150), allowNull: true },
+  parent_email                  : { type: DataTypes.STRING(150), allowNull: true },
+  parent_password_hash          : { type: DataTypes.STRING(255), allowNull: true },
+  parent_reset_password_token   : { type: DataTypes.STRING(255), allowNull: true },
+  parent_reset_password_expires : { type: DataTypes.DATE, allowNull: true },
+  parent_last_login_at          : { type: DataTypes.DATE, allowNull: true },
+  parent_failed_login_attempts  : { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
+  parent_locked_until           : { type: DataTypes.DATE, allowNull: true },
   emergency_contact : { type: DataTypes.STRING(20), allowNull: true },
   blood_group       : {
     type      : DataTypes.ENUM('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown'),
@@ -64,7 +71,7 @@ const StudentProfile = sequelize.define('StudentProfile', {
       const dataFields = [
         'address','city','state','pincode','phone','email',
         'father_name','father_phone','father_occupation',
-        'mother_name','mother_phone','mother_email',
+        'mother_name','mother_phone','mother_email','parent_email',
         'emergency_contact','blood_group','medical_notes',
         'photo_path','valid_from','student_id',
       ];

@@ -175,18 +175,33 @@ exports.list = async (req, res, next) => {
 // ── POST /api/students ────────────────────────────────────────────────────────
 exports.admit = async (req, res, next) => {
   try {
-    const { admission_no, first_name, last_name, date_of_birth, gender, profile, password } = req.body;
+    const { 
+      admission_no, first_name, last_name, date_of_birth, gender, 
+      profile, password, parent_password 
+    } = req.body;
     const schoolId = req.user.school_id;
     const studentEmail = profile?.email?.trim().toLowerCase();
+
+    // Parent details from profile
+    const parentEmail = (profile?.father_email || profile?.mother_email || profile?.email)?.trim().toLowerCase();
+    const parentName = profile?.father_name || profile?.mother_name || `${last_name} Family`;
+    const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.phone;
 
     if (!studentEmail) {
       return res.fail('Student email is required at admission.', [], 422);
     }
+    if (!parentEmail) {
+      return res.fail('Parent email is required for account creation.', [], 422);
+    }
 
     const generatedPassword = password || generateStudentPassword();
-    const passwordHash = await bcrypt.hash(generatedPassword, 12);
+    const studentHash = await bcrypt.hash(generatedPassword, 12);
+    
+    const generatedParentPassword = parent_password || generateStudentPassword();
+    const parentHash = await bcrypt.hash(generatedParentPassword, 12);
 
     const result = await sequelize.transaction(async (t) => {
+      // 1. Check Student Unique Constraints
       const [[existing]] = await sequelize.query(`
         SELECT id FROM students WHERE school_id = :schoolId AND admission_no = :admission_no LIMIT 1;
       `, { replacements: { schoolId, admission_no }, transaction: t });
@@ -206,56 +221,79 @@ exports.admit = async (req, res, next) => {
 
       if (emailInUse) throw Object.assign(new Error('Student email already exists.'), { status: 409 });
 
+      // 2. Handle Parent User Account
+      let parentUserId;
+      let parentAccountCreated = false;
+      const [[existingParentUser]] = await sequelize.query(`
+        SELECT id FROM users WHERE email = :email AND school_id = :schoolId LIMIT 1;
+      `, { replacements: { email: parentEmail, schoolId }, transaction: t });
+
+      if (existingParentUser) {
+        parentUserId = existingParentUser.id;
+      } else {
+        const [[newParent]] = await sequelize.query(`
+          INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+          VALUES (:schoolId, :name, :email, :hash, 'parent', true, NOW(), NOW())
+          RETURNING id;
+        `, {
+          replacements: { schoolId, name: parentName, email: parentEmail, hash: parentHash },
+          transaction: t
+        });
+        parentUserId = newParent.id;
+        parentAccountCreated = true;
+      }
+
+      // 3. Handle Family Record
+      let familyId;
+      const [[existingFamily]] = await sequelize.query(`
+        SELECT id FROM families WHERE user_id = :parentUserId AND school_id = :schoolId LIMIT 1;
+      `, { replacements: { parentUserId, schoolId }, transaction: t });
+
+      if (existingFamily) {
+        familyId = existingFamily.id;
+      } else {
+        const [[newFamily]] = await sequelize.query(`
+          INSERT INTO families (school_id, user_id, family_name, primary_contact, phone, email, created_at, updated_at)
+          VALUES (:schoolId, :parentUserId, :familyName, :primaryContact, :phone, :email, NOW(), NOW())
+          RETURNING id;
+        `, {
+          replacements: { 
+            schoolId, parentUserId, familyName: parentName, 
+            primaryContact: parentName, phone: parentPhone, email: parentEmail 
+          },
+          transaction: t
+        });
+        familyId = newFamily.id;
+      }
+
+      // 4. Create Student
       const [[student]] = await sequelize.query(`
         INSERT INTO students (
-          school_id,
-          admission_no,
-          first_name,
-          last_name,
-          date_of_birth,
-          gender,
-          password_hash,
-          is_active,
-          last_password_change,
-          is_deleted,
-          created_at,
-          updated_at
+          school_id, family_id, admission_no, first_name, last_name, 
+          date_of_birth, gender, password_hash, is_active, 
+          last_password_change, is_deleted, created_at, updated_at
         )
         VALUES (
-          :schoolId,
-          :admission_no,
-          :first_name,
-          :last_name,
-          :date_of_birth,
-          :gender,
-          :passwordHash,
-          true,
-          NOW(),
-          false,
-          NOW(),
-          NOW()
+          :schoolId, :familyId, :admission_no, :first_name, :last_name, 
+          :date_of_birth, :gender, :studentHash, true, 
+          NOW(), false, NOW(), NOW()
         )
         RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
       `, {
         replacements: {
-          schoolId,
-          admission_no,
-          first_name,
-          last_name,
-          date_of_birth,
-          gender,
-          passwordHash,
+          schoolId, familyId, admission_no, first_name, last_name, 
+          date_of_birth, gender, studentHash,
         },
         transaction: t,
       });
 
-      return student;
+      return { student, parentAccountCreated, generatedParentPassword, parentEmail };
     });
 
     // Create initial profile version if profile data provided
     if (profile) {
       await profileVersioning.create({
-        studentId    : result.id,
+        studentId    : result.student.id,
         data         : { ...profile, email: studentEmail },
         changedBy    : req.user.id,
         changeReason : 'Initial profile created on admission',
@@ -263,14 +301,20 @@ exports.admit = async (req, res, next) => {
     }
 
     res.ok({
-      ...result,
+      ...result.student,
       login_credentials: {
-        email: studentEmail,
-        admission_no,
-        password: generatedPassword,
-        password_auto_generated: true,
+        student: {
+          email: studentEmail,
+          admission_no,
+          password: generatedPassword,
+        },
+        parent: {
+          email: result.parentEmail,
+          password: result.generatedParentPassword,
+          is_new_account: result.parentAccountCreated
+        }
       },
-    }, 'Student admitted successfully.', 201);
+    }, 'Student admitted and parent account linked/created successfully.', 201);
   } catch (err) { next(err); }
 };
 

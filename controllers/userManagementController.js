@@ -10,7 +10,7 @@ const { DEFAULT_ROLE_PERMISSIONS } = require('../utils/permissionConstants');
 
 const ADMIN_ROLES = ['admin'];
 const MANAGEABLE_USER_ROLES = ['admin', 'teacher', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
-const USER_MANAGEMENT_ALLOWED_ROLES = ['admin', 'teacher', 'accountant', 'student'];
+const USER_MANAGEMENT_ALLOWED_ROLES = ['admin', 'teacher', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
 const USER_ROLE_ENUM_NAME = 'enum_users_role';
 
 function parseId(uid) {

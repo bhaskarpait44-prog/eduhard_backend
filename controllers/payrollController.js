@@ -8,16 +8,23 @@ exports.getStructures = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
     const [staff] = await sequelize.query(`
+      WITH staff_list AS (
+        SELECT id, name, role::text, employee_id, designation, department, school_id, is_active, is_deleted
+        FROM users
+        WHERE role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant')
+        UNION ALL
+        SELECT id, CONCAT(first_name, ' ', last_name) AS name, 'teacher' AS role, employee_id, designation, department, school_id, is_active, is_deleted
+        FROM teachers
+      )
       SELECT 
-        u.id AS user_id, u.name, u.role, u.employee_id, u.designation,
+        sl.id AS user_id, sl.name, sl.role, sl.employee_id, sl.designation,
         ss.id AS structure_id, ss.basic, ss.hra, ss.da, ss.allowances, ss.deductions
-      FROM users u
-      LEFT JOIN salary_structures ss ON ss.user_id = u.id
-      WHERE u.school_id = :schoolId
-        AND u.is_active = true
-        AND u.is_deleted = false
-        AND u.role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant', 'teacher')
-      ORDER BY u.name ASC;
+      FROM staff_list sl
+      LEFT JOIN salary_structures ss ON ss.user_id = sl.id AND ss.school_id = sl.school_id
+      WHERE sl.school_id = :schoolId
+        AND sl.is_active = true
+        AND sl.is_deleted = false
+      ORDER BY sl.name ASC;
     `, { replacements: { schoolId } });
 
     res.ok(staff);

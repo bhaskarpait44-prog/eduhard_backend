@@ -3,6 +3,35 @@
 const router = require('express').Router();
 const { requireRole } = require('../middlewares/auth');
 const ctrl = require('../controllers/adminTeacherControlController');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Ensure upload directory exists
+const uploadDir = 'uploads/notices';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed!'), false);
+    }
+  }
+});
 
 router.use(requireRole('admin'));
 
@@ -40,8 +69,8 @@ router.patch('/student-correction-requests/:id/review', ctrl.reviewStudentCorrec
 
 // Notices
 router.get('/notices', ctrl.notices);
-router.post('/notices', ctrl.createNotice);
-router.patch('/notices/:id', ctrl.updateNotice);
+router.post('/notices', upload.single('attachment'), ctrl.createNotice);
+router.patch('/notices/:id', upload.single('attachment'), ctrl.updateNotice);
 
 // Leaves
 router.patch('/leave/:id/revoke', ctrl.revokeLeave);

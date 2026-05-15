@@ -12,24 +12,31 @@ exports.getDailyAttendance = async (req, res, next) => {
     const date = req.query.date || TODAY();
 
     const [staff] = await sequelize.query(`
+      WITH staff_list AS (
+        SELECT id, name, email, role::text, employee_id, designation, department, school_id, is_active, is_deleted
+        FROM users
+        WHERE role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant')
+        UNION ALL
+        SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, employee_id, designation, department, school_id, is_active, is_deleted
+        FROM teachers
+      )
       SELECT
-        u.id AS user_id,
-        u.name,
-        u.email,
-        u.role,
-        u.employee_id,
-        u.designation,
-        u.department,
+        sl.id AS user_id,
+        sl.name,
+        sl.email,
+        sl.role,
+        sl.employee_id,
+        sl.designation,
+        sl.department,
         sa.id AS attendance_id,
         sa.status,
         sa.remarks
-      FROM users u
-      LEFT JOIN staff_attendance sa ON sa.user_id = u.id AND sa.date = :date
-      WHERE u.school_id = :schoolId
-        AND u.is_active = true
-        AND u.is_deleted = false
-        AND u.role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant', 'teacher')
-      ORDER BY u.name ASC;
+      FROM staff_list sl
+      LEFT JOIN staff_attendance sa ON sa.user_id = sl.id AND sa.date = :date
+      WHERE sl.school_id = :schoolId
+        AND sl.is_active = true
+        AND sl.is_deleted = false
+      ORDER BY sl.name ASC;
     `, { replacements: { schoolId, date } });
 
     res.ok({

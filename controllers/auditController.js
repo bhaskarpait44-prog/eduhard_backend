@@ -123,10 +123,17 @@ exports.getDetail = async (req, res, next) => {
 exports.getAdmins = async (req, res, next) => {
   try {
     const [users] = await sequelize.query(`
+      WITH admin_list AS (
+        SELECT id, name, email, role::text, school_id, is_active
+        FROM users
+        WHERE role = 'admin'
+        UNION ALL
+        SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, school_id, is_active
+        FROM teachers
+      )
       SELECT id, name, email, role
-      FROM users
+      FROM admin_list
       WHERE school_id = :schoolId
-        AND role IN ('admin', 'teacher')
         AND is_active = true
       ORDER BY name ASC;
     `, { replacements: { schoolId: req.user.school_id } });

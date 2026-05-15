@@ -709,6 +709,8 @@ exports.createNotice = async (req, res, next) => {
       }
     }
 
+    const attachmentPath = req.file ? req.file.path.replace(/\\/g, '/') : (attachment_path || null);
+
     const [[notice]] = await sequelize.query(`
       INSERT INTO teacher_notices (
         teacher_id, created_by_user_id, created_by_role,
@@ -737,7 +739,7 @@ exports.createNotice = async (req, res, next) => {
         content,
         category,
         targetScope: target_scope,
-        attachmentPath: attachment_path,
+        attachmentPath,
         publishDate: publish_date,
         expiryDate: expiry_date,
       },
@@ -788,17 +790,27 @@ exports.updateNotice = async (req, res, next) => {
     `, { replacements: { id } });
     if (!notice) return res.fail('Notice not found.', [], 404);
 
+    const attachmentPath = req.file ? req.file.path.replace(/\\/g, '/') : undefined;
+
     await sequelize.query(`
       UPDATE teacher_notices
-      SET is_active = COALESCE(:isActive, is_active),
-          expiry_date = COALESCE(:expiryDate, expiry_date),
+      SET title = COALESCE(:title, title),
+          content = COALESCE(:content, content),
+          category = COALESCE(:category, category),
+          attachment_path = COALESCE(:attachmentPath, attachment_path),
+          is_active = COALESCE(:isActive, is_active),
+          expiry_date = :expiryDate,
           updated_at = NOW()
       WHERE id = :id;
     `, {
       replacements: {
         id,
+        title: req.body.title,
+        content: req.body.content,
+        category: req.body.category,
+        attachmentPath: attachmentPath,
         isActive: req.body.is_active,
-        expiryDate: req.body.expiry_date,
+        expiryDate: req.body.expiry_date || null,
       },
     });
 

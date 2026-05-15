@@ -25,7 +25,7 @@ router.post('/forgot-password',
     try {
       const email = String(req.body.email || '').trim().toLowerCase();
       
-      // Check users, students, and teachers
+      // Check users, students, teachers, and parents
       const [[user]] = await sequelize.query(`
         SELECT id, 'user' as type, name, email FROM users WHERE LOWER(email) = :email AND is_deleted = false
         UNION
@@ -35,6 +35,11 @@ router.post('/forgot-password',
         WHERE LOWER(sp.email) = :email AND s.is_deleted = false
         UNION
         SELECT id, 'teacher' as type, CONCAT(first_name, ' ', last_name) as name, email FROM teachers WHERE LOWER(email) = :email AND is_deleted = false
+        UNION
+        SELECT sp.id, 'parent' as type, COALESCE(sp.father_name, sp.mother_name, 'Parent') as name, sp.parent_email as email
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE LOWER(sp.parent_email) = :email AND sp.is_current = true AND s.is_deleted = false
         LIMIT 1;
       `, { replacements: { email } });
 
@@ -44,13 +49,22 @@ router.post('/forgot-password',
       const token = crypto.randomBytes(32).toString('hex');
       const expires = new Date(Date.now() + RESET_TOKEN_EXPIRY);
 
-      const table = user.type === 'user' ? 'users' : (user.type === 'student' ? 'students' : 'teachers');
-      await sequelize.query(`
-        UPDATE ${table}
-        SET reset_password_token = :token,
-            reset_password_expires = :expires
-        WHERE id = :id;
-      `, { replacements: { token, expires, id: user.id } });
+      if (user.type === 'parent') {
+        await sequelize.query(`
+          UPDATE student_profiles
+          SET parent_reset_password_token = :token,
+              parent_reset_password_expires = :expires
+          WHERE id = :id;
+        `, { replacements: { token, expires, id: user.id } });
+      } else {
+        const table = user.type === 'user' ? 'users' : (user.type === 'student' ? 'students' : 'teachers');
+        await sequelize.query(`
+          UPDATE ${table}
+          SET reset_password_token = :token,
+              reset_password_expires = :expires
+          WHERE id = :id;
+        `, { replacements: { token, expires, id: user.id } });
+      }
 
       const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${token}&email=${email}`;
 
@@ -79,7 +93,7 @@ router.post('/reset-password',
       const { token, password } = req.body;
       const email = String(req.body.email || '').trim().toLowerCase();
 
-      // Check users, students, and teachers
+      // Check users, students, teachers, and parents
       const [[user]] = await sequelize.query(`
         SELECT id, 'user' as type FROM users 
         WHERE LOWER(email) = :email AND reset_password_token = :token AND reset_password_expires > NOW() AND is_deleted = false
@@ -91,25 +105,42 @@ router.post('/reset-password',
         UNION
         SELECT id, 'teacher' as type FROM teachers
         WHERE LOWER(email) = :email AND reset_password_token = :token AND reset_password_expires > NOW() AND is_deleted = false
+        UNION
+        SELECT sp.id, 'parent' as type
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE LOWER(sp.parent_email) = :email AND sp.parent_reset_password_token = :token AND sp.parent_reset_password_expires > NOW() AND s.is_deleted = false
         LIMIT 1;
       `, { replacements: { email, token } });
 
       if (!user) return res.fail('Invalid or expired reset token.', [], 400);
 
       const hash = await bcrypt.hash(password, 12);
-      const table = user.type === 'user' ? 'users' : (user.type === 'student' ? 'students' : 'teachers');
 
-      await sequelize.query(`
-        UPDATE ${table}
-        SET password_hash = :hash,
-            reset_password_token = NULL,
-            reset_password_expires = NULL,
-            failed_login_attempts = 0,
-            locked_until = NULL,
-            force_password_change = false,
-            updated_at = NOW()
-        WHERE id = :id;
-      `, { replacements: { hash, id: user.id } });
+      if (user.type === 'parent') {
+        await sequelize.query(`
+          UPDATE student_profiles
+          SET parent_password_hash = :hash,
+              parent_reset_password_token = NULL,
+              parent_reset_password_expires = NULL,
+              parent_last_login_at = NULL
+          WHERE id = :id;
+        `, { replacements: { hash, id: user.id } });
+      } else {
+        const table = user.type === 'user' ? 'users' : (user.type === 'student' ? 'students' : 'teachers');
+
+        await sequelize.query(`
+          UPDATE ${table}
+          SET password_hash = :hash,
+              reset_password_token = NULL,
+              reset_password_expires = NULL,
+              failed_login_attempts = 0,
+              locked_until = NULL,
+              force_password_change = false,
+              updated_at = NOW()
+          WHERE id = :id;
+        `, { replacements: { hash, id: user.id } });
+      }
 
       return res.ok({}, 'Password has been reset successfully. You can now log in with your new password.');
     } catch (err) { next(err); }
@@ -232,6 +263,12 @@ router.post('/login',
                failed_login_attempts, locked_until, 'teacher' as table_name
         FROM teachers
         WHERE LOWER(email) = :email AND is_deleted = false
+        UNION
+        SELECT sp.id, s.school_id, COALESCE(sp.father_name, sp.mother_name, 'Parent') as name, sp.parent_email as email, sp.parent_password_hash as password_hash, 'parent' as role, s.is_active, false as force_password_change, 
+               sp.parent_failed_login_attempts as failed_login_attempts, sp.parent_locked_until as locked_until, 'student_profile' as table_name
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE LOWER(sp.parent_email) = :email AND sp.is_current = true AND s.is_deleted = false
         LIMIT 1;
       `, { replacements: { email } });
 
@@ -255,12 +292,21 @@ router.post('/login',
           lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
         }
 
-        await sequelize.query(`
-          UPDATE ${user.table_name}s
-          SET failed_login_attempts = :failedAttempts,
-              locked_until = :lockedUntil
-          WHERE id = :id;
-        `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+        if (user.table_name === 'student_profile') {
+          await sequelize.query(`
+            UPDATE student_profiles
+            SET parent_failed_login_attempts = :failedAttempts,
+                parent_locked_until = :lockedUntil
+            WHERE id = :id;
+          `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+        } else {
+          await sequelize.query(`
+            UPDATE ${user.table_name}s
+            SET failed_login_attempts = :failedAttempts,
+                locked_until = :lockedUntil
+            WHERE id = :id;
+          `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+        }
 
         if (lockedUntil) {
           return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
@@ -272,13 +318,23 @@ router.post('/login',
       const permissions = Array.from(await loadUserPermissions(user.id, normalizedRole));
 
       // Reset failed attempts on success
-      await sequelize.query(`
-        UPDATE ${user.table_name}s
-        SET last_login_at = NOW(),
-            failed_login_attempts = 0,
-            locked_until = NULL
-        WHERE id = :id;
-      `, { replacements: { id: user.id } });
+      if (user.table_name === 'student_profile') {
+        await sequelize.query(`
+          UPDATE student_profiles
+          SET parent_last_login_at = NOW(),
+              parent_failed_login_attempts = 0,
+              parent_locked_until = NULL
+          WHERE id = :id;
+        `, { replacements: { id: user.id } });
+      } else {
+        await sequelize.query(`
+          UPDATE ${user.table_name}s
+          SET last_login_at = NOW(),
+              failed_login_attempts = 0,
+              locked_until = NULL
+          WHERE id = :id;
+        `, { replacements: { id: user.id } });
+      }
 
       const token = jwt.sign(
         { 

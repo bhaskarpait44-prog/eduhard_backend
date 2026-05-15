@@ -2,15 +2,17 @@
 const router = require('express').Router();
 const { authenticate }   = require('../middlewares/auth');
 const { requirePermission } = require('../middlewares/checkPermission');
+const validate = require('../middlewares/validate');
+const { createUserValidator, updateUserValidator } = require('../validators/userManagementValidators');
 const ctrl = require('../controllers/userManagementController');
 
 // All routes already have authenticate from app.js mount
 // Apply granular permission checks per action:
 
 router.get   ('/',                    requirePermission('users.view'),        ctrl.list);
-router.post  ('/',                    requirePermission('users.create'),       ctrl.create);
+router.post  ('/',                    requirePermission('users.create'),      createUserValidator, validate, ctrl.create);
 router.get   ('/:id',                 requirePermission('users.view'),        ctrl.getById);
-router.patch ('/:id',                 requirePermission('users.edit'),        ctrl.update);
+router.patch ('/:id',                 requirePermission('users.edit'),        updateUserValidator, validate, ctrl.update);
 router.delete('/:id',                 requirePermission('users.delete'),      ctrl.remove);
 router.patch ('/:id/status',          requirePermission('users.edit'),        ctrl.toggleStatus);
 router.patch ('/:id/permissions',     requirePermission('users.permissions'), ctrl.updatePermissions);

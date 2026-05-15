@@ -123,6 +123,35 @@ const authenticate = async (req, res, next) => {
       return next();
     }
 
+    if (decoded.role === 'parent') {
+      const [[profile]] = await sequelize.query(`
+        SELECT sp.id, s.school_id, COALESCE(sp.father_name, sp.mother_name, 'Parent') as name, sp.parent_email as email
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE sp.id = :id AND s.is_deleted = false AND sp.is_current = true
+        LIMIT 1;
+      `, { replacements: { id: decoded.userId } });
+
+      if (!profile) {
+        return res.status(401).json({
+          success: false,
+          data: null,
+          message: 'Parent account not found.',
+          errors: ['Authentication failed'],
+        });
+      }
+
+      req.user = {
+        id: profile.id,
+        school_id: profile.school_id,
+        name: profile.name,
+        email: profile.email,
+        role: 'parent',
+        is_active: true,
+      };
+      return next();
+    }
+
     const [[user]] = await sequelize.query(`
       SELECT id, school_id, name, email, role, is_active
       FROM users

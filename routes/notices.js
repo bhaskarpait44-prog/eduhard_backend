@@ -5,6 +5,35 @@ const { authenticate, requireRole } = require('../middlewares/auth');
 const ctrl = require('../controllers/noticeController');
 const { param, body, query } = require('express-validator');
 const validate = require('../middlewares/validate');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Ensure upload directory exists
+const uploadDir = 'uploads/notices';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed!'), false);
+    }
+  }
+});
 
 router.use(authenticate);
 
@@ -14,16 +43,15 @@ router.get('/admin', requireRole('admin'), [
   query('perPage').optional().isInt()
 ], validate, ctrl.listAllNotices);
 
-router.post('/admin', requireRole('admin'), [
+router.post('/admin', requireRole('admin'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),
-  body('audience').isIn(['school_wide', 'class', 'section', 'student']).withMessage('Invalid audience'),
+  body('audience').notEmpty().withMessage('Audience is required'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
 
-router.patch('/admin/:id', requireRole('admin'), [
+router.patch('/admin/:id', requireRole('admin'), upload.single('attachment'), [
   param('id').isInt(),
-  body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.updateNotice);
 
 router.delete('/admin/:id', requireRole('admin'), [
@@ -33,42 +61,42 @@ router.delete('/admin/:id', requireRole('admin'), [
 // ── Teacher ──────────────────────────────────────────────────────────────────
 router.get('/teacher', requireRole('teacher'), ctrl.listTeacherNotices);
 
-router.post('/teacher', requireRole('teacher'), [
+router.post('/teacher', requireRole('teacher'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),
-  body('audience').isIn(['class', 'section']).withMessage('Teachers can only post to class or section'),
-  body('target_class_id').notEmpty().isInt(),
+  body('audience').isIn(['class', 'section', 'student', 'subject_wise']).withMessage('Invalid teacher audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
-], validate, ctrl.createTeacherNotice);
+], validate, ctrl.createNotice);
 
-router.patch('/teacher/:id', requireRole('teacher'), [
+router.patch('/teacher/:id', requireRole('teacher'), upload.single('attachment'), [
   param('id').isInt(),
-  body('priority').optional().isIn(['normal', 'urgent', 'info']),
-], validate, ctrl.updateTeacherNotice);
+], validate, ctrl.updateNotice);
 
 router.delete('/teacher/:id', requireRole('teacher'), [
   param('id').isInt()
-], validate, ctrl.deleteTeacherNotice);
-
-router.post('/teacher/:id/read', requireRole('teacher'), [
-  param('id').isInt()
-], validate, ctrl.markTeacherRead);
+], validate, ctrl.deleteNotice);
 
 // ── Accountant ───────────────────────────────────────────────────────────────
 router.get('/accountant', requireRole('admin', 'accountant'), ctrl.listAccountantNotices);
+router.get('/accountant-portal', requireRole('admin', 'accountant'), ctrl.listAccountantPortalNotices);
+router.post('/accountant-portal/:id/read', requireRole('admin', 'accountant'), [param('id').isInt()], validate, ctrl.markTeacherRead);
 
-router.post('/accountant', requireRole('admin', 'accountant'), [
+router.post('/accountant', requireRole('admin', 'accountant'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),
-  body('audience').isIn(['school_wide', 'class']).withMessage('Accountants can only post school-wide or class-level notices'),
+  body('audience').isIn(['school_wide', 'class', 'student', 'parents']).withMessage('Invalid accountant audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
-], validate, ctrl.createAccountantNotice);
+], validate, ctrl.createNotice);
 
 // ── Student Portal ───────────────────────────────────────────────────────────
-router.get('/student', ctrl.getStudentNotices);
-router.post('/student/:id/read', [param('id').isInt()], validate, ctrl.markRead);
-router.post('/student/:id/pin', [param('id').isInt()], validate, ctrl.pinNotice);
-router.delete('/student/:id/pin', [param('id').isInt()], validate, ctrl.unpinNotice);
+router.get('/student', requireRole('student'), ctrl.getStudentNotices);
+router.post('/student/:id/read', requireRole('student'), [param('id').isInt()], validate, ctrl.markRead);
+router.post('/student/:id/pin', requireRole('student'), [param('id').isInt()], validate, ctrl.pinNotice);
+router.delete('/student/:id/pin', requireRole('student'), [param('id').isInt()], validate, ctrl.unpinNotice);
+
+// ── Parent Portal ────────────────────────────────────────────────────────────
+router.get('/parent', requireRole('parent'), ctrl.getParentNotices);
+router.post('/parent/:id/read', requireRole('parent'), [param('id').isInt()], validate, ctrl.markParentRead);
 
 // ── Shared ───────────────────────────────────────────────────────────────────
 router.get('/:id', [param('id').isInt()], validate, ctrl.getNoticeById);

@@ -4,7 +4,7 @@ const sequelize = require('../config/database');
 
 exports.getWards = async (req, res, next) => {
   try {
-    const parentUserId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     const [wards] = await sequelize.query(`
@@ -13,13 +13,12 @@ exports.getWards = async (req, res, next) => {
         e.id AS enrollment_id, e.class_id, e.section_id, e.roll_number,
         c.name AS class_name, sec.name AS section_name
       FROM students s
-      JOIN families f ON f.id = s.family_id
-      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
       LEFT JOIN classes c ON c.id = e.class_id
       LEFT JOIN sections sec ON sec.id = e.section_id
-      WHERE f.user_id = :parentUserId AND f.school_id = :schoolId AND s.is_deleted = false
-    `, { replacements: { parentUserId, schoolId } });
+      WHERE LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId AND s.is_deleted = false
+    `, { replacements: { parentEmail, schoolId } });
 
     res.ok(wards);
   } catch (err) { next(err); }
@@ -28,16 +27,16 @@ exports.getWards = async (req, res, next) => {
 exports.getWardAttendance = async (req, res, next) => {
   try {
     const { student_id } = req.params;
-    const parentUserId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     // Verify ownership
     const [[isValid]] = await sequelize.query(`
       SELECT s.id 
       FROM students s 
-      JOIN families f ON f.id = s.family_id 
-      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
-    `, { replacements: { student_id, parentUserId, schoolId } });
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+    `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
 
@@ -57,16 +56,16 @@ exports.getWardAttendance = async (req, res, next) => {
 exports.getWardFees = async (req, res, next) => {
   try {
     const { student_id } = req.params;
-    const parentUserId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     // Verify ownership
     const [[isValid]] = await sequelize.query(`
       SELECT s.id 
       FROM students s 
-      JOIN families f ON f.id = s.family_id 
-      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
-    `, { replacements: { student_id, parentUserId, schoolId } });
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+    `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
 
@@ -86,16 +85,16 @@ exports.getWardFees = async (req, res, next) => {
 exports.getWardResults = async (req, res, next) => {
   try {
     const { student_id } = req.params;
-    const parentUserId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     // Verify ownership
     const [[isValid]] = await sequelize.query(`
       SELECT s.id 
       FROM students s 
-      JOIN families f ON f.id = s.family_id 
-      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
-    `, { replacements: { student_id, parentUserId, schoolId } });
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+    `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
 
@@ -115,17 +114,17 @@ exports.getWardResults = async (req, res, next) => {
 exports.getWardHomework = async (req, res, next) => {
   try {
     const { student_id } = req.params;
-    const parentUserId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     // Verify ownership
     const [[isValid]] = await sequelize.query(`
       SELECT s.id, e.id AS enrollment_id
       FROM students s 
-      JOIN families f ON f.id = s.family_id 
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
-      WHERE s.id = :student_id AND f.user_id = :parentUserId AND f.school_id = :schoolId
-    `, { replacements: { student_id, parentUserId, schoolId } });
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+    `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
 
