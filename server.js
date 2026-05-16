@@ -23,6 +23,26 @@ async function boot() {
 
     await sequelize.authenticate();
     
+    // ONE-TIME FIX: Add missing columns and ENUMs to notices table
+    try {
+      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'teachers'");
+      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'parents'");
+      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'accountants'");
+      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'specific_teacher'");
+      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'subject_wise'");
+      
+      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'super_admin'");
+      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'accountant'");
+      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'staff'");
+      
+      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_teacher_id INTEGER');
+      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_subject_id INTEGER');
+      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS is_school_wide BOOLEAN DEFAULT FALSE');
+      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS attachment_path VARCHAR(500)');
+    } catch (e) {
+      logger.error('Failed to apply schema fixes for notices table:', e.message);
+    }
+    
     // Pre-warm Puppeteer browser for fast PDF generation
     await initBrowser();
 

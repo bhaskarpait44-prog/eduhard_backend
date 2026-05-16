@@ -2,6 +2,7 @@
 
 const sequelize = require('../config/database');
 const { sendPushToStudents } = require('../utils/pushNotifier');
+const { Notice } = require('../models');
 
 /**
  * Helper to resolve audience to student IDs for push notifications
@@ -52,7 +53,7 @@ function fireNoticePush(notice, studentIds) {
 exports.createNotice = async (req, res, next) => {
   try {
     let { 
-      title, body, content, audience, target_scope, is_school_wide = false,
+      title, body, content, audience, target_scope, is_school_wide,
       target_class_id, class_id, target_section_id, section_id, 
       target_student_id, target_teacher_id, target_subject_id, subject_id,
       priority = 'normal', expires_at, expiry_date 
@@ -77,11 +78,22 @@ exports.createNotice = async (req, res, next) => {
     if (audience === 'all_teachers') audience = 'teachers';
     
     const schoolId = req.user.school_id;
+    if (!schoolId) {
+       return res.fail('School ID is missing from your profile. Please contact support.', [], 400);
+    }
     const userId = req.user.id;
-    const role = req.user.role;
-    const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
+    let role = req.user.role;
+    
+    // Final safety check for roles allowed in DB ENUM
+    if (role === 'super_admin') role = 'admin';
+    if (!['admin', 'teacher', 'accountant', 'staff'].includes(role)) {
+       if (req.user.role.includes('admin')) role = 'admin';
+    }
 
-    const [notice] = await sequelize.query(`
+    const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
+    const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || audience === 'school_wide';
+
+    const [result] = await sequelize.query(`
       INSERT INTO notices (
         school_id, title, body, posted_by_user_id, posted_by_role, audience, is_school_wide,
         target_class_id, target_section_id, target_student_id, target_teacher_id, target_subject_id,
@@ -93,42 +105,69 @@ exports.createNotice = async (req, res, next) => {
       ) RETURNING *
     `, {
       replacements: {
-        schoolId, title, body, userId, role, audience, 
-        is_school_wide: !!is_school_wide || audience === 'school_wide',
-        target_class_id: target_class_id || null,
-        target_section_id: target_section_id || null,
-        target_student_id: target_student_id || null,
-        target_teacher_id: target_teacher_id || null,
-        target_subject_id: target_subject_id || null,
-        priority,
+        schoolId, title, body: body || ' ', userId, role, audience,
+        is_school_wide: !!isSchoolWide,
+        target_class_id: parseInt(target_class_id) || null,
+        target_section_id: parseInt(target_section_id) || null,
+        target_student_id: parseInt(target_student_id) || null,
+        target_teacher_id: parseInt(target_teacher_id) || null,
+        target_subject_id: parseInt(target_subject_id) || null,
+        priority: ['normal', 'urgent', 'info'].includes(priority) ? priority : 'normal',
         expires_at: expires_at || null,
         attachment_path
       }
     });
 
-    const createdNotice = notice[0];
+    const createdNotice = result[0];
     res.ok(createdNotice, 'Notice posted successfully.', 201);
 
+    // Push notifications in background
     if (['school_wide', 'class', 'section', 'student', 'parents'].includes(audience)) {
-      const studentIds = await getTargetStudentIds(schoolId, audience, { target_class_id, target_section_id, target_student_id });
-      fireNoticePush(createdNotice, studentIds);
+      getTargetStudentIds(schoolId, audience, { 
+        target_class_id: parseInt(target_class_id) || null, 
+        target_section_id: parseInt(target_section_id) || null, 
+        target_student_id: parseInt(target_student_id) || null 
+      }).then(studentIds => {
+        fireNoticePush(createdNotice, studentIds);
+      }).catch(err => console.error('[createNotice] Push error:', err));
     }
-  } catch (err) { next(err); }
+  } catch (err) { 
+    try {
+      require('fs').appendFileSync('notice_error.log', `[${new Date().toISOString()}] ${err.message}\n${err.stack}\n\n`);
+    } catch (e) {}
+    next(err); 
+  }
 };
 
 exports.listAllNotices = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const { audience, class_id, section_id, priority, page = 1, perPage = 20 } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(perPage);
+    let { audience, class_id, section_id, priority, page, perPage } = req.query;
+    
+    // Robust pagination
+    const p = Math.max(1, parseInt(page) || 1);
+    const pp = Math.max(1, Math.min(100, parseInt(perPage) || 20));
+    const offset = (p - 1) * pp;
 
     let where = 'WHERE n.school_id = :schoolId AND n.is_deleted = false';
     const replacements = { schoolId };
 
-    if (audience) { where += ' AND n.audience = :audience'; replacements.audience = audience; }
-    if (class_id) { where += ' AND n.target_class_id = :class_id'; replacements.class_id = class_id; }
-    if (section_id) { where += ' AND n.target_section_id = :section_id'; replacements.section_id = section_id; }
-    if (priority) { where += ' AND n.priority = :priority'; replacements.priority = priority; }
+    if (audience) { 
+      where += ' AND n.audience = :audience'; 
+      replacements.audience = audience; 
+    }
+    if (class_id && !isNaN(Number(class_id))) { 
+      where += ' AND n.target_class_id = :class_id'; 
+      replacements.class_id = Number(class_id); 
+    }
+    if (section_id && !isNaN(Number(section_id))) { 
+      where += ' AND n.target_section_id = :section_id'; 
+      replacements.section_id = Number(section_id); 
+    }
+    if (priority) { 
+      where += ' AND n.priority = :priority'; 
+      replacements.priority = priority; 
+    }
 
     const [[{ count }]] = await sequelize.query(`SELECT COUNT(*)::int FROM notices n ${where}`, { replacements });
 
@@ -147,9 +186,9 @@ exports.listAllNotices = async (req, res, next) => {
       ${where}
       ORDER BY n.created_at DESC
       LIMIT :limit OFFSET :offset
-    `, { replacements: { ...replacements, limit: parseInt(perPage), offset } });
+    `, { replacements: { ...replacements, limit: pp, offset } });
 
-    res.ok({ notices, pagination: { total: count, page: parseInt(page), perPage: parseInt(perPage) } });
+    res.ok({ notices, pagination: { total: count, page: p, perPage: pp } });
   } catch (err) { next(err); }
 };
 
@@ -160,24 +199,21 @@ exports.updateNotice = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : undefined;
 
-    const [result] = await sequelize.query(`
-      UPDATE notices SET
-        title = COALESCE(:title, title),
-        body = COALESCE(:body, body),
-        priority = COALESCE(:priority, priority),
-        expires_at = :expires_at,
-        attachment_path = COALESCE(:attachment_path, attachment_path),
-        updated_at = NOW()
-      WHERE id = :id AND school_id = :schoolId AND is_deleted = false
-      RETURNING *
-    `, { replacements: { 
-      id, schoolId, title, body, priority, 
-      expires_at: expires_at || null,
-      attachment_path: attachment_path || null
-    } });
+    const notice = await Notice.findOne({
+      where: { id, school_id: schoolId, is_deleted: false }
+    });
 
-    if (result.length === 0) return res.fail('Notice not found.', [], 404);
-    res.ok(result[0], 'Notice updated successfully.');
+    if (!notice) return res.fail('Notice not found.', [], 404);
+
+    const updateData = {};
+    if (title !== undefined) updateData.title = title;
+    if (body !== undefined) updateData.body = body;
+    if (priority !== undefined) updateData.priority = priority;
+    if (expires_at !== undefined) updateData.expires_at = expires_at || null;
+    if (attachment_path !== undefined) updateData.attachment_path = attachment_path;
+
+    await notice.update(updateData);
+    res.ok(notice, 'Notice updated successfully.');
   } catch (err) { next(err); }
 };
 

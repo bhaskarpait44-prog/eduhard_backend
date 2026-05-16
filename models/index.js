@@ -47,6 +47,8 @@ const Feedback             = require('./Feedback');
 const LibraryBook          = require('./LibraryBook');
 const LibraryIssue         = require('./LibraryIssue');
 const LibrarySetting       = require('./LibrarySetting');
+const Notice               = require('./Notice');
+
 
 // ── Associations ────────────────────────────────────────────────────────────
 
@@ -250,6 +252,17 @@ StudentDocument.belongsTo(User, { foreignKey: 'uploaded_by', as: 'uploader' });
 StudyMaterial.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 Teacher.hasMany(StudyMaterial, { foreignKey: 'teacher_id', as: 'studyMaterials' });
 
+// Notices
+School.hasMany(Notice, { foreignKey: 'school_id', as: 'notices' });
+Notice.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+
+Notice.belongsTo(User, { foreignKey: 'posted_by_user_id', as: 'poster' });
+Notice.belongsTo(Class, { foreignKey: 'target_class_id', as: 'targetClass' });
+Notice.belongsTo(Section, { foreignKey: 'target_section_id', as: 'targetSection' });
+Notice.belongsTo(Student, { foreignKey: 'target_student_id', as: 'targetStudent' });
+Notice.belongsTo(Teacher, { foreignKey: 'target_teacher_id', as: 'targetTeacher' });
+Notice.belongsTo(Subject, { foreignKey: 'target_subject_id', as: 'targetSubject' });
+
 // AuditLog has no Sequelize association — queried by table_name + record_id directly
 
 const db = {
@@ -280,6 +293,7 @@ const db = {
   StudentResult,
   StudyMaterial,
   MaterialView,
+  Notice,
   NoticePin,
   StudentAchievement,
   StudentDocument,

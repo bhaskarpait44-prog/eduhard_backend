@@ -10,7 +10,7 @@ const path = require('path');
 const fs = require('fs');
 
 // Ensure upload directory exists
-const uploadDir = 'uploads/notices';
+const uploadDir = path.join(__dirname, '../uploads/notices');
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -43,7 +43,17 @@ router.get('/admin', requireRole('admin'), [
   query('perPage').optional().isInt()
 ], validate, ctrl.listAllNotices);
 
-router.post('/admin', requireRole('admin'), upload.single('attachment'), [
+const adminUpload = upload.single('attachment');
+router.post('/admin', requireRole('admin'), (req, res, next) => {
+  adminUpload(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ success: false, message: `Upload error: ${err.message}`, data: null, errors: [err.code] });
+    } else if (err) {
+      return res.status(err.status || 500).json({ success: false, message: err.message || 'File upload failed', data: null, errors: [err.stack].filter(Boolean) });
+    }
+    next();
+  });
+}, [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),
   body('audience').notEmpty().withMessage('Audience is required'),

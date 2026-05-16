@@ -8,7 +8,7 @@ const Notice = sequelize.define('Notice', {
   title: { type: DataTypes.STRING(255), allowNull: false },
   body: { type: DataTypes.TEXT, allowNull: false },
   posted_by_user_id: { type: DataTypes.INTEGER, allowNull: true },
-  posted_by_role: { type: DataTypes.ENUM('admin', 'teacher', 'accountant'), allowNull: false },
+  posted_by_role: { type: DataTypes.ENUM('super_admin', 'admin', 'teacher', 'accountant', 'staff'), allowNull: false },
   audience: { 
     type: DataTypes.ENUM(
       'school_wide', 'class', 'section', 'student', 

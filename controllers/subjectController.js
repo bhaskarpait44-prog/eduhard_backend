@@ -128,6 +128,8 @@ async function ensureClass(req, classId) {
 exports.list = async (req, res, next) => {
   try {
     const classId = Number(req.params.classId);
+    if (isNaN(classId)) return res.fail('Invalid Class ID.', [], 400);
+
     const cls = await ensureClass(req, classId);
     if (!cls) return res.fail('Class not found.', [], 404);
 
@@ -144,6 +146,7 @@ exports.getById = async (req, res, next) => {
   try {
     const classId = Number(req.params.classId);
     const id = Number(req.params.id);
+    if (isNaN(classId) || isNaN(id)) return res.fail('Invalid IDs.', [], 400);
 
     const cls = await ensureClass(req, classId);
     if (!cls) return res.fail('Class not found.', [], 404);
