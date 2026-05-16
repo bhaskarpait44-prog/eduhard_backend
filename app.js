@@ -124,6 +124,8 @@ app.use('/api/audit',
   require('./routes/audit')
 );
 
+app.use('/api/visitors', require('./routes/visitors'));
+
 app.use('/api/notices', require('./routes/notices'));
 
 // Missing or regrouped routes as requested in PART 1

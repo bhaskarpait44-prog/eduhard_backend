@@ -91,6 +91,10 @@ router.get('/accountant', requireRole('admin', 'accountant'), ctrl.listAccountan
 router.get('/accountant-portal', requireRole('admin', 'accountant'), ctrl.listAccountantPortalNotices);
 router.post('/accountant-portal/:id/read', requireRole('admin', 'accountant'), [param('id').isInt()], validate, ctrl.markTeacherRead);
 
+// ── Receptionist ─────────────────────────────────────────────────────────────
+router.get('/receptionist', requireRole('receptionist', 'admin'), ctrl.listReceptionistNotices);
+router.post('/receptionist/:id/read', requireRole('receptionist', 'admin'), [param('id').isInt()], validate, ctrl.markTeacherRead);
+
 router.post('/accountant', requireRole('admin', 'accountant'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
   body('body').notEmpty().withMessage('Body is required'),

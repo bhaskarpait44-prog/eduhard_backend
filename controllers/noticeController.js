@@ -72,10 +72,11 @@ exports.createNotice = async (req, res, next) => {
     if (audience === 'specific_section') audience = 'section';
     if (audience === 'specific_subject') audience = 'subject_wise';
     if (audience === 'specific_student') audience = 'student';
-    if (audience === 'all_students' || audience === 'whole_school' || audience === 'all_classes') audience = 'school_wide';
+    if (audience === 'all_students' || audience === 'whole_school' || audience === 'all_classes' || audience === 'everyone') audience = 'school_wide';
     if (audience === 'all_parents') audience = 'parents';
     if (audience === 'all_accountants') audience = 'accountants';
     if (audience === 'all_teachers') audience = 'teachers';
+    if (audience === 'all_receptionists') audience = 'receptionists';
     
     const schoolId = req.user.school_id;
     if (!schoolId) {
@@ -85,13 +86,14 @@ exports.createNotice = async (req, res, next) => {
     let role = req.user.role;
     
     // Final safety check for roles allowed in DB ENUM
-    if (role === 'super_admin') role = 'admin';
-    if (!['admin', 'teacher', 'accountant', 'staff'].includes(role)) {
-       if (req.user.role.includes('admin')) role = 'admin';
+    if (role === 'super_admin' || role?.includes('admin')) role = 'admin';
+    if (!['admin', 'teacher', 'accountant'].includes(role)) {
+       role = 'admin'; // Fallback to admin for system-posted notices if needed
     }
 
     const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
-    const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || audience === 'school_wide';
+    const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || 
+                       ['school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone'].includes(audience);
 
     const [result] = await sequelize.query(`
       INSERT INTO notices (
@@ -235,19 +237,41 @@ exports.listTeacherNotices = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [notices] = await sequelize.query(`
-      SELECT n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name
-      FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
-      WHERE n.school_id = :schoolId AND n.is_deleted = false
-        AND (n.expires_at IS NULL OR n.expires_at > NOW())
-        AND (
-          n.is_school_wide = true OR
-          n.audience = 'teachers' OR
-          (n.audience = 'specific_teacher' AND n.target_teacher_id = (SELECT id FROM teachers WHERE user_id = :userId LIMIT 1)) OR
-          (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')
-        )
-      ORDER BY n.created_at DESC
+      WITH combined_notices AS (
+        SELECT 
+          n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          'unified' as source
+        FROM notices n
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        WHERE n.school_id = :schoolId AND n.is_deleted = false
+          AND (n.expires_at IS NULL OR n.expires_at > NOW())
+
+        UNION ALL
+
+        SELECT 
+          tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
+          'teacher' as posted_by_role, tn.target_scope::text as audience, NULL as target_class_id, 
+          NULL as target_section_id, NULL as target_student_id, NULL as target_teacher_id, 
+          NULL as target_subject_id, tn.category::text as priority, tn.expiry_date as expires_at, 
+          false as is_deleted, tn.publish_date as created_at, tn.updated_at, tn.attachment_path,
+          (tn.target_scope IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
+          COALESCE(CONCAT(t.first_name, ' ', t.last_name), 'School') as posted_by_name,
+          'teacher_notices' as source
+        FROM teacher_notices tn
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
+        WHERE tn.is_active = true
+          AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
+          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+      )
+      SELECT * FROM combined_notices
+      WHERE 
+        is_school_wide = true OR
+        audience IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+        audience = 'teachers' OR
+        (audience = 'specific_teacher' AND target_teacher_id = (SELECT id FROM teachers WHERE user_id = :userId LIMIT 1)) OR
+        (posted_by_user_id = :userId AND posted_by_role = 'teacher')
+      ORDER BY created_at DESC
     `, { replacements: { userId, schoolId } });
 
     res.ok({ notices });
@@ -275,22 +299,45 @@ exports.listAccountantNotices = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const role = req.user.role;
     const [notices] = await sequelize.query(`
-      SELECT n.*, 
-             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
-             c.name as class_name,
-             (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
-             EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) as is_read
-      FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
-      LEFT JOIN classes c ON c.id = n.target_class_id
-      WHERE n.school_id = :schoolId AND n.is_deleted = false
-        AND (
-          (n.posted_by_user_id = :userId AND n.posted_by_role = :role) OR
-          n.audience = 'accountants' OR
-          n.audience = 'school_wide' OR
-          n.is_school_wide = true
-        )
+      WITH combined_notices AS (
+        SELECT 
+          n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          c.name as class_name,
+          'unified' as source
+        FROM notices n
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN classes c ON c.id = n.target_class_id
+        WHERE n.school_id = :schoolId AND n.is_deleted = false
+          AND (n.expires_at IS NULL OR n.expires_at > NOW())
+
+        UNION ALL
+
+        SELECT 
+          tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
+          'teacher' as posted_by_role, tn.target_scope::text as audience, tn.class_id as target_class_id, 
+          tn.section_id as target_section_id, tn.target_student_id, NULL as target_teacher_id, 
+          NULL as target_subject_id, tn.category::text as priority, tn.expiry_date as expires_at, 
+          false as is_deleted, tn.publish_date as created_at, tn.updated_at, tn.attachment_path,
+          (tn.target_scope IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
+          COALESCE(CONCAT(t.first_name, ' ', t.last_name), 'School') as posted_by_name,
+          NULL as class_name,
+          'teacher_notices' as source
+        FROM teacher_notices tn
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
+        WHERE tn.is_active = true
+          AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
+          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+      )
+      SELECT n.*,
+             (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id AND source = 'unified') as read_count,
+             EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId AND source = 'unified') as is_read
+      FROM combined_notices n
+      WHERE 
+        n.is_school_wide = true OR
+        n.audience IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+        n.audience = 'accountants' OR
+        (n.posted_by_user_id = :userId AND n.posted_by_role = :role)
       ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId, role } });
     res.ok({ notices });
@@ -303,24 +350,93 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [notices] = await sequelize.query(`
-      SELECT n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
-             EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) as is_read
-      FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
-      WHERE n.school_id = :schoolId AND n.is_deleted = false
-        AND (n.expires_at IS NULL OR n.expires_at > NOW())
-        AND (
-          n.is_school_wide = true OR
-          n.audience = 'school_wide' OR
-          n.audience = 'accountants' OR
-          (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant')
-        )
+      WITH combined_notices AS (
+        SELECT 
+          n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          'unified' as source
+        FROM notices n
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        WHERE n.school_id = :schoolId AND n.is_deleted = false
+          AND (n.expires_at IS NULL OR n.expires_at > NOW())
+
+        UNION ALL
+
+        SELECT 
+          tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
+          'teacher' as posted_by_role, tn.target_scope::text as audience, NULL as target_class_id, 
+          NULL as target_section_id, NULL as target_student_id, NULL as target_teacher_id, 
+          NULL as target_subject_id, tn.category::text as priority, tn.expiry_date as expires_at, 
+          false as is_deleted, tn.publish_date as created_at, tn.updated_at, tn.attachment_path,
+          (tn.target_scope IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
+          COALESCE(CONCAT(t.first_name, ' ', t.last_name), 'School') as posted_by_name,
+          'teacher_notices' as source
+        FROM teacher_notices tn
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
+        WHERE tn.is_active = true
+          AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
+          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+      )
+      SELECT n.*,
+             EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId AND source = 'unified') as is_read
+      FROM combined_notices n
+      WHERE 
+        n.is_school_wide = true OR
+        n.audience IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+        n.audience = 'accountants' OR
+        (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant')
       ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId } });
 
     const unreadCount = notices.filter(n => !n.is_read).length;
     res.ok({ notices, unread_count: unreadCount });
+  } catch (err) { next(err); }
+};
+
+exports.listReceptionistNotices = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    const [notices] = await sequelize.query(`
+      WITH combined_notices AS (
+        SELECT 
+          n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          'unified' as source
+        FROM notices n
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
+        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        WHERE n.school_id = :schoolId AND n.is_deleted = false
+          AND (n.expires_at IS NULL OR n.expires_at > NOW())
+
+        UNION ALL
+
+        SELECT 
+          tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
+          'teacher' as posted_by_role, tn.target_scope::text as audience, NULL as target_class_id, 
+          NULL as target_section_id, NULL as target_student_id, NULL as target_teacher_id, 
+          NULL as target_subject_id, tn.category::text as priority, tn.expiry_date as expires_at, 
+          false as is_deleted, tn.publish_date as created_at, tn.updated_at, tn.attachment_path,
+          (tn.target_scope IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
+          COALESCE(CONCAT(t.first_name, ' ', t.last_name), 'School') as posted_by_name,
+          'teacher_notices' as source
+        FROM teacher_notices tn
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
+        WHERE tn.is_active = true
+          AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
+          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+      )
+      SELECT n.*,
+             EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId AND source = 'unified') as is_read
+      FROM combined_notices n
+      WHERE 
+        n.is_school_wide = true OR
+        n.audience IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+        n.audience = 'receptionists'
+      ORDER BY n.created_at DESC
+    `, { replacements: { userId, schoolId } });
+
+    res.ok({ notices, unread_count: notices.filter(n => !n.is_read).length });
   } catch (err) { next(err); }
 };
 
@@ -404,7 +520,7 @@ exports.getStudentNotices = async (req, res, next) => {
       FROM combined_notices
       WHERE 
         is_school_wide = true 
-        OR audience IN ('school_wide', 'all_students', 'whole_school')
+        OR audience IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR (audience IN ('class', 'whole_class', 'my_class_only') AND target_class_id = :classId)
         OR (audience IN ('section', 'specific_section') AND target_section_id = :sectionId)
         OR (audience IN ('student', 'specific_student') AND target_student_id = :studentId)
@@ -537,7 +653,7 @@ exports.getParentNotices = async (req, res, next) => {
       LEFT JOIN students st ON st.id = n.target_student_id
       WHERE 
         n.is_school_wide = true 
-        OR n.audience IN ('parents', 'school_wide', 'all_students', 'whole_school')
+        OR n.audience IN ('parents', 'school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR (n.audience IN ('class', 'whole_class', 'my_class_only') AND n.target_class_id IN (:classIds))
         OR (n.audience IN ('section', 'specific_section') AND n.target_section_id IN (:sectionIds))
         OR (n.audience IN ('student', 'specific_student') AND n.target_student_id IN (:studentIds))
