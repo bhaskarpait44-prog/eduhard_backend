@@ -24,23 +24,48 @@ async function boot() {
     await sequelize.authenticate();
     
     // ONE-TIME FIX: Add missing columns and ENUMs to notices table
+    const applyFix = async (query, description) => {
+      try {
+        await sequelize.query(query);
+        // logger.info(`Schema fix applied: ${description}`);
+      } catch (e) {
+        if (!e.message.includes('already exists') && !e.message.includes('duplicate')) {
+           logger.error(`Failed schema fix [${description}]:`, e.message);
+        }
+      }
+    };
+
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'teachers'", "ENUM audience: teachers");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'parents'", "ENUM audience: parents");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'accountants'", "ENUM audience: accountants");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'librarians'", "ENUM audience: librarians");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'receptionists'", "ENUM audience: receptionists");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'specific_teacher'", "ENUM audience: specific_teacher");
+    await applyFix("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'subject_wise'", "ENUM audience: subject_wise");
+    
+    await applyFix("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'super_admin'", "ENUM role: super_admin");
+    await applyFix("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'accountant'", "ENUM role: accountant");
+    await applyFix("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'staff'", "ENUM role: staff");
+    
+    await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_teacher_id INTEGER', "Column: target_teacher_id");
+    await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_subject_id INTEGER', "Column: target_subject_id");
+    await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS is_school_wide BOOLEAN DEFAULT FALSE', "Column: is_school_wide");
+    await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS attachment_path VARCHAR(500)', "Column: attachment_path");
+    
+    // Clean up absolute paths in database to make them web-accessible
     try {
-      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'teachers'");
-      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'parents'");
-      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'accountants'");
-      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'specific_teacher'");
-      await sequelize.query("ALTER TYPE enum_notices_audience ADD VALUE IF NOT EXISTS 'subject_wise'");
-      
-      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'super_admin'");
-      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'accountant'");
-      await sequelize.query("ALTER TYPE enum_notices_posted_by_role ADD VALUE IF NOT EXISTS 'staff'");
-      
-      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_teacher_id INTEGER');
-      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_subject_id INTEGER');
-      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS is_school_wide BOOLEAN DEFAULT FALSE');
-      await sequelize.query('ALTER TABLE notices ADD COLUMN IF NOT EXISTS attachment_path VARCHAR(500)');
+      await sequelize.query(`
+        UPDATE notices 
+        SET attachment_path = SUBSTRING(attachment_path FROM 'uploads/notices/.*')
+        WHERE attachment_path LIKE '%uploads/notices/%' AND attachment_path NOT LIKE 'uploads/notices/%'
+      `);
+      await sequelize.query(`
+        UPDATE teacher_notices 
+        SET attachment_path = SUBSTRING(attachment_path FROM 'uploads/notices/.*')
+        WHERE attachment_path LIKE '%uploads/notices/%' AND attachment_path NOT LIKE 'uploads/notices/%'
+      `);
     } catch (e) {
-      logger.error('Failed to apply schema fixes for notices table:', e.message);
+      logger.error('Failed to clean up attachment paths:', e.message);
     }
     
     // Pre-warm Puppeteer browser for fast PDF generation

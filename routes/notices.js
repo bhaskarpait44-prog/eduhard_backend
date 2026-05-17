@@ -16,7 +16,7 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadDir),
+  destination: (req, file, cb) => cb(null, 'uploads/notices'),
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
@@ -55,9 +55,14 @@ router.post('/admin', requireRole('admin'), (req, res, next) => {
   });
 }, [
   body('title').notEmpty().withMessage('Title is required'),
-  body('body').notEmpty().withMessage('Body is required'),
   body('audience').notEmpty().withMessage('Audience is required'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
+  body().custom((val, { req }) => {
+    if (!req.body.body && !req.body.content) {
+      throw new Error('Notice body or content is required');
+    }
+    return true;
+  }),
 ], validate, ctrl.createNotice);
 
 router.patch('/admin/:id', requireRole('admin'), upload.single('attachment'), [
@@ -73,7 +78,12 @@ router.get('/teacher', requireRole('teacher'), ctrl.listTeacherNotices);
 
 router.post('/teacher', requireRole('teacher'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
-  body('body').notEmpty().withMessage('Body is required'),
+  body().custom((val, { req }) => {
+    if (!req.body.body && !req.body.content) {
+      throw new Error('Notice body or content is required');
+    }
+    return true;
+  }),
   body('audience').isIn(['class', 'section', 'student', 'subject_wise']).withMessage('Invalid teacher audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
@@ -95,9 +105,18 @@ router.post('/accountant-portal/:id/read', requireRole('admin', 'accountant'), [
 router.get('/receptionist', requireRole('receptionist', 'admin'), ctrl.listReceptionistNotices);
 router.post('/receptionist/:id/read', requireRole('receptionist', 'admin'), [param('id').isInt()], validate, ctrl.markTeacherRead);
 
+// ── Librarian ────────────────────────────────────────────────────────────────
+router.get('/librarian', requireRole('librarian', 'admin'), ctrl.listLibrarianNotices);
+router.post('/librarian/:id/read', requireRole('librarian', 'admin'), [param('id').isInt()], validate, ctrl.markTeacherRead);
+
 router.post('/accountant', requireRole('admin', 'accountant'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
-  body('body').notEmpty().withMessage('Body is required'),
+  body().custom((val, { req }) => {
+    if (!req.body.body && !req.body.content) {
+      throw new Error('Notice body or content is required');
+    }
+    return true;
+  }),
   body('audience').isIn(['school_wide', 'class', 'student', 'parents']).withMessage('Invalid accountant audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
