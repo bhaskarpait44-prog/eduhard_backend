@@ -327,7 +327,17 @@ exports.listTeacherNotices = async (req, res, next) => {
 
         SELECT 
           tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
-          'teacher' as posted_by_role, tn.target_scope::text as audience,
+          'teacher' as posted_by_role, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END as audience,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
           tn.class_id as target_class_id, tn.section_id as target_section_id, tn.target_student_id,
           tn.target_teacher_id, tn.subject_id as target_subject_id, tn.category::text as priority,
@@ -355,7 +365,7 @@ exports.listTeacherNotices = async (req, res, next) => {
         n.is_school_wide = true 
         OR LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR LOWER(n.audience::text) = 'teachers'
-        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id = :userId)
+        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id IN (SELECT t.id FROM teachers t WHERE t.email = (SELECT email FROM users WHERE id = :userId)))
         OR (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')
       ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId } });
@@ -408,7 +418,17 @@ exports.listAccountantNotices = async (req, res, next) => {
 
         SELECT 
           tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
-          'teacher' as posted_by_role, tn.target_scope::text as audience,
+          'teacher' as posted_by_role, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END as audience,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
           tn.class_id as target_class_id, tn.section_id as target_section_id, tn.target_student_id,
           tn.target_teacher_id, tn.subject_id as target_subject_id, tn.category::text as priority,
@@ -470,7 +490,17 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
 
         SELECT 
           tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
-          'teacher' as posted_by_role, tn.target_scope::text as audience,
+          'teacher' as posted_by_role, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END as audience,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
           tn.class_id as target_class_id, tn.section_id as target_section_id, tn.target_student_id,
           tn.target_teacher_id, tn.subject_id as target_subject_id, tn.category::text as priority,
@@ -532,7 +562,17 @@ exports.listReceptionistNotices = async (req, res, next) => {
 
         SELECT 
           tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
-          'teacher' as posted_by_role, tn.target_scope::text as audience,
+          'teacher' as posted_by_role, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END as audience,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
           tn.class_id as target_class_id, tn.section_id as target_section_id, tn.target_student_id,
           tn.target_teacher_id, tn.subject_id as target_subject_id, tn.category::text as priority,
@@ -592,7 +632,17 @@ exports.listLibrarianNotices = async (req, res, next) => {
 
         SELECT 
           tn.id, NULL as school_id, tn.title, tn.content as body, tn.teacher_id as posted_by_user_id, 
-          'teacher' as posted_by_role, tn.target_scope::text as audience,
+          'teacher' as posted_by_role, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END as audience,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) as is_school_wide,
           tn.class_id as target_class_id, tn.section_id as target_section_id, tn.target_student_id,
           tn.target_teacher_id, tn.subject_id as target_subject_id, tn.category::text as priority,
@@ -673,7 +723,18 @@ exports.getStudentNotices = async (req, res, next) => {
         UNION ALL
 
         SELECT 
-          tn.id, tn.title, tn.content AS body, tn.target_scope::text AS audience, tn.category::text AS priority,
+          tn.id, tn.title, tn.content AS body, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END AS audience, 
+          tn.category::text AS priority,
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
@@ -815,7 +876,18 @@ exports.getParentNotices = async (req, res, next) => {
         UNION ALL
 
         SELECT 
-          tn.id, tn.title, tn.content AS body, tn.target_scope::text AS audience, tn.category::text AS priority,
+          tn.id, tn.title, tn.content AS body, 
+          CASE tn.target_scope::text
+            WHEN 'my_class_only' THEN 'class'
+            WHEN 'whole_class' THEN 'class'
+            WHEN 'specific_section' THEN 'section'
+            WHEN 'whole_school' THEN 'school_wide'
+            WHEN 'all_students' THEN 'school_wide'
+            WHEN 'specific_student' THEN 'student'
+            WHEN 'specific_subject' THEN 'subject_wise'
+            ELSE tn.target_scope::text
+          END AS audience, 
+          tn.category::text AS priority,
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
