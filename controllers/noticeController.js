@@ -219,13 +219,14 @@ exports.listAllNotices = async (req, res, next) => {
 
     const [notices] = await sequelize.query(`
       SELECT n.*, 
-             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+             COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
              (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
              c.name as class_name, s.name as section_name,
              CONCAT(st.first_name, ' ', st.last_name) as student_name
       FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+      LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
@@ -239,7 +240,7 @@ exports.listAllNotices = async (req, res, next) => {
       require('fs').appendFileSync('notice_debug.log', `[${new Date().toISOString()}] listAllNotices: schoolId=${schoolId}, count=${notices.length}, total=${count}\n`);
     } catch (e) {}
 
-    res.ok({ notices, pagination: { total: count, page: p, perPage: pp } });
+    res.ok({ notices, pagination: { total: count, page: p, perPage: pp, totalPages: Math.ceil(count / pp) } });
   } catch (err) { next(err); }
 };
 
@@ -310,11 +311,12 @@ exports.listTeacherNotices = async (req, res, next) => {
           n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
           n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
           n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -335,7 +337,13 @@ exports.listTeacherNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+          AND (
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
+          )
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read,
@@ -382,12 +390,13 @@ exports.listAccountantNotices = async (req, res, next) => {
           n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
           n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
           n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
           c.name as class_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         LEFT JOIN classes c ON c.id = n.target_class_id
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
@@ -410,7 +419,13 @@ exports.listAccountantNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+          AND (
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
+          )
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) ELSE 0 END) as read_count,
@@ -439,11 +454,12 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
           n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
           n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
           n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -464,7 +480,13 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+          AND (
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
+          )
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -494,11 +516,12 @@ exports.listReceptionistNotices = async (req, res, next) => {
           n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
           n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
           n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -519,7 +542,13 @@ exports.listReceptionistNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+          AND (
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
+          )
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -547,11 +576,12 @@ exports.listLibrarianNotices = async (req, res, next) => {
           n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
           n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
           n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -572,7 +602,13 @@ exports.listLibrarianNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (t.school_id = :schoolId OR tn.teacher_id IS NULL)
+          AND (
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
+          )
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -621,12 +657,13 @@ exports.getStudentNotices = async (req, res, next) => {
           n.id, n.title, n.body, n.audience::text, n.priority::text,
           n.created_at, n.expires_at, n.target_class_id, n.target_section_id, 
           n.target_student_id, n.target_subject_id, n.is_school_wide,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) AS posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) AS posted_by_name,
           n.posted_by_role::text, n.attachment_path,
           'unified' AS source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -638,18 +675,20 @@ exports.getStudentNotices = async (req, res, next) => {
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
-          COALESCE(NULLIF(TRIM(CONCAT(poster.first_name, ' ', poster.last_name)), ''), admin.name, 'School') AS posted_by_name,
+          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), admin.name, 'School') AS posted_by_name,
           COALESCE(tn.created_by_role, 'teacher')::text AS posted_by_role, tn.attachment_path,
           'teacher_notices' AS source
         FROM teacher_notices tn
-        LEFT JOIN teachers poster ON poster.id = tn.teacher_id
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
         LEFT JOIN users admin ON admin.id = tn.created_by_user_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
           AND (
-            EXISTS (SELECT 1 FROM teachers t2 WHERE t2.id = tn.teacher_id AND t2.school_id = :schoolId)
-            OR EXISTS (SELECT 1 FROM users u2 WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId)
-            OR tn.teacher_id IS NULL
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
           )
       )
       SELECT n.*,
@@ -760,12 +799,13 @@ exports.getParentNotices = async (req, res, next) => {
           n.id, n.title, n.body, n.audience::text, n.priority::text,
           n.created_at, n.expires_at, n.target_class_id, n.target_section_id, 
           n.target_student_id, n.target_subject_id, n.is_school_wide,
-          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) AS posted_by_name,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) AS posted_by_name,
           n.posted_by_role::text, n.attachment_path,
           'unified' AS source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+        LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -777,18 +817,20 @@ exports.getParentNotices = async (req, res, next) => {
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
-          COALESCE(NULLIF(TRIM(CONCAT(poster.first_name, ' ', poster.last_name)), ''), admin.name, 'School') AS posted_by_name,
+          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), admin.name, 'School') AS posted_by_name,
           COALESCE(tn.created_by_role, 'teacher')::text AS posted_by_role, tn.attachment_path,
           'teacher_notices' AS source
         FROM teacher_notices tn
-        LEFT JOIN teachers poster ON poster.id = tn.teacher_id
+        LEFT JOIN teachers t ON t.id = tn.teacher_id
         LEFT JOIN users admin ON admin.id = tn.created_by_user_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
           AND (
-            EXISTS (SELECT 1 FROM teachers t2 WHERE t2.id = tn.teacher_id AND t2.school_id = :schoolId)
-            OR EXISTS (SELECT 1 FROM users u2 WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId)
-            OR tn.teacher_id IS NULL
+            t.school_id = :schoolId
+            OR (tn.teacher_id IS NULL AND EXISTS (
+              SELECT 1 FROM users u2
+              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
+            ))
           )
       )
       SELECT n.*,
@@ -816,26 +858,11 @@ exports.markParentRead = async (req, res, next) => {
   try {
     const { id } = req.params;
     const userId = req.user.id;
-    const schoolId = req.user.school_id;
-
-    let actualUserId = userId;
-    if (req.user.role === 'parent') {
-       const [[linkedUser]] = await sequelize.query(`
-         SELECT u.id FROM users u
-         JOIN families f ON f.user_id = u.id
-         JOIN students s ON s.family_id = f.id
-         JOIN student_profiles sp ON sp.student_id = s.id
-         WHERE sp.id = :profileId AND u.role = 'parent' AND u.school_id = :schoolId
-         LIMIT 1
-       `, { replacements: { profileId: userId, schoolId } });
-       if (linkedUser) actualUserId = linkedUser.id;
-    }
-
     await sequelize.query(`
       INSERT INTO notice_reads (notice_id, user_id, read_at)
-      VALUES (:noticeId, :actualUserId, NOW())
+      VALUES (:noticeId, :userId, NOW())
       ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-    `, { replacements: { noticeId: id, actualUserId } });
+    `, { replacements: { noticeId: id, userId } });
     res.ok(null, 'Notice marked as read.');
   } catch (err) { next(err); }
 };
@@ -847,11 +874,12 @@ exports.getNoticeById = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
     const [[notice]] = await sequelize.query(`
-      SELECT n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+      SELECT n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
              c.name as class_name, s.name as section_name, CONCAT(st.first_name, ' ', st.last_name) as student_name
       FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
+      LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN teachers t ON t.email = tu.email AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
