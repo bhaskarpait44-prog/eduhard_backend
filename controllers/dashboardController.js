@@ -9,7 +9,7 @@ exports.getAdminStats = async (req, res, next) => {
 
     // 1. Resolve Session
     let sessionId = session_id;
-    if (!sessionId) {
+    if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
       const [[currentSession]] = await sequelize.query(`
         SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
       `, { replacements: { schoolId } });
@@ -17,6 +17,7 @@ exports.getAdminStats = async (req, res, next) => {
     }
 
     if (!sessionId) return res.fail('No active session found.');
+    sessionId = parseInt(sessionId);
 
     // 2. Total Students
     const [[studentCount]] = await sequelize.query(`
@@ -31,17 +32,17 @@ exports.getAdminStats = async (req, res, next) => {
     const [[attendance]] = await sequelize.query(`
       SELECT 
         COUNT(*)::int AS total_marked,
-        COUNT(*) FILTER (WHERE status IN ('present', 'late'))::int AS present,
-        COUNT(*) FILTER (WHERE status = 'absent')::int AS absent,
-        COUNT(*) FILTER (WHERE status = 'half_day')::int AS half_day
+        COUNT(*) FILTER (WHERE a.status IN ('present', 'late'))::int AS present,
+        COUNT(*) FILTER (WHERE a.status = 'absent')::int AS absent,
+        COUNT(*) FILTER (WHERE a.status = 'half_day')::int AS half_day
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
       WHERE a.date = :today AND e.session_id = :sessionId AND s.school_id = :schoolId;
     `, { replacements: { today, sessionId, schoolId } });
 
-    const totalStudents = studentCount.total;
-    const presentCount = (attendance.present || 0) + (attendance.half_day || 0) * 0.5;
+    const totalStudents = studentCount.total || 0;
+    const presentCount = Number(attendance.present || 0) + Number(attendance.half_day || 0) * 0.5;
     const attendancePercentage = totalStudents > 0 ? (presentCount / totalStudents) * 100 : 0;
 
     // 4. Fee Collection (Monthly)
@@ -56,6 +57,10 @@ exports.getAdminStats = async (req, res, next) => {
         AND DATE_TRUNC('month', fp.payment_date::date) = DATE_TRUNC('month', CURRENT_DATE)
       WHERE e.session_id = :sessionId AND s.school_id = :schoolId;
     `, { replacements: { sessionId, schoolId } });
+
+    const collected = Number(fees.collected || 0);
+    const totalExpected = Number(fees.total_expected || 0);
+    const feePercentage = totalExpected > 0 ? (collected / totalExpected) * 100 : 0;
 
     // 5. Upcoming Exams
     const [[exams]] = await sequelize.query(`
@@ -75,9 +80,9 @@ exports.getAdminStats = async (req, res, next) => {
         absent: attendance.absent || 0
       },
       feeCollection: {
-        collected: fees.collected,
-        total_expected: fees.total_expected,
-        percentage: fees.total_expected > 0 ? (fees.collected / fees.total_expected) * 100 : 0
+        collected: collected,
+        total_expected: totalExpected,
+        percentage: feePercentage
       },
       upcomingExams: {
         count: exams.count,
@@ -87,6 +92,7 @@ exports.getAdminStats = async (req, res, next) => {
         SELECT 
           c.name AS class_name,
           COUNT(e.id)::int AS total,
+          COUNT(a.id)::int AS total_marked,
           COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::int AS present,
           COUNT(a.id) FILTER (WHERE a.status = 'absent')::int AS absent,
           COUNT(a.id) FILTER (WHERE a.status = 'half_day')::int AS half_day

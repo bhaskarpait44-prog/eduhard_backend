@@ -68,18 +68,18 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 
 ## Canonical seed flow
 
-These are the main demo seeders for a fresh DB:
+These are the main demo seeders for a fresh DB (Sequelize CLI will run them in lexical order):
 
-1. `01sessions.js`
-2. `02class.js`
-3. `03section.js`
-4. `04subjects.js`
-5. `05school-and-admin.js`
-6. `06users-teacher.js`
-7. `07students.js`
-8. `08assign-teacher.js`
-9. `09teacher-timetable.js`
-10. `10attendance.js`
-11. `11create-exams.js`
-12. `12fee.js`
-13. `13student-subjects.js`
+1. `10-school-session.js` - Creates School, Admin User, and Session.
+2. `15-session-config.js` - Sets up Sundays as holidays for May 2026.
+3. `20-classes-sections.js` - Sets up Classes 9-12 and Section A for each.
+4. `30-subjects.js` - Adds subjects for all classes (Common for 9-10, Science for 11-12).
+5. `40-teachers.js` - Creates 7 specialized teachers (one per subject) and assigns them roles.
+6. `50-students.js` - Populates 20 students (5 per class) with detailed profiles.
+7. `55-families.js` - Creates family records and links them to students.
+8. `60-academic-ops.js` - Generates Timetables (using specialist teachers), Exams, and Notices.
+9. `65-attendance.js` - Generates daily student attendance for May 2026.
+10. `70-fees.js` - Sets up Fee Structures and initial Fee Invoices.
+11. `75-inventory-transport.js` - Sets up Transport routes/stops and Inventory items/stock.
+12. `80-staff-ops.js` - Generates Staff Attendance and User Feedback.
+

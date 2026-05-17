@@ -53,7 +53,7 @@ module.exports = {
   },
 
   async down(queryInterface) {
-    await queryInterface.bulkDelete('users', { email: 'admin@greenwoodacademy.edu.in' }, {});
-    await queryInterface.bulkDelete('schools', { email: 'admin@greenwoodacademy.edu.in' }, {});
+    // Preserving users and schools as per user request
+    console.log('Skipping deletion of users and schools to preserve foundational data.');
   },
 };
