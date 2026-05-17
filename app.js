@@ -72,6 +72,7 @@ app.use('/api/auth', require('./routes/auth'));
 
 app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
 
+app.use('/api/dashboard', require('./routes/dashboard'));
 app.use('/api/students', require('./routes/students'));
 app.use('/api/sessions', require('./routes/sessions'));
 app.use('/api/classes', require('./routes/classes'));
