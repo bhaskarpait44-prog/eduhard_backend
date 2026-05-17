@@ -176,6 +176,8 @@ exports.teachers = async (req, res, next) => {
     const [rows] = await sequelize.query(`
       SELECT
         id,
+        first_name,
+        last_name,
         CONCAT(first_name, ' ', last_name) AS name,
         email,
         phone,

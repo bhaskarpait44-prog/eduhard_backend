@@ -222,7 +222,8 @@ exports.listAllNotices = async (req, res, next) => {
              COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name), tu.name) as posted_by_name,
              (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) as read_count,
              c.name as class_name, s.name as section_name,
-             CONCAT(st.first_name, ' ', st.last_name) as student_name
+             CONCAT(st.first_name, ' ', st.last_name) as student_name,
+             CONCAT(tt.first_name, ' ', tt.last_name) as target_teacher_name
       FROM notices n
       LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
       LEFT JOIN users tu ON tu.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
@@ -230,6 +231,7 @@ exports.listAllNotices = async (req, res, next) => {
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
+      LEFT JOIN teachers tt ON tt.id = n.target_teacher_id
       ${where}
       ORDER BY n.created_at DESC
       LIMIT :limit OFFSET :offset

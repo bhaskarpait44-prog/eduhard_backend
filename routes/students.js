@@ -61,6 +61,11 @@ router.post('/:id/reset-password', requireAdmin, [
   body('new_password').optional({ nullable: true }).isLength({ min: 8 }).withMessage('new_password must be at least 8 characters'),
 ], validate, ctrl.resetPassword);
 
+router.post('/:id/reset-parent-password', requireAdmin, [
+  param('id').isInt(),
+  body('new_password').optional({ nullable: true }).isLength({ min: 8 }).withMessage('new_password must be at least 8 characters'),
+], validate, ctrl.resetParentPassword);
+
 router.delete('/:id',             requireAdmin, [
   param('id').isInt(),
   body('confirm_name').trim().notEmpty().withMessage('confirm_name is required'),

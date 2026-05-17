@@ -448,6 +448,7 @@ exports.getById = async (req, res, next) => {
              s.status, s.created_at,
              sp.address, sp.city, sp.state, sp.pincode, sp.phone, sp.email,
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
+             sp.parent_email,
              sp.blood_group, sp.medical_notes, sp.photo_path
       FROM students s
       LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
@@ -605,6 +606,54 @@ exports.resetPassword = async (req, res, next) => {
       email: student.email || null,
       generated_password: rawPassword,
     }, 'Student portal password reset successfully.');
+  } catch (err) { next(err); }
+};
+
+exports.resetParentPassword = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { new_password } = req.body;
+
+    const [[student]] = await sequelize.query(`
+      SELECT sp.parent_email, sp.id AS profile_id
+      FROM student_profiles sp
+      JOIN students s ON s.id = sp.student_id
+      WHERE s.id = :id
+        AND s.school_id = :schoolId
+        AND sp.is_current = true
+        AND s.is_deleted = false;
+    `, { replacements: { id, schoolId: req.user.school_id } });
+
+    if (!student || !student.parent_email) {
+      return res.fail('Parent email not found for this student.', [], 404);
+    }
+
+    const rawPassword = (new_password || '').trim() || generateStudentPassword();
+    const hash = await bcrypt.hash(rawPassword, 12);
+
+    // Update ALL current profiles with this parent email in this school
+    await sequelize.query(`
+      UPDATE student_profiles sp
+      SET parent_password_hash = :hash,
+          parent_failed_login_attempts = 0,
+          parent_locked_until = NULL
+      FROM students s
+      WHERE s.id = sp.student_id
+        AND s.school_id = :schoolId
+        AND sp.is_current = true
+        AND LOWER(sp.parent_email) = LOWER(:parentEmail);
+    `, { 
+      replacements: { 
+        hash, 
+        schoolId: req.user.school_id, 
+        parentEmail: student.parent_email 
+      } 
+    });
+
+    res.ok({
+      parent_email: student.parent_email,
+      generated_password: rawPassword,
+    }, 'Parent portal password reset successfully.');
   } catch (err) { next(err); }
 };
 

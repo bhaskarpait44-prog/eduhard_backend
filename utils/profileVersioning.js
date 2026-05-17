@@ -119,6 +119,13 @@ const profileVersioning = {
         mother_name       : oldVersion.mother_name,
         mother_phone      : oldVersion.mother_phone,
         mother_email      : oldVersion.mother_email,
+        parent_email                  : oldVersion.parent_email,
+        parent_password_hash          : oldVersion.parent_password_hash,
+        parent_reset_password_token   : oldVersion.parent_reset_password_token,
+        parent_reset_password_expires : oldVersion.parent_reset_password_expires,
+        parent_last_login_at          : oldVersion.parent_last_login_at,
+        parent_failed_login_attempts  : oldVersion.parent_failed_login_attempts,
+        parent_locked_until           : oldVersion.parent_locked_until,
         emergency_contact : oldVersion.emergency_contact,
         blood_group       : oldVersion.blood_group,
         medical_notes     : oldVersion.medical_notes,
@@ -145,7 +152,7 @@ const profileVersioning = {
       const watchedFields = [
         'address','city','state','pincode','phone','email',
         'father_name','father_phone','father_occupation',
-        'mother_name','mother_phone','mother_email',
+        'mother_name','mother_phone','mother_email','parent_email',
         'emergency_contact','blood_group','medical_notes','photo_path',
       ];
 
