@@ -359,7 +359,13 @@ exports.listTeacherNotices = async (req, res, next) => {
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read,
-             (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :userId) as can_manage
+             (
+               (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :userId)
+               OR
+               (n.source = 'teacher_notices' AND n.posted_by_user_id IN (
+                 SELECT id FROM teachers WHERE email = (SELECT email FROM users WHERE id = :userId)
+               ))
+             ) as can_manage
       FROM combined_notices n
       WHERE 
         n.is_school_wide = true 

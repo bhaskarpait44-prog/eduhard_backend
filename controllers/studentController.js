@@ -15,6 +15,8 @@ exports.list = async (req, res, next) => {
       class_id = '',
       section_id = '',
       session_id = '',
+      status = '',
+      gender = '',
       page = 1,
       perPage = 20,
     } = req.query;
@@ -33,12 +35,24 @@ exports.list = async (req, res, next) => {
       ? `COALESCE(NULLIF(c.display_name, ''), c.name)`
       : 'c.name';
 
+    let statusFilter = '';
+    if (status === 'active') {
+      statusFilter = "AND s.status = 'active' AND s.is_active = true";
+    } else if (status === 'suspended') {
+      statusFilter = "AND s.status = 'active' AND s.is_active = false";
+    } else if (status === 'left') {
+      statusFilter = "AND s.status = 'left'";
+    } else if (status === 'graduated') {
+      statusFilter = "AND s.status = 'graduated'";
+    }
+
     const replacements = {
       schoolId,
       search: `%${search}%`,
       class_id: class_id || null,
       section_id: section_id || null,
       session_id: session_id || null,
+      gender: gender || null,
       limit: limitNum,
       offset,
     };
@@ -57,6 +71,8 @@ exports.list = async (req, res, next) => {
         (:class_id IS NULL AND :section_id IS NULL AND :session_id IS NULL)
         OR e.id IS NOT NULL
       )
+      ${statusFilter}
+      AND (:gender IS NULL OR s.gender = :gender)
     `;
 
     const [[{ total }]] = await sequelize.query(`
