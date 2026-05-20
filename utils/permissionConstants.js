@@ -37,6 +37,12 @@ const PERMISSIONS = {
   CLASSES_EDIT   : 'classes.edit',
   CLASSES_DELETE : 'classes.delete',
 
+  // Exams
+  EXAMS_VIEW     : 'exams.view',
+  EXAMS_CREATE   : 'exams.create',
+  EXAMS_EDIT     : 'exams.edit',
+  EXAMS_DELETE   : 'exams.delete',
+
   // Reports
   REPORTS_FEES       : 'reports.fees',
   REPORTS_ATTENDANCE : 'reports.attendance',

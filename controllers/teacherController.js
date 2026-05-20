@@ -781,9 +781,12 @@ exports.dashboard = async (req, res, next) => {
   try {
     const { session, assignments, scope } = await getTeacherContext(req);
     const today = TODAY();
-    const schedule = decorateScheduleRows(await getTodayScheduleRows(req.user.id, session?.id));
+    const teacherId = req.user.id;
+    const sessionId = session?.id || 0;
+
+    const schedule = decorateScheduleRows(await getTodayScheduleRows(teacherId, sessionId));
     const recentActivity = await getRecentActivity(req);
-    const pendingMarks = await getPendingMarkCount(scope, session?.id, req.user.id);
+    const pendingMarks = await getPendingMarkCount(scope, sessionId, teacherId);
 
     const classTeacherAssignments = assignments.filter((assignment) => assignment.is_class_teacher);
     const subjectAssignments = assignments.filter((assignment) => !assignment.is_class_teacher);
@@ -791,49 +794,97 @@ exports.dashboard = async (req, res, next) => {
     const myClass = await Promise.all(classTeacherAssignments.map((a) => enrichAssignment(a, session)));
     const subjectClasses = await Promise.all(subjectAssignments.map((a) => enrichAssignment(a, session)));
 
-    let attendanceStatus = { marked: 0, total: 0 };
-    let studentToday = { present: 0, absent: 0, percentage: 0 };
+    // Attendance Status: Include assigned classes + invigilation duties today
+    const [attendanceRows] = await sequelize.query(`
+      WITH teacher_scopes AS (
+        SELECT class_id, section_id FROM teacher_assignments
+        WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true
+        UNION
+        SELECT ex.class_id, sec.id AS section_id
+        FROM exam_subjects es
+        JOIN exams ex ON ex.id = es.exam_id
+        JOIN sections sec ON sec.class_id = ex.class_id
+        WHERE es.invigilator_teacher_id = :teacherId AND es.exam_date = :today AND ex.session_id = :sessionId
+      )
+      SELECT
+        COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN e.section_id ELSE NULL END) AS marked,
+        COUNT(DISTINCT e.section_id) AS total,
+        SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) AS present,
+        SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
+        ROUND(
+          (SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) + SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) * 0.5)
+          / NULLIF(COUNT(a.id), 0) * 100,
+          2
+        ) AS percentage
+      FROM teacher_scopes ts
+      JOIN enrollments e ON e.class_id = ts.class_id AND e.section_id = ts.section_id AND e.session_id = :sessionId AND e.status = 'active'
+      LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today;
+    `, { replacements: { today, sessionId, teacherId: req.user.id } });
 
-    if (scope.sectionIds.length > 0) {
-      const [[attendanceRow]] = await sequelize.query(`
-        SELECT
-          COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN e.section_id ELSE NULL END) AS marked,
-          COUNT(DISTINCT e.section_id) AS total,
-          SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) AS present,
-          SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
-          ROUND(
-            (
-              SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END)
-              + SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) * 0.5
-            ) / NULLIF(COUNT(a.id), 0) * 100,
-            2
-          ) AS percentage
-        FROM enrollments e
-        LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today
-        WHERE e.session_id = :sessionId
-          AND e.status = 'active'
-          AND e.section_id IN (:sectionIds);
-      `, {
-        replacements: {
-          today,
-          sessionId: session?.id || 0,
-          sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
-        },
-      });
+    const attendanceRow = attendanceRows[0];
+    const attendanceStatus = {
+      marked: Number(attendanceRow?.marked || 0),
+      total: Number(attendanceRow?.total || 0),
+    };
 
-      attendanceStatus = {
-        marked: Number(attendanceRow?.marked || 0),
-        total: Number(attendanceRow?.total || 0),
-      };
-
-      studentToday = {
-        present: Number(attendanceRow?.present || 0),
-        absent: Number(attendanceRow?.absent || 0),
-        percentage: Number(attendanceRow?.percentage || 0),
-      };
-    }
+    const studentToday = {
+      present: Number(attendanceRow?.present || 0),
+      absent: Number(attendanceRow?.absent || 0),
+      percentage: Number(attendanceRow?.percentage || 0),
+    };
 
     const nextPeriod = schedule.find((item) => item.status === 'current' || item.status === 'upcoming') || null;
+
+    const classTeacherPairs = [...scope.classTeacherSections];
+    const tupleClause = classTeacherPairs.length > 0
+      ? classTeacherPairs.map((_, index) => `(:classId${index}, :sectionId${index})`).join(', ')
+      : '(NULL, NULL)';
+
+    const replacements = {
+      sessionId,
+      teacherId: req.user.id,
+      ...Object.fromEntries(
+        classTeacherPairs.flatMap((key, index) => {
+          const [classId, sectionId] = key.split(':');
+          return [[`classId${index}`, Number(classId)], [`sectionId${index}`, Number(sectionId)]];
+        })
+      ),
+    };
+
+    // Fetch upcoming exams/duties for dashboard
+    const [upcomingExams] = await sequelize.query(`
+      SELECT DISTINCT
+        ex.id AS exam_id,
+        ex.name AS exam_name,
+        ex.exam_type,
+        es.exam_date,
+        es.start_time,
+        es.end_time,
+        sub.name AS subject_name,
+        c.name AS class_name
+      FROM exams ex
+      JOIN exam_subjects es ON es.exam_id = ex.id
+      JOIN subjects sub ON sub.id = es.subject_id
+      JOIN classes c ON c.id = ex.class_id
+      JOIN sections sec ON sec.class_id = ex.class_id
+      LEFT JOIN teacher_assignments ta
+        ON ta.session_id = ex.session_id
+       AND ta.class_id = ex.class_id
+       AND ta.section_id = sec.id
+       AND ta.subject_id = es.subject_id
+       AND ta.teacher_id = :teacherId
+       AND ta.is_active = true
+      WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
+        AND ex.status IN ('draft', 'published', 'upcoming', 'ongoing')
+        AND es.exam_date >= CURRENT_DATE
+        AND (
+          es.invigilator_teacher_id = :teacherId 
+          OR ta.id IS NOT NULL
+          OR (ex.class_id, sec.id) IN (${tupleClause})
+        )
+      ORDER BY es.exam_date ASC, es.start_time ASC
+      LIMIT 5;
+    `, { replacements });
 
     res.ok({
       teacher: { id: req.user.id, name: req.user.name },
@@ -852,6 +903,7 @@ exports.dashboard = async (req, res, next) => {
       recent_activity: recentActivity,
       my_class: myClass,
       subject_classes: subjectClasses,
+      upcoming_exams: upcomingExams,
     }, 'Teacher dashboard loaded.');
   } catch (err) { next(err); }
 };
@@ -868,9 +920,23 @@ exports.pendingTasks = async (req, res, next) => {
   try {
     const { session, scope } = await getTeacherContext(req);
     const today = TODAY();
+    const teacherId = req.user.id;
+    const sessionId = session?.id || 0;
     const tasks = [];
 
-    if (scope.sectionIds.length > 0) {
+    // Combined section list for attendance check: assigned + invigilator today
+    const [sectionRows] = await sequelize.query(`
+      SELECT class_id, section_id FROM teacher_assignments
+      WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true
+      UNION
+      SELECT ex.class_id, sec.id AS section_id
+      FROM exam_subjects es
+      JOIN exams ex ON ex.id = es.exam_id
+      JOIN sections sec ON sec.class_id = ex.class_id
+      WHERE es.invigilator_teacher_id = :teacherId AND es.exam_date = :today AND ex.session_id = :sessionId
+    `, { replacements: { teacherId, sessionId, today } });
+
+    if (sectionRows.length > 0) {
       const [attendancePending] = await sequelize.query(`
         SELECT DISTINCT
           e.class_id,
@@ -883,14 +949,14 @@ exports.pendingTasks = async (req, res, next) => {
         LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today
         WHERE e.session_id = :sessionId
           AND e.status = 'active'
-          AND e.section_id IN (:sectionIds)
+          AND (e.class_id, e.section_id) IN (${sectionRows.map((_, i) => `(:c${i}, :s${i})`).join(', ')})
         GROUP BY e.class_id, e.section_id, c.name, sec.name
         HAVING COUNT(a.id) < COUNT(e.id);
       `, {
         replacements: {
           today,
-          sessionId: session?.id || 0,
-          sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
+          sessionId,
+          ...Object.fromEntries(sectionRows.flatMap((r, i) => [[`c${i}`, r.class_id], [`s${i}`, r.section_id]])),
         },
       });
 
@@ -904,7 +970,7 @@ exports.pendingTasks = async (req, res, next) => {
       });
     }
 
-    const pendingMarks = await getPendingMarkCount(scope, session?.id, req.user.id);
+    const pendingMarks = await getPendingMarkCount(scope, sessionId, teacherId);
     if (pendingMarks.pending_exams > 0) {
       tasks.push({
         type: 'marks_pending',
@@ -1007,30 +1073,66 @@ exports.myClassOverview = async (req, res, next) => {
 exports.attendanceStatus = async (req, res, next) => {
   try {
     const { session, scope } = await getTeacherContext(req);
-    if (scope.sectionIds.length === 0) return res.ok({ classes: [] }, 'No assigned classes.');
+    const today = TODAY();
+    const sessionId = session?.id || 0;
 
     const [rows] = await sequelize.query(`
+      WITH teacher_scopes AS (
+        -- Classes where teacher has an assignment
+        SELECT class_id, section_id
+        FROM teacher_assignments
+        WHERE teacher_id = :teacherId
+          AND session_id = :sessionId
+          AND is_active = true
+        
+        UNION
+        
+        -- Classes where teacher is an invigilator today
+        -- Note: exam_subjects is per class, so we join with all sections of that class
+        SELECT ex.class_id, sec.id AS section_id
+        FROM exam_subjects es
+        JOIN exams ex ON ex.id = es.exam_id
+        JOIN sections sec ON sec.class_id = ex.class_id
+        WHERE es.invigilator_teacher_id = :teacherId
+          AND es.exam_date = :today
+          AND ex.session_id = :sessionId
+      )
       SELECT
-        e.class_id,
-        e.section_id,
+        ts.class_id,
+        ts.section_id,
         c.name AS class_name,
         sec.name AS section_name,
         COUNT(DISTINCT e.id) AS total_students,
-        COUNT(DISTINCT a.enrollment_id) AS marked_students
-      FROM enrollments e
-      JOIN classes c ON c.id = e.class_id
-      JOIN sections sec ON sec.id = e.section_id
+        COUNT(DISTINCT a.enrollment_id) AS marked_students,
+        EXISTS(
+          SELECT 1 FROM teacher_assignments ta
+          WHERE ta.teacher_id = :teacherId
+            AND ta.class_id = ts.class_id
+            AND ta.section_id = ts.section_id
+            AND ta.is_class_teacher = true
+            AND ta.is_active = true
+            AND ta.session_id = :sessionId
+        ) AS is_class_teacher,
+        EXISTS(
+          SELECT 1 FROM exam_subjects es
+          JOIN exams ex ON ex.id = es.exam_id
+          WHERE es.invigilator_teacher_id = :teacherId
+            AND ex.class_id = ts.class_id
+            AND es.exam_date = :today
+            AND ex.session_id = :sessionId
+        ) AS is_invigilator_today
+      FROM teacher_scopes ts
+      JOIN classes c ON c.id = ts.class_id
+      JOIN sections sec ON sec.id = ts.section_id
+      JOIN enrollments e ON e.class_id = ts.class_id AND e.section_id = ts.section_id AND e.session_id = :sessionId AND e.status = 'active'
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today
-      WHERE e.session_id = :sessionId
-        AND e.status = 'active'
-        AND e.section_id IN (:sectionIds)
-      GROUP BY e.class_id, e.section_id, c.name, sec.name
+      GROUP BY ts.class_id, ts.section_id, c.name, sec.name
       ORDER BY c.name, sec.name;
     `, {
       replacements: {
-        today: TODAY(),
-        sessionId: session?.id || 0,
-        sectionIds: scope.sectionIds,
+        today,
+        sessionId,
+        teacherId: req.user.id,
       },
     });
 
@@ -2486,11 +2588,30 @@ exports.currentPeriod = async (req, res, next) => {
 
 exports.examTimetable = async (req, res, next) => {
   try {
-    const { session } = await getTeacherContext(req);
+    const { session, scope } = await getTeacherContext(req);
     const teacherId = req.user.id;
+    const sessionId = session?.id || 0;
+
+    const classTeacherPairs = [...scope.classTeacherSections];
+    const hasClassTeacherRole = classTeacherPairs.length > 0;
+
+    const tupleClause = hasClassTeacherRole
+      ? classTeacherPairs.map((_, index) => `(:classId${index}, :sectionId${index})`).join(', ')
+      : '(NULL, NULL)';
+
+    const replacements = {
+      sessionId,
+      teacherId,
+      ...Object.fromEntries(
+        classTeacherPairs.flatMap((key, index) => {
+          const [classId, sectionId] = key.split(':');
+          return [[`classId${index}`, Number(classId)], [`sectionId${index}`, Number(sectionId)]];
+        })
+      ),
+    };
 
     const [rows] = await sequelize.query(`
-      SELECT 
+      SELECT
         ex.id AS exam_id,
         ex.name AS exam_name,
         ex.exam_type,
@@ -2504,34 +2625,38 @@ exports.examTimetable = async (req, res, next) => {
         sub.name AS subject_name,
         sub.code AS subject_code,
         c.name AS class_name,
-        CASE 
+        sec.name AS section_name,
+        CASE
           WHEN es.invigilator_teacher_id = :teacherId THEN 'invigilator'
-          ELSE 'subject_teacher'
+          WHEN ta.id IS NOT NULL THEN 'subject_teacher'
+          WHEN (ex.class_id, sec.id) IN (${tupleClause}) THEN 'class_teacher'
+          ELSE 'none'
         END AS duty_type
       FROM exams ex
       JOIN exam_subjects es ON es.exam_id = ex.id
       JOIN subjects sub ON sub.id = es.subject_id
       JOIN classes c ON c.id = ex.class_id
+      JOIN sections sec ON sec.class_id = ex.class_id
       LEFT JOIN teacher_assignments ta
         ON ta.session_id = ex.session_id
        AND ta.class_id = ex.class_id
+       AND ta.section_id = sec.id
        AND ta.subject_id = es.subject_id
        AND ta.teacher_id = :teacherId
        AND ta.is_active = true
-      WHERE ex.session_id = :sessionId
-        AND ex.status IN ('published', 'upcoming', 'ongoing', 'completed')
-        AND (es.invigilator_teacher_id = :teacherId OR ta.id IS NOT NULL)
-      ORDER BY es.exam_date ASC, es.start_time ASC;    `, {
-      replacements: {
-        sessionId: session?.id || 0,
-        teacherId,
-      },
-    });
+      WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
+        AND ex.status IN ('draft', 'published', 'upcoming', 'ongoing', 'completed')
+        AND (
+          es.invigilator_teacher_id = :teacherId 
+          OR ta.id IS NOT NULL
+          OR (ex.class_id, sec.id) IN (${tupleClause})
+        )
+      ORDER BY es.exam_date ASC, es.start_time ASC;
+    `, { replacements });
 
     res.ok({ timetable: rows }, `${rows.length} exam duty/assignment(s) found.`);
   } catch (err) { next(err); }
 };
-
 exports.homeworkList = async (req, res, next) => {
   try {
     const { scope } = await getTeacherContext(req);
