@@ -99,7 +99,7 @@ function buildScope(assignments) {
     ),
     subjectTeacherScopes: new Set(
       assignments
-        .filter((assignment) => !assignment.is_class_teacher && assignment.subject_id)
+        .filter((assignment) => assignment.subject_id)
         .map((assignment) => `${assignment.class_id}:${assignment.section_id}:${assignment.subject_id}`)
     ),
     sectionIds: uniqueNumbers(assignments.map((assignment) => assignment.section_id)),
@@ -116,7 +116,7 @@ function getAccess(scope, classId, sectionId, subjectId = null) {
     : scope.assignments.some((assignment) =>
         Number(assignment.class_id) === Number(classId) &&
         Number(assignment.section_id) === Number(sectionId) &&
-        !assignment.is_class_teacher
+        assignment.subject_id != null
       );
 
   return {
@@ -1491,29 +1491,53 @@ exports.marksExams = async (req, res, next) => {
     if (classIds.length === 0) return res.ok({ exams: [] }, 'No assigned exams.');
 
     const [exams] = await sequelize.query(`
-      SELECT ex.id, ex.class_id, ex.name, ex.exam_type, ex.start_date, ex.end_date, ex.status, c.name AS class_name
+      SELECT 
+        ex.id, 
+        ex.class_id, 
+        ex.name, 
+        ex.exam_type, 
+        ex.start_date, 
+        ex.end_date, 
+        ex.status, 
+        c.name AS class_name,
+        es.subject_id,
+        es.review_status AS entry_status,
+        s.name AS subject_name,
+        s.code AS subject_code
       FROM exams ex
       JOIN classes c ON c.id = ex.class_id
+      JOIN exam_subjects es ON es.exam_id = ex.id
+      JOIN subjects s ON s.id = es.subject_id
       WHERE ex.session_id = :sessionId
         AND ex.class_id IN (:classIds)
       ORDER BY ex.start_date DESC, ex.id DESC;
     `, { replacements: { sessionId: session?.id || 0, classIds } });
 
-    // For each exam, find which subjects the teacher teaches in that class
+    // Filter by teacher assignments
     const examSlots = [];
     exams.forEach(exam => {
-      const classAssignments = subjectAssignments.filter(a => Number(a.class_id) === Number(exam.class_id));
-      classAssignments.forEach(a => {
-        examSlots.push({
-          ...exam,
-          section_id: a.section_id,
-          section_name: a.section_name,
-          subject_id: a.subject_id,
-          subject_name: a.subject_name,
-          subject_code: a.subject_code,
-          assignment_id: a.id
+      const isAssigned = subjectAssignments.some(a => 
+        Number(a.class_id) === Number(exam.class_id) && 
+        Number(a.subject_id) === Number(exam.subject_id)
+      );
+
+      if (isAssigned) {
+        // Find sections for this class-subject assignment
+        const sections = subjectAssignments.filter(a => 
+          Number(a.class_id) === Number(exam.class_id) && 
+          Number(a.subject_id) === Number(exam.subject_id)
+        );
+
+        sections.forEach(sec => {
+          examSlots.push({
+            ...exam,
+            term_name: exam.exam_type.toUpperCase(),
+            section_id: sec.section_id,
+            section_name: sec.section_name,
+            assignment_id: sec.id
+          });
         });
-      });
+      }
     });
 
     res.ok({ exams: examSlots }, `${examSlots.length} exam slot(s) available to this teacher.`);
@@ -1615,13 +1639,10 @@ exports.marksEntry = async (req, res, next) => {
       access,
       locked,
       review_status: reviewStatus,
-      progress: {
-        total_students: rows.length,
-        entered_students: enteredCount,
-        remaining_students: rows.length - enteredCount,
-      },
-      rows: rows.map((row) => ({
+      max_marks: examSubject.combined_total_marks,
+      students: rows.map((row) => ({
         ...row,
+        marks: row.marks_obtained,
         subject_name: examSubject.subject_name,
         subject_code: examSubject.subject_code,
         subject_type: examSubject.subject_type,
@@ -1632,7 +1653,12 @@ exports.marksEntry = async (req, res, next) => {
         practical_total_marks: examSubject.practical_total_marks,
         practical_passing_marks: examSubject.practical_passing_marks,
       })),
-    }, `${rows.length} student mark row(s) loaded.`);
+      progress: {
+        total_students: rows.length,
+        entered_students: enteredCount,
+        remaining_students: rows.length - enteredCount,
+      },
+    }, `${rows.length} student(s) found for marks entry.`);
   } catch (err) { next(err); }
 };
 
