@@ -377,11 +377,11 @@ exports.getBulkIdCardsData = async (req, res, next) => {
     });
 
     res.ok(students);
-    } catch (err) { next(err); }
-    };
+  } catch (err) { next(err); }
+};
 
-    exports.getTcData = async (req, res, next) => {
-    try {
+exports.getTcData = async (req, res, next) => {
+  try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
@@ -413,11 +413,11 @@ exports.getBulkIdCardsData = async (req, res, next) => {
     }
 
     res.ok(data);
-    } catch (err) { next(err); }
-    };
+  } catch (err) { next(err); }
+};
 
-    exports.getIdCardData = async (req, res, next) => {
-    try {
+exports.getIdCardData = async (req, res, next) => {
+  try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
@@ -444,6 +444,335 @@ exports.getBulkIdCardsData = async (req, res, next) => {
     res.ok(data);
   } catch (err) { next(err); }
 };
+
+// ── Bulk Import Endpoints ──────────────────────────────────────────────────
+
+// ── GET /api/students/import/template ─────────────────────────────────────
+exports.downloadAdmissionTemplate = async (req, res, next) => {
+  try {
+    return res.ok({
+      columns: [
+        { key: 'first_name',      label: 'First Name *',      example: 'Rahul' },
+        { key: 'last_name',       label: 'Last Name *',       example: 'Sharma' },
+        { key: 'date_of_birth',   label: 'DOB (YYYY-MM-DD) *', example: '2015-05-15' },
+        { key: 'gender',          label: 'Gender *',          example: 'male' },
+        { key: 'admission_class', label: 'Admission Class *', example: 'Class 1' },
+        { key: 'section',         label: 'Section *',         example: 'A' },
+        { key: 'admission_date',  label: 'Admission Date *',  example: '2024-04-01' },
+        { key: 'admission_no',    label: 'Admission No',      example: 'ADM-2024-0001' },
+        { key: 'father_name',     label: 'Father Name',       example: 'Vijay Sharma' },
+        { key: 'mother_name',     label: 'Mother Name',       example: 'Anjali Sharma' },
+        { key: 'guardian_phone',  label: 'Guardian Phone',    example: '9876543210' },
+        { key: 'address',         label: 'Address',           example: '123 Main St, Jorhat' },
+        { key: 'blood_group',     label: 'Blood Group',       example: 'O+' },
+        { key: 'religion',        label: 'Religion',          example: 'Hindu' },
+        { key: 'caste',           label: 'Caste',             example: 'General' },
+        { key: 'previous_school', label: 'Previous School',   example: 'Little Angels' },
+      ],
+      valid_values: {
+        gender: ['male', 'female', 'other'],
+        blood_group: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'],
+      },
+      notes: [
+        'Fields marked * are required.',
+        'Admission No will be auto-generated if left blank (ADM-YEAR-XXXX).',
+        'Admission Class and Section names must match exactly with existing records.',
+        'Admission Date will be used as the student\'s joined date.',
+      ],
+    });
+  } catch (err) { next(err); }
+};
+
+// ── POST /api/students/import/preview ─────────────────────────────────────
+exports.previewAdmission = async (req, res, next) => {
+  try {
+    const { rows = [] } = req.body;
+    const schoolId = req.user.school_id;
+
+    const results = [];
+    const admissionNumbers = new Set();
+
+    // Cache classes and sections for performance
+    const [classes] = await sequelize.query(
+      `SELECT id, name FROM classes WHERE school_id = :schoolId AND is_deleted = false`,
+      { replacements: { schoolId } }
+    );
+    const classMap = new Map(classes.map(c => [c.name.toLowerCase(), c.id]));
+
+    const [sections] = await sequelize.query(
+      `SELECT s.id, s.name, s.class_id, c.name as class_name 
+       FROM sections s 
+       JOIN classes c ON c.id = s.class_id 
+       WHERE c.school_id = :schoolId AND s.is_deleted = false`,
+      { replacements: { schoolId } }
+    );
+    const sectionMap = new Map(); // Key: "classname|sectionname"
+    sections.forEach(s => {
+      sectionMap.set(`${s.class_name.toLowerCase()}|${s.name.toLowerCase()}`, s.id);
+    });
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const rowNum = i + 1;
+      const errors = [];
+
+      // Required fields
+      if (!row.first_name?.trim()) errors.push('First name is required');
+      if (!row.last_name?.trim()) errors.push('Last name is required');
+      if (!row.date_of_birth) errors.push('Date of birth is required');
+      else if (isNaN(Date.parse(row.date_of_birth))) errors.push('Invalid date of birth format (YYYY-MM-DD)');
+      
+      if (!row.gender?.trim()) errors.push('Gender is required');
+      else if (!['male', 'female', 'other'].includes(row.gender.trim().toLowerCase())) {
+        errors.push('Invalid gender. Use male, female, or other');
+      }
+
+      if (!row.admission_class?.trim()) errors.push('Admission class is required');
+      else if (!classMap.has(row.admission_class.trim().toLowerCase())) {
+        errors.push(`Class "${row.admission_class}" not found`);
+      }
+
+      if (!row.section?.trim()) errors.push('Section is required');
+      else if (row.admission_class?.trim() && !sectionMap.has(`${row.admission_class.trim().toLowerCase()}|${row.section.trim().toLowerCase()}`)) {
+        errors.push(`Section "${row.section}" not found in class "${row.admission_class}"`);
+      }
+
+      if (!row.admission_date) errors.push('Admission date is required');
+      else if (isNaN(Date.parse(row.admission_date))) errors.push('Invalid admission date format (YYYY-MM-DD)');
+
+      // Optional: Blood Group
+      if (row.blood_group?.trim()) {
+        const bg = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'];
+        if (!bg.includes(row.blood_group.trim())) {
+          errors.push('Invalid blood group');
+        }
+      }
+
+      // Admission No uniqueness
+      if (row.admission_no?.trim()) {
+        const admNo = row.admission_no.trim();
+        if (admissionNumbers.has(admNo)) {
+          errors.push('Duplicate admission number in file');
+        } else {
+          admissionNumbers.add(admNo);
+          const [[exists]] = await sequelize.query(
+            `SELECT id FROM students WHERE school_id = :schoolId AND admission_no = :admNo AND is_deleted = false LIMIT 1`,
+            { replacements: { schoolId, admNo } }
+          );
+          if (exists) errors.push('Admission number already exists in database');
+        }
+      }
+
+      results.push({
+        row_number: rowNum,
+        data: row,
+        errors,
+        is_valid: errors.length === 0,
+      });
+    }
+
+    const summary = {
+      total: rows.length,
+      valid: results.filter(r => r.is_valid).length,
+      invalid: results.filter(r => !r.is_valid).length,
+    };
+
+    return res.ok({ results, summary });
+  } catch (err) { next(err); }
+};
+
+// ── POST /api/students/import/confirm ─────────────────────────────────────
+exports.confirmAdmission = async (req, res, next) => {
+  try {
+    const { rows = [] } = req.body; // Valid rows from review
+    const schoolId = req.user.school_id;
+
+    // Create job record
+    const [[log]] = await sequelize.query(`
+      INSERT INTO bulk_import_logs
+        (school_id, import_type, total_rows, success_count, failed_count, status, imported_by, created_at, updated_at)
+      VALUES (:schoolId, 'students', :total, 0, 0, 'processing', :userId, NOW(), NOW())
+      RETURNING id;
+    `, { replacements: { schoolId, total: rows.length, userId: req.user.id } });
+
+    const jobId = log.id;
+
+    // Process async
+    setImmediate(async () => {
+      let successCount = 0;
+      const errorDetails = [];
+
+      // Find current active session
+      const [[session]] = await sequelize.query(
+        `SELECT id FROM sessions WHERE school_id = :schoolId AND is_active = true LIMIT 1`,
+        { replacements: { schoolId } }
+      );
+
+      // Cache classes and sections
+      const [classes] = await sequelize.query(
+        `SELECT id, name FROM classes WHERE school_id = :schoolId AND is_deleted = false`,
+        { replacements: { schoolId } }
+      );
+      const classMap = new Map(classes.map(c => [c.name.toLowerCase(), c.id]));
+
+      const [sections] = await sequelize.query(
+        `SELECT s.id, s.name, s.class_id, c.name as class_name 
+         FROM sections s 
+         JOIN classes c ON c.id = s.class_id 
+         WHERE c.school_id = :schoolId AND s.is_deleted = false`,
+        { replacements: { schoolId } }
+      );
+      const sectionMap = new Map();
+      sections.forEach(s => {
+        sectionMap.set(`${s.class_name.toLowerCase()}|${s.name.toLowerCase()}`, s.id);
+      });
+
+      for (const row of rows) {
+        const t = await sequelize.transaction();
+        try {
+          // 1. Resolve Admission No
+          let admNo = row.admission_no?.trim();
+          if (!admNo) {
+            const year = new Date(row.admission_date).getFullYear();
+            const [[seq]] = await sequelize.query(
+              `SELECT COUNT(*)::int + 1 as next_val FROM students WHERE school_id = :schoolId AND admission_no LIKE :pattern`,
+              { 
+                replacements: { schoolId, pattern: `ADM-${year}-%` },
+                transaction: t,
+                lock: t.LOCK.UPDATE 
+              }
+            );
+            admNo = `ADM-${year}-${String(seq.next_val).padStart(4, '0')}`;
+          }
+
+          // 2. Passwords
+          const rawPassword = generateStudentPassword();
+          const hash = await bcrypt.hash(rawPassword, 12);
+
+          // 3. Create Student
+          const [[student]] = await sequelize.query(`
+            INSERT INTO students (
+              school_id, admission_no, first_name, last_name, 
+              date_of_birth, gender, password_hash, is_active, 
+              last_password_change, is_deleted, created_at, updated_at
+            )
+            VALUES (
+              :schoolId, :admNo, :firstName, :lastName, 
+              :dob, :gender, :hash, true, 
+              NOW(), false, NOW(), NOW()
+            )
+            RETURNING id;
+          `, {
+            replacements: {
+              schoolId, admNo, firstName: row.first_name.trim(), lastName: row.last_name.trim(),
+              dob: row.date_of_birth, gender: row.gender.trim().toLowerCase(), hash,
+            },
+            transaction: t,
+          });
+
+          // 4. Create Profile (v1)
+          await profileVersioning.create({
+            studentId: student.id,
+            data: {
+              father_name: row.father_name || null,
+              mother_name: row.mother_name || null,
+              phone: row.guardian_phone || null,
+              address: row.address || null,
+              blood_group: row.blood_group || null,
+              religion: row.religion || null,
+              caste: row.caste || null,
+              previous_school: row.previous_school || null,
+            },
+            changedBy: req.user.id,
+            changeReason: 'Bulk admission import',
+          }, { transaction: t });
+
+          // 5. Create Enrollment
+          const classId = classMap.get(row.admission_class.trim().toLowerCase());
+          const sectionId = sectionMap.get(`${row.admission_class.trim().toLowerCase()}|${row.section.trim().toLowerCase()}`);
+
+          if (session && classId && sectionId) {
+            // Auto-assign roll number
+            const [[maxRoll]] = await sequelize.query(`
+              SELECT MAX(CAST(roll_number AS INTEGER)) AS max_roll
+              FROM enrollments
+              WHERE section_id = :sectionId
+                AND session_id = :sessionId
+                AND status = 'active'
+                AND roll_number ~ '^\\d+$';
+            `, { 
+              replacements: { sectionId, sessionId: session.id },
+              transaction: t,
+              lock: t.LOCK.UPDATE
+            });
+            const rollNumber = String((parseInt(maxRoll?.max_roll) || 0) + 1);
+
+            await sequelize.query(`
+              INSERT INTO enrollments
+                (student_id, session_id, class_id, section_id, stream, roll_number, joined_date,
+                 joining_type, status, created_at, updated_at)
+              VALUES
+                (:studentId, :sessionId, :classId, :sectionId, 'regular', :rollNumber, :joinedDate,
+                 'new_admission', 'active', NOW(), NOW())
+            `, {
+              replacements: {
+                studentId: student.id,
+                sessionId: session.id,
+                classId,
+                sectionId,
+                rollNumber,
+                joinedDate: row.admission_date,
+              },
+              transaction: t,
+            });
+          }
+
+          await t.commit();
+          successCount++;
+        } catch (err) {
+          await t.rollback();
+          errorDetails.push({ row: row.admission_no || `${row.first_name} ${row.last_name}`, error: err.message });
+        }
+      }
+
+      // Update log completion
+      await sequelize.query(`
+        UPDATE bulk_import_logs SET
+          success_count = :success,
+          failed_count = :failed,
+          error_details = :errors,
+          status = 'completed',
+          updated_at = NOW()
+        WHERE id = :id;
+      `, {
+        replacements: {
+          id: jobId,
+          success: successCount,
+          failed: rows.length - successCount,
+          errors: JSON.stringify(errorDetails),
+        },
+      });
+    });
+
+    return res.ok({ job_id: jobId, message: 'Bulk admission started.' });
+  } catch (err) { next(err); }
+};
+
+// ── GET /api/students/import/:jobId/status ────────────────────────────────
+exports.getAdmissionStatus = async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+    const [[log]] = await sequelize.query(
+      `SELECT * FROM bulk_import_logs WHERE id = :id AND school_id = :schoolId AND import_type = 'students'`,
+      { replacements: { id: jobId, schoolId: req.user.school_id } }
+    );
+
+    if (!log) return res.fail('Import job not found.', [], 404);
+    return res.ok(log);
+  } catch (err) { next(err); }
+};
+
+// ── Standard Student Endpoints ──────────────────────────────────────────────
 
 exports.getById = async (req, res, next) => {
   try {
@@ -880,4 +1209,3 @@ exports.deleteDocument = async (req, res, next) => {
     res.ok({}, 'Document deleted.');
   } catch (err) { next(err); }
 };
-

@@ -17,6 +17,12 @@ router.get('/structures',
   ctrl.getStructures
 );
 
+// Download fee structure as PDF
+router.get('/structure/download',
+  requirePermission('fees.report'),
+  ctrl.downloadStructurePdf
+);
+
 // Create fee structure
 router.post('/structure',
   requirePermission('fees.edit'),

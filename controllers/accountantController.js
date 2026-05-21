@@ -918,6 +918,7 @@ exports.getStudentStatementPdf = async (req, res, next) => {
 };
 
 exports.getFeeStructure = feeController.getStructures;
+exports.downloadFeeStructure = feeController.downloadStructurePdf;
 exports.createFeeStructure = feeController.createStructure;
 exports.deleteFeeStructure = feeController.deleteStructure;
 exports.generateFeeInvoices = feeController.generate;

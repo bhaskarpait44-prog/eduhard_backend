@@ -4,6 +4,7 @@ const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
 const { requireAdmin, requireAdminOrTeacher, requireRole } = require('../middlewares/auth');
+const { requirePermission } = require('../middlewares/checkPermission');
 const ctrl     = require('../controllers/studentController');
 const multer   = require('multer');
 const path     = require('path');
@@ -16,6 +17,12 @@ const storage = multer.diskStorage({
   }
 });
 const upload = multer({ storage });
+
+// ── Bulk Import ──────────────────────────────────────────────────────────
+router.get('/import/template', requirePermission('students.create'), ctrl.downloadAdmissionTemplate);
+router.post('/import/preview',  requirePermission('students.create'), ctrl.previewAdmission);
+router.post('/import/confirm',  requirePermission('students.create'), ctrl.confirmAdmission);
+router.get('/import/:jobId/status', requirePermission('students.create'), ctrl.getAdmissionStatus);
 
 router.post('/',                  requireAdmin, [
   body('admission_no').notEmpty(),

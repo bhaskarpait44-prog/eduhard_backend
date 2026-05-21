@@ -32,6 +32,7 @@ router.get('/receipt/:id', requirePermission('fees.view'), ctrl.getReceipt);
 router.get('/receipt/:id/pdf', requirePermission('fees.view'), ctrl.getReceiptPdf);
 
 router.get('/fee-structure', requirePermission('fees.view'), ctrl.getFeeStructure);
+router.get('/fee-structure/download', requirePermission('fees.view'), ctrl.downloadFeeStructure);
 router.post('/fee-structure', 
   requirePermission('fees.edit'), 
   accountantValidators.feeStructureRules, 

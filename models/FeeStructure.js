@@ -14,6 +14,8 @@ const FeeStructure = sequelize.define('FeeStructure', {
     allowNull : false,
   },
   due_day    : { type: DataTypes.INTEGER, allowNull: false, defaultValue: 10 },
+  is_optional : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  remarks    : { type: DataTypes.STRING(255), allowNull: true },
   is_active  : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 }, {
   tableName   : 'fee_structures',

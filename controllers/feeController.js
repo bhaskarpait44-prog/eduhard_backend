@@ -3,6 +3,13 @@
 const sequelize  = require('../config/database');
 const feeManager = require('../utils/feeManager');
 
+const formatINR = (amount) => {
+  return Number(amount).toLocaleString('en-IN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+};
+
 async function syncStructureInvoicesForClass({ structure, transaction }) {
   const [[session]] = await sequelize.query(`
     SELECT id, start_date, end_date
@@ -113,6 +120,7 @@ async function resolveSessionId(requestedSessionId, schoolId) {
   return currentSession?.id || null;
 }
 
+
 // GET /api/fees/structures - List fee structures
 exports.getStructures = async (req, res, next) => {
   try {
@@ -143,6 +151,195 @@ exports.getStructures = async (req, res, next) => {
     const [structures] = await sequelize.query(sql, { replacements });
     res.ok({ structures });
   } catch (err) { next(err); }
+};
+
+// GET /api/fees/structure/download - Download professional fee structure PDF
+exports.downloadStructurePdf = async (req, res, next) => {
+  try {
+    const { session_id, class_id } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!session_id) return res.fail('Session ID is required.');
+
+    // 1. Fetch Data
+    const [[school]] = await sequelize.query(
+      `SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+    if (!school) return res.fail('School record not found.');
+
+    const [[session]] = await sequelize.query(
+      `SELECT name FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1`,
+      { replacements: { sessionId: session_id, schoolId } }
+    );
+    if (!session) return res.fail('Academic session not found.');
+
+    let classQuery = '';
+    const replacements = { sessionId: session_id, schoolId };
+    if (class_id) {
+      classQuery = 'AND fs.class_id = :classId';
+      replacements.classId = class_id;
+    }
+
+    const [structures] = await sequelize.query(`
+      SELECT fs.*, c.name AS class_name
+      FROM fee_structures fs
+      JOIN classes c ON c.id = fs.class_id
+      WHERE fs.session_id = :sessionId
+        AND c.school_id = :schoolId
+        ${classQuery}
+      ORDER BY c.name ASC, fs.frequency DESC, fs.name ASC
+    `, { replacements });
+
+    if (!structures || structures.length === 0) {
+      return res.fail('No fee components found for the selected session/class.');
+    }
+
+    // Group by class
+    const classGroups = structures.reduce((acc, curr) => {
+      if (!acc[curr.class_name]) acc[curr.class_name] = [];
+      acc[curr.class_name].push(curr);
+      return acc;
+    }, {});
+
+    // 2. Setup PDF
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+
+    // Set headers before piping
+    const safeSessionName = session.name.replace(/[^a-zA-Z0-9]/g, '_');
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="fee_structure_${safeSessionName}.pdf"`);
+    doc.pipe(res);
+
+    // Header Helper
+    const drawHeader = () => {
+      doc.rect(0, 0, 595, 120).fill('#1e40af');
+      doc.fillColor('white');
+      doc.font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 35);
+      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 58);
+      
+      doc.font('Helvetica-Bold').fontSize(14).text('ACADEMIC FEE STRUCTURE', 40, 85, { characterSpacing: 1 });
+      doc.fontSize(10).text(`Academic Year: ${session.name} | ${class_id ? `Class: ${structures[0].class_name}` : 'All Classes'}`, 40, 102);
+      
+      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleDateString()} | By: ${req.user.name}`, 400, 35, { align: 'right', width: 155 });
+      doc.moveDown(2);
+    };
+
+    drawHeader();
+    doc.y = 140;
+
+    // Table Config
+    const startX = 40;
+    const colWidths = [180, 100, 100, 60, 75];
+    const headers = ['Fee Component', 'Frequency', 'Amount (INR)', 'Due Day', 'Remarks'];
+
+    const drawTableHeaders = () => {
+      doc.fillColor('#dbeafe').rect(startX, doc.y, 515, 22).fill();
+      doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
+      let curX = startX;
+      headers.forEach((h, i) => {
+        const align = (i === 2 || i === 3) ? 'right' : 'left';
+        doc.text(h, curX + 5, doc.y + 7, { width: colWidths[i] - 10, align });
+        curX += colWidths[i];
+      });
+      doc.y += 22;
+      doc.strokeColor('#e2e8f0').lineWidth(0.5).moveTo(startX, doc.y).lineTo(startX + 515, doc.y).stroke();
+    };
+
+    // 3. Render Classes
+    Object.keys(classGroups).forEach((className) => {
+      const components = classGroups[className];
+      
+      // Class Title
+      if (doc.y > 650) { doc.addPage(); drawHeader(); doc.y = 140; }
+      doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(11).text(className.toUpperCase(), 40, doc.y);
+      doc.strokeColor('#1e40af').lineWidth(1).moveTo(40, doc.y + 13).lineTo(150, doc.y + 13).stroke();
+      doc.moveDown(1.5);
+
+      drawTableHeaders();
+
+      let classTotalAnnual = 0;
+
+      components.forEach((c, i) => {
+        // Calculate needed height for this row (accounting for text wrap in remarks or name)
+        const name = c.is_optional ? `${c.name} (Optional)` : c.name;
+        const nameHeight = doc.heightOfString(name, { width: colWidths[0] - 10 });
+        const remarkHeight = doc.heightOfString(c.remarks || '-', { width: colWidths[4] - 10 });
+        const rowHeight = Math.max(22, nameHeight + 10, remarkHeight + 10);
+
+        // Page break check
+        if (doc.y + rowHeight > 750) {
+          doc.addPage();
+          drawHeader();
+          doc.y = 140;
+          drawTableHeaders();
+        }
+
+        const rowY = doc.y;
+
+        // Background
+        if (i % 2 === 1) {
+          doc.fillColor('#f8fafc').rect(startX, rowY, 515, rowHeight).fill();
+        }
+
+        doc.fillColor(c.is_optional ? '#64748b' : '#1e293b');
+        doc.font(c.is_optional ? 'Helvetica-Oblique' : 'Helvetica').fontSize(9);
+
+        let rx = startX;
+        // Draw Data
+        doc.text(name, rx + 5, rowY + 7, { width: colWidths[0] - 10 }); rx += colWidths[0];
+        doc.text(c.frequency.toUpperCase(), rx + 5, rowY + 7, { width: colWidths[1] - 10 }); rx += colWidths[1];
+        doc.text(formatINR(c.amount), rx + 5, rowY + 7, { width: colWidths[2] - 10, align: 'right' }); rx += colWidths[2];
+        doc.text(c.due_day || '-', rx + 5, rowY + 7, { width: colWidths[3] - 10, align: 'right' }); rx += colWidths[3];
+        doc.text(c.remarks || '-', rx + 5, rowY + 7, { width: colWidths[4] - 10 });
+
+        // Borders
+        doc.strokeColor('#e2e8f0').lineWidth(0.5);
+        doc.rect(startX, rowY, 515, rowHeight).stroke();
+        
+        doc.y += rowHeight;
+
+        // Total Calc
+        if (!c.is_optional) {
+          let m = 1;
+          if (c.frequency === 'monthly') m = 12;
+          else if (c.frequency === 'quarterly') m = 4;
+          classTotalAnnual += (parseFloat(c.amount) * m);
+        }
+      });
+
+      // Class Summary Row
+      doc.fillColor('#f1f5f9').rect(startX, doc.y, 515, 25).fill();
+      doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(10);
+      doc.text('TOTAL ESTIMATED ANNUAL FEE (Non-Optional)', startX + 5, doc.y + 8);
+      doc.text(`INR ${formatINR(classTotalAnnual)}`, startX + 280, doc.y + 8, { width: colWidths[2] - 10, align: 'right' });
+      doc.strokeColor('#1e40af').lineWidth(1).rect(startX, doc.y, 515, 25).stroke();
+      
+      doc.y += 45;
+    });
+
+    // 4. Global Footer
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+      doc.text(
+        'Note: This fee structure is subject to change. Contact administration for queries.',
+        startX, 805, { align: 'left', width: 400 }
+      );
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, 805, { align: 'right', width: 100 });
+    }
+
+    doc.end();
+  } catch (err) {
+    console.error('[PDF Error]', err);
+    if (!res.headersSent) {
+      next(err);
+    } else {
+      res.end(); // Stop streaming if headers already sent
+    }
+  }
 };
 
 exports.createStructure = async (req, res, next) => {
@@ -727,7 +924,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
     `, { replacements: { sessionId, schoolId, classId: class_id || null } });
 
     const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Defaulters_List_${new Date().toISOString().split('T')[0]}.pdf"`);
@@ -795,7 +992,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
       doc.text(row.admission_no, currX + 5, rowY); currX += cols[0].width;
       doc.text(row.student_name, currX + 5, rowY, { width: cols[1].width }); currX += cols[1].width;
       doc.text(classText, currX + 5, rowY); currX += cols[2].width;
-      doc.text(`₹${parseFloat(row.balance).toFixed(2)}`, currX + 5, rowY, { width: cols[3].width, align: 'right' }); currX += cols[3].width;
+      doc.text(formatINR(row.balance), currX + 5, rowY, { width: cols[3].width, align: 'right' }); currX += cols[3].width;
       doc.text(lastPay, currX + 5, rowY, { width: cols[4].width, align: 'right' });
 
       totalPending += parseFloat(row.balance);
@@ -806,7 +1003,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
     // Summary
     doc.moveDown(1);
     doc.fillColor('#0f766e').font('Helvetica-Bold').fontSize(11);
-    doc.text(`TOTAL OUTSTANDING: ₹${totalPending.toFixed(2)}`, { align: 'right' });
+    doc.text(`TOTAL OUTSTANDING: INR ${formatINR(totalPending)}`, { align: 'right' });
 
     // Footer with page numbers
     const range = doc.bufferedPageRange();
