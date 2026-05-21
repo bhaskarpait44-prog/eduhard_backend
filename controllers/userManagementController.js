@@ -198,6 +198,13 @@ exports.list = async (req, res, next) => {
       GROUP BY role;
     `, { replacements });
 
+    const [statusCounts] = await sequelize.query(`
+      ${baseCte}
+      SELECT is_active, COUNT(*)::int AS cnt
+      FROM filtered_accounts
+      GROUP BY is_active;
+    `, { replacements });
+
     return res.ok({
       users: users.map((user) => ({
         ...user,
@@ -213,6 +220,10 @@ exports.list = async (req, res, next) => {
         acc[role] = (acc[role] || 0) + parseInt(r.cnt);
         return acc;
       }, {}),
+      statusCounts: statusCounts.reduce((acc, s) => {
+        acc[s.is_active ? 'active' : 'inactive'] = parseInt(s.cnt);
+        return acc;
+      }, { active: 0, inactive: 0 }),
     });
   } catch (err) { next(err); }
 };
@@ -791,6 +802,7 @@ exports.confirmImport = async (req, res, next) => {
       let success = 0; const errors = [];
 
       for (const row of rows) {
+        const transaction = await sequelize.transaction();
         try {
           const normalizedRole = row.role.trim().toLowerCase();
           const isTeacher = normalizedRole === 'teacher';
@@ -817,10 +829,11 @@ exports.confirmImport = async (req, res, next) => {
                 hash, phone: row.phone || null, emp_id: row.employee_id || null,
                 dept: row.department || null, desig: row.designation || null,
               },
+              transaction,
             });
             createdId = teacher.id;
           } else {
-            await ensureUserRoleEnumValue(normalizedRole);
+            await ensureUserRoleEnumValue(normalizedRole, transaction);
             const [[user]] = await sequelize.query(`
               INSERT INTO users
                 (school_id, name, email, password_hash, role, phone, employee_id,
@@ -838,6 +851,7 @@ exports.confirmImport = async (req, res, next) => {
                 dept: row.department || null, desig: row.designation || null,
                 by: req.user.id,
               },
+              transaction,
             });
             createdId = user.id;
           }
@@ -845,7 +859,7 @@ exports.confirmImport = async (req, res, next) => {
           if (resolvedPermissionNames.length > 0) {
             const [perms] = await sequelize.query(
               `SELECT id FROM permissions WHERE name IN (:names);`,
-              { replacements: { names: resolvedPermissionNames } }
+              { replacements: { names: resolvedPermissionNames }, transaction }
             );
 
             if (perms.length > 0) {
@@ -859,13 +873,15 @@ exports.confirmImport = async (req, res, next) => {
                   granted_by: req.user.id,
                   granted_at: new Date(),
                 })),
-                { ignoreDuplicates: true }
+                { ignoreDuplicates: true, transaction }
               );
             }
           }
 
+          await transaction.commit();
           success++;
         } catch (e) {
+          await transaction.rollback();
           errors.push({ email: row.email, error: e.message });
         }
       }

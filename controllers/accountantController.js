@@ -1045,6 +1045,7 @@ exports.whatsappReceipt = async (req, res, next) => {
 };
 
 exports.getDefaulters = feeController.getDefaulters;
+exports.downloadDefaultersPdf = feeController.downloadDefaultersPdf;
 
 exports.sendDefaulterReminder = async (req, res, next) => {
   try {

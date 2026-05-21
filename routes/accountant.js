@@ -55,6 +55,7 @@ router.post('/receipts/:id/email', requirePermission('fees.view'), ctrl.emailRec
 router.post('/receipts/:id/whatsapp', requirePermission('fees.view'), ctrl.whatsappReceipt);
 
 router.get('/defaulters', requirePermission('fees.view'), ctrl.getDefaulters);
+router.get('/defaulters/download', requirePermission('fees.view'), ctrl.downloadDefaultersPdf);
 router.post('/defaulters/remind', requirePermission('fees.collect'), ctrl.sendDefaulterReminder);
 router.post('/defaulters/remind-bulk', requirePermission('fees.collect'), ctrl.sendBulkDefaulterReminder);
 

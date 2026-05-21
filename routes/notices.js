@@ -75,6 +75,7 @@ router.delete('/admin/:id', requireRole('admin'), [
 
 // ── Teacher ──────────────────────────────────────────────────────────────────
 router.get('/teacher', requireRole('teacher'), ctrl.listTeacherNotices);
+router.post('/teacher/:id/read', requireRole('teacher'), [param('id').isInt()], validate, ctrl.markTeacherRead);
 
 router.post('/teacher', requireRole('teacher'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
@@ -120,6 +121,10 @@ router.post('/accountant', requireRole('admin', 'accountant'), upload.single('at
   body('audience').isIn(['school_wide', 'class', 'student', 'parents']).withMessage('Invalid accountant audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
+
+router.patch('/accountant/:id', requireRole('admin', 'accountant'), upload.single('attachment'), [
+  param('id').isInt(),
+], validate, ctrl.updateNotice);
 
 // ── Student Portal ───────────────────────────────────────────────────────────
 router.get('/student', requireRole('student'), ctrl.getStudentNotices);

@@ -26,9 +26,9 @@ router.patch ('/permission-templates/:id', requirePermission('users.permissions'
 router.delete('/permission-templates/:id', requirePermission('users.permissions'), ctrl.deletePermissionTemplate);
 
 // Bulk import
-router.get  ('/import/template',  ctrl.downloadImportTemplate);
-router.post ('/import/preview',   requirePermission('users.create'), ctrl.previewImport);
-router.post ('/import/confirm',   requirePermission('users.create'), ctrl.confirmImport);
-router.get  ('/import/:jobId/status', ctrl.importStatus);
+router.get  ('/import/template',       requirePermission('users.create'), ctrl.downloadImportTemplate);
+router.post ('/import/preview',        requirePermission('users.create'), ctrl.previewImport);
+router.post ('/import/confirm',        requirePermission('users.create'), ctrl.confirmImport);
+router.get  ('/import/:jobId/status', requirePermission('users.create'), ctrl.importStatus);
 
 module.exports = router;
