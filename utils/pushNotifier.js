@@ -1,7 +1,8 @@
 'use strict';
 
-const admin = require('firebase-admin');
+const firebase = require('./firebase');
 const sequelize = require('../config/database');
+const { logNotification } = require('./notificationLogger');
 
 /**
  * Sends push notifications to a list of students via their push tokens.
@@ -54,54 +55,97 @@ async function sendPushToUsers(userIds, { title, body, data = {} }) {
 }
 
 /**
- * Internal helper to dispatch push via Firebase Admin
+ * Sends push notifications to a list of teachers via their push tokens.
+ * @param {Array<number>} teacherIds
+ * @param {Object} payload { title, body, data }
  */
-async function dispatchPush(tokens, { title, body, data }) {
-  // Check if Firebase is initialized
-  if (admin.apps.length === 0) {
-    console.warn('[pushNotifier] Firebase Admin not initialized. Skipping push.');
-    return;
-  }
-
-  const fcmTokens = tokens.map(t => t.token);
-  
-  const message = {
-    notification: { title, body },
-    data: Object.keys(data).reduce((acc, key) => {
-      acc[key] = String(data[key]);
-      return acc;
-    }, {}),
-    tokens: fcmTokens,
-  };
+async function sendPushToTeachers(teacherIds, { title, body, data = {} }) {
+  if (!teacherIds || teacherIds.length === 0) return;
 
   try {
-    const response = await admin.messaging().sendEachForMulticast(message);
-    
-    if (response.failureCount > 0) {
-      const tokensToDelete = [];
-      response.responses.forEach((resp, idx) => {
-        if (!resp.success) {
-          const errorCode = resp.error?.code;
-          // Delete token if it's invalid or unregistered
-          if (errorCode === 'messaging/invalid-registration-token' || 
-              errorCode === 'messaging/registration-token-not-registered') {
-            tokensToDelete.push(tokens[idx].id);
-          }
-        }
-      });
+    const [tokens] = await sequelize.query(`
+      SELECT id, token, platform FROM push_tokens
+      WHERE teacher_id IN (:teacherIds)
+    `, {
+      replacements: { teacherIds },
+    });
 
-      if (tokensToDelete.length > 0) {
-        await sequelize.query(`
-          DELETE FROM push_tokens WHERE id IN (:ids)
-        `, { replacements: { ids: tokensToDelete } });
-        console.log(`[pushNotifier] Deleted ${tokensToDelete.length} invalid tokens.`);
-      }
-    }
-    
-    console.log(`[pushNotifier] Successfully sent push to ${response.successCount} devices.`);
+    if (tokens.length === 0) return;
+
+    await dispatchPush(tokens, { title, body, data });
   } catch (error) {
-    console.error('[pushNotifier] FCM Multicast Error:', error.message);
+    console.error('[pushNotifier] Error in sendPushToTeachers:', error.message);
   }
 }
 
-module.exports = { sendPushToStudents, sendPushToUsers };
+/**
+ * Internal helper to dispatch push via Firebase Admin
+ */
+async function dispatchPush(tokens, { title, body, data }) {
+  logNotification(`Dispatching to ${tokens.length} tokens. Title: "${title}"`);
+  
+  if (firebase.admin.apps.length === 0) {
+    logNotification('WARNING: Firebase Admin not initialized. Skipping push.');
+    return;
+  }
+
+  let successCount = 0;
+  let failureCount = 0;
+  const tokensToDelete = [];
+
+  // Send to each token individually to avoid deprecated batch/multicast endpoints
+  const sendPromises = tokens.map(async (tokenObj, idx) => {
+    const message = {
+      token: tokenObj.token,
+      notification: {
+        title: String(title || 'New Notice'),
+        body: String(body || ''),
+      },
+      data: {
+        ...Object.keys(data).reduce((acc, key) => {
+          acc[key] = String(data[key]);
+          return acc;
+        }, {}),
+        title: String(title || ''),
+        body: String(body || ''),
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          channelId: 'high_importance_channel',
+        },
+      },
+    };
+
+    try {
+      await firebase.admin.messaging().send(message);
+      successCount++;
+    } catch (error) {
+      failureCount++;
+      logNotification(`Token Error [${idx}]: ${tokenObj.token.substring(0, 10)}...`, error.message);
+      
+      const errorCode = error.code;
+      if (errorCode === 'messaging/invalid-registration-token' || 
+          errorCode === 'messaging/registration-token-not-registered') {
+        tokensToDelete.push(tokenObj.id);
+      }
+    }
+  });
+
+  await Promise.all(sendPromises);
+
+  logNotification('FCM Result:', { success: successCount, failure: failureCount });
+
+  if (tokensToDelete.length > 0) {
+    try {
+      await sequelize.query(`
+        DELETE FROM push_tokens WHERE id IN (:ids)
+      `, { replacements: { ids: tokensToDelete } });
+      logNotification(`Deleted ${tokensToDelete.length} invalid tokens.`);
+    } catch (dbErr) {
+      console.error('[pushNotifier] Error deleting invalid tokens:', dbErr.message);
+    }
+  }
+}
+
+module.exports = { sendPushToStudents, sendPushToUsers, sendPushToTeachers };

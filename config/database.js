@@ -46,10 +46,7 @@ const commonOptions = {
     acquire: parseInt(process.env.DB_POOL_ACQUIRE, 10) || 30000,
     idle: parseInt(process.env.DB_POOL_IDLE, 10) || 10000,
   },
-  logging:
-    process.env.NODE_ENV === 'development'
-      ? (msg) => console.log(`[SQL] ${msg}`)
-      : false,
+  logging: false,
   define: {
     underscored: true,
     freezeTableName: true,

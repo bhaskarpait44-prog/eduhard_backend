@@ -1,37 +1,9 @@
 'use strict';
 
 const { Expo } = require('expo-server-sdk');
-const admin = require('firebase-admin');
+const firebase = require('./firebase');
 const expo = new Expo();
 const sequelize = require('../config/database');
-const fs = require('fs');
-const path = require('path');
-
-// Initialize Firebase Admin
-let fcmEnabled = false;
-try {
-  const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH || path.join(__dirname, '../config/firebase-service-account.json');
-  
-  if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    fcmEnabled = true;
-    console.log('[Notification] Firebase Admin initialized via environment variable.');
-  } else if (fs.existsSync(serviceAccountPath)) {
-    const serviceAccount = require(serviceAccountPath);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-    fcmEnabled = true;
-    console.log(`[Notification] Firebase Admin initialized via file: ${serviceAccountPath}`);
-  } else {
-    console.warn('[Notification] Firebase Admin NOT initialized. FCM notifications will be skipped. Please provide FIREBASE_SERVICE_ACCOUNT or config/firebase-service-account.json');
-  }
-} catch (error) {
-  console.error('[Notification] Error initializing Firebase Admin:', error.message);
-}
 
 async function sendNotification({ userId = null, studentId = null, teacherId = null, title, content, type = 'notice', data = {} }) {
   try {
@@ -75,7 +47,7 @@ async function sendNotification({ userId = null, studentId = null, teacherId = n
             body: content,
             data: { ...data, type },
           });
-        } else if (fcmEnabled) {
+        } else if (firebase.fcmEnabled) {
           // Assume anything else is FCM if Firebase is enabled
           fcmTokens.push(pushToken.token);
         } else {
@@ -96,53 +68,61 @@ async function sendNotification({ userId = null, studentId = null, teacherId = n
       }
 
       // Send via FCM
-      if (fcmTokens.length > 0 && fcmEnabled) {
-        const message = {
-          notification: {
-            title: title,
-            body: content,
-          },
-          data: {
-            ...Object.keys(data).reduce((acc, key) => {
-              acc[key] = String(data[key]); // FCM data values must be strings
-              return acc;
-            }, {}),
-            type: String(type),
-          },
-          android: {
-            priority: 'high',
+      if (fcmTokens.length > 0 && firebase.fcmEnabled) {
+        console.log(`[Notification] Sending FCM to ${fcmTokens.length} tokens. Title: "${title}"`);
+        
+        let successCount = 0;
+        let failureCount = 0;
+
+        const sendPromises = fcmTokens.map(async (fcmToken, idx) => {
+          const message = {
+            token: fcmToken,
             notification: {
-              channelId: 'high_importance_channel',
-              visibility: 'public',
-              priority: 'high',
+              title: String(title || ''),
+              body: String(content || ''),
             },
-          },
-          apns: {
-            payload: {
-              aps: {
-                contentAvailable: true,
+            data: {
+              title: String(title || ''),
+              body: String(content || ''),
+              ...Object.keys(data).reduce((acc, key) => {
+                acc[key] = String(data[key]);
+                return acc;
+              }, {}),
+              type: String(type),
+            },
+            android: {
+              priority: 'high',
+              ttl: 3600000,
+              notification: {
+                channelId: 'high_importance_channel',
+                priority: 'high',
+                visibility: 'public',
                 sound: 'default',
               },
             },
-          },
-          tokens: fcmTokens,
-        };
+            apns: {
+              headers: { 'apns-priority': '10' },
+              payload: {
+                aps: {
+                  contentAvailable: true,
+                  sound: 'default',
+                  alert: { title: String(title || ''), body: String(content || '') },
+                },
+              },
+            },
+          };
 
-        try {
-          const response = await admin.messaging().sendEachForMulticast(message);
-          if (response.failureCount > 0) {
-            const failedTokens = [];
-            response.responses.forEach((resp, idx) => {
-              if (!resp.success) {
-                failedTokens.push(fcmTokens[idx]);
-                console.error(`[FCM Error] Token ${fcmTokens[idx]} failed:`, resp.error);
-              }
-            });
-            // Optional: Remove invalid tokens from DB
+          try {
+            await firebase.admin.messaging().send(message);
+            successCount++;
+          } catch (error) {
+            failureCount++;
+            console.error(`[Notification] FCM Token Error [${idx}]: ${fcmToken.substring(0, 10)}...`, error.message);
           }
-        } catch (error) {
-          console.error('[FCM Multicast Error]', error);
-        }
+        });
+
+        await Promise.all(sendPromises);
+        console.log(`[Notification] FCM Result: Success=${successCount}, Failure=${failureCount}`);
       }
     }
 

@@ -1,7 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
-const { sendPushToStudents, sendPushToUsers } = require('../utils/pushNotifier');
+const { sendPushToStudents, sendPushToUsers, sendPushToTeachers } = require('../utils/pushNotifier');
 const { Notice } = require('../models');
 
 /**
@@ -11,7 +11,7 @@ async function getTargetStudentIds(schoolId, audience, { target_class_id, target
   let query = '';
   let replacements = { schoolId };
 
-  if (audience === 'school_wide' || audience === 'parents' || audience === 'all_students') {
+  if (audience === 'school_wide' || audience === 'everyone' || audience === 'all_students') {
     query = `SELECT id FROM students WHERE school_id = :schoolId AND is_active = true AND is_deleted = false`;
   } else if (audience === 'class') {
     query = `SELECT student_id AS id FROM enrollments WHERE class_id = :classId AND status = 'active'`;
@@ -30,40 +30,61 @@ async function getTargetStudentIds(schoolId, audience, { target_class_id, target
 }
 
 /**
- * Helper to resolve audience to staff user IDs for push notifications.
+ * Helper to resolve audience to staff user IDs and teacher IDs for push notifications.
+ * Returns { userIds: [], teacherIds: [] }
  */
-async function getTargetStaffUserIds(schoolId, audience, { target_teacher_id }) {
-  let query = '';
-  let replacements = { schoolId };
+async function getTargetStaffIds(schoolId, audience, { target_teacher_id }) {
+  const result = { userIds: [], teacherIds: [] };
+  const replacements = { schoolId };
 
   if (audience === 'school_wide' || audience === 'everyone') {
-    query = `SELECT id FROM users WHERE school_id = :schoolId AND is_active = true AND is_deleted = false AND role != 'student'`;
+    // Get all staff users
+    const [users] = await sequelize.query(`
+      SELECT id FROM users WHERE school_id = :schoolId AND is_active = true AND is_deleted = false AND role != 'student'
+    `, { replacements });
+    result.userIds = users.map(u => u.id);
+    
+    // Get all teachers
+    const [teachers] = await sequelize.query(`
+      SELECT id FROM teachers WHERE school_id = :schoolId AND is_active = true AND is_deleted = false
+    `, { replacements });
+    result.teacherIds = teachers.map(t => t.id);
+    
   } else if (audience === 'teachers') {
-    query = `SELECT id FROM users WHERE school_id = :schoolId AND role = 'teacher' AND is_active = true AND is_deleted = false`;
+    const [teachers] = await sequelize.query(`
+      SELECT id FROM teachers WHERE school_id = :schoolId AND is_active = true AND is_deleted = false
+    `, { replacements });
+    result.teacherIds = teachers.map(t => t.id);
+    
   } else if (audience === 'accountants') {
-    query = `SELECT id FROM users WHERE school_id = :schoolId AND role = 'accountant' AND is_active = true AND is_deleted = false`;
+    const [users] = await sequelize.query(`
+      SELECT id FROM users WHERE school_id = :schoolId AND role = 'accountant' AND is_active = true AND is_deleted = false
+    `, { replacements });
+    result.userIds = users.map(u => u.id);
+    
   } else if (audience === 'receptionists') {
-    query = `SELECT id FROM users WHERE school_id = :schoolId AND role = 'receptionist' AND is_active = true AND is_deleted = false`;
+    const [users] = await sequelize.query(`
+      SELECT id FROM users WHERE school_id = :schoolId AND role = 'receptionist' AND is_active = true AND is_deleted = false
+    `, { replacements });
+    result.userIds = users.map(u => u.id);
+    
   } else if (audience === 'librarians') {
-    query = `SELECT id FROM users WHERE school_id = :schoolId AND role = 'librarian' AND is_active = true AND is_deleted = false`;
+    const [users] = await sequelize.query(`
+      SELECT id FROM users WHERE school_id = :schoolId AND role = 'librarian' AND is_active = true AND is_deleted = false
+    `, { replacements });
+    result.userIds = users.map(u => u.id);
+    
   } else if (audience === 'specific_teacher') {
-    query = `
-      SELECT u.id FROM users u 
-      JOIN teachers t ON t.email = u.email 
-      WHERE u.school_id = :schoolId AND t.id = :target_teacher_id
-    `;
-    replacements.target_teacher_id = target_teacher_id;
+    result.teacherIds = [target_teacher_id];
   }
 
-  if (!query) return [];
-  const [rows] = await sequelize.query(query, { replacements });
-  return rows.map(r => r.id);
+  return result;
 }
 
 /**
  * Helper to fire push notifications in background
  */
-function fireNoticePush(notice, studentIds, staffUserIds = []) {
+async function fireNoticePush(notice, studentIds, staffIds) {
   const payload = {
     title: notice.title,
     body: (notice.body || notice.content || '').length > 100 
@@ -76,11 +97,18 @@ function fireNoticePush(notice, studentIds, staffUserIds = []) {
     }
   };
 
-  if (studentIds?.length > 0) {
-    sendPushToStudents(studentIds, payload).catch(err => console.error('[fireNoticePush] Student push error:', err));
-  }
-  if (staffUserIds?.length > 0) {
-    sendPushToUsers(staffUserIds, payload).catch(err => console.error('[fireNoticePush] Staff push error:', err));
+  try {
+    if (studentIds?.length > 0) {
+      await sendPushToStudents(studentIds, payload);
+    }
+    if (staffIds?.userIds?.length > 0) {
+      await sendPushToUsers(staffIds.userIds, payload);
+    }
+    if (staffIds?.teacherIds?.length > 0) {
+      await sendPushToTeachers(staffIds.teacherIds, payload);
+    }
+  } catch (err) {
+    console.error('[fireNoticePush] Error dispatching notices:', err);
   }
 }
 
@@ -168,11 +196,11 @@ exports.createNotice = async (req, res, next) => {
           target_student_id: parseInt(target_student_id) || null 
         });
         
-        const staffUserIds = await getTargetStaffUserIds(schoolId, audience, {
+        const staffIds = await getTargetStaffIds(schoolId, audience, {
           target_teacher_id: parseInt(target_teacher_id) || null
         });
 
-        fireNoticePush(createdNotice, studentIds, staffUserIds);
+        fireNoticePush(createdNotice, studentIds, staffIds);
       } catch (err) {
         console.error('[createNotice] Push background error:', err);
       }
@@ -356,7 +384,19 @@ exports.listTeacherNotices = async (req, res, next) => {
           )
       )
       SELECT n.*,
-             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read,
+             (CASE 
+               WHEN n.source = 'unified' THEN EXISTS(
+                 SELECT 1 FROM notice_reads nr 
+                 WHERE nr.notice_id = n.id 
+                 AND (nr.teacher_id = :userId OR nr.user_id = :userId)
+               ) 
+               WHEN n.source = 'teacher_notices' THEN EXISTS(
+                 SELECT 1 FROM teacher_notice_reads tnr 
+                 WHERE tnr.notice_id = n.id 
+                 AND (tnr.teacher_id = :userId OR tnr.user_id = :userId)
+               )
+               ELSE false 
+             END) as is_read,
              (
                (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :userId)
                OR
@@ -380,13 +420,34 @@ exports.listTeacherNotices = async (req, res, next) => {
 exports.markTeacherRead = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
-    // We only support reading unified notices for now
-    await sequelize.query(`
-      INSERT INTO notice_reads (notice_id, user_id, read_at)
-      VALUES (:noticeId, :userId, NOW())
-      ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-    `, { replacements: { noticeId: id, userId } });
+    const { source = 'unified' } = req.query;
+    const userId = req.user.id; // teacher_id
+
+    if (source === 'teacher_notices') {
+      await sequelize.query(`
+        INSERT INTO teacher_notice_reads (notice_id, teacher_id, read_at)
+        VALUES (:noticeId, :userId, NOW())
+        ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+      `, { replacements: { noticeId: id, userId } });
+    } else {
+      // Check if it's actually a unified notice first
+      const [[exists]] = await sequelize.query(`SELECT id FROM notices WHERE id = :id LIMIT 1`, { replacements: { id } });
+      
+      if (exists) {
+        await sequelize.query(`
+          INSERT INTO notice_reads (notice_id, teacher_id, read_at)
+          VALUES (:noticeId, :userId, NOW())
+          ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+        `, { replacements: { noticeId: id, userId } });
+      } else {
+        // Fallback: try teacher_notices if it wasn't specified but ID exists there
+        await sequelize.query(`
+          INSERT INTO teacher_notice_reads (notice_id, teacher_id, read_at)
+          VALUES (:noticeId, :userId, NOW())
+          ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+        `, { replacements: { noticeId: id, userId } });
+      }
+    }
     res.ok(null, 'Notice marked as read.');
   } catch (err) { next(err); }
 };
@@ -753,7 +814,17 @@ exports.getStudentNotices = async (req, res, next) => {
           )
       )
       SELECT n.*,
-             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.student_id = :studentId) ELSE false END) AS is_read,
+             (CASE 
+               WHEN n.source = 'unified' THEN EXISTS(
+                 SELECT 1 FROM notice_reads nr 
+                 WHERE nr.notice_id = n.id AND nr.student_id = :studentId
+               ) 
+               WHEN n.source = 'teacher_notices' THEN EXISTS(
+                 SELECT 1 FROM student_notice_reads snr 
+                 WHERE snr.notice_id = n.id AND snr.student_id = :studentId
+               )
+               ELSE false 
+             END) AS is_read,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_pins np WHERE np.notice_id = n.id AND np.student_id = :studentId) ELSE false END) AS is_pinned
       FROM combined_notices n
       WHERE 
@@ -778,12 +849,32 @@ exports.getStudentNotices = async (req, res, next) => {
 exports.markRead = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { source = 'unified' } = req.query;
     const studentId = Number(req.user.student_id || req.user.id);
-    await sequelize.query(`
-      INSERT INTO notice_reads (notice_id, student_id, read_at)
-      VALUES (:id, :studentId, NOW())
-      ON CONFLICT (notice_id, student_id) DO UPDATE SET read_at = NOW()
-    `, { replacements: { id, studentId } });
+    
+    if (source === 'teacher_notices') {
+      await sequelize.query(`
+        INSERT INTO student_notice_reads (notice_id, student_id, read_at)
+        VALUES (:id, :studentId, NOW())
+        ON CONFLICT (notice_id, student_id) DO UPDATE SET read_at = NOW()
+      `, { replacements: { id, studentId } });
+    } else {
+      // Check if it's unified or fallback
+      const [[exists]] = await sequelize.query(`SELECT id FROM notices WHERE id = :id LIMIT 1`, { replacements: { id } });
+      if (exists) {
+        await sequelize.query(`
+          INSERT INTO notice_reads (notice_id, student_id, read_at)
+          VALUES (:id, :studentId, NOW())
+          ON CONFLICT (notice_id, student_id) DO UPDATE SET read_at = NOW()
+        `, { replacements: { id, studentId } });
+      } else {
+        await sequelize.query(`
+          INSERT INTO student_notice_reads (notice_id, student_id, read_at)
+          VALUES (:id, :studentId, NOW())
+          ON CONFLICT (notice_id, student_id) DO UPDATE SET read_at = NOW()
+        `, { replacements: { id, studentId } });
+      }
+    }
     res.ok(null, 'Notice marked as read.');
   } catch (err) { next(err); }
 };

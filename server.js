@@ -13,6 +13,7 @@ const logger = require('./utils/logger');
 const sequelize = require('./config/database');
 const app = require('./app');
 const { initBrowser } = require('./utils/pdfGenerator');
+const { initializeFirebase } = require('./utils/firebase');
 
 const PORT = process.env.PORT || 5000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
@@ -22,6 +23,8 @@ async function boot() {
     logger.info(`Starting EduCore API [${NODE_ENV}]...`);
 
     await sequelize.authenticate();
+    
+    initializeFirebase();
     
     // ONE-TIME FIX: Add missing columns and ENUMs to notices table
     const applyFix = async (query, description) => {
@@ -51,6 +54,15 @@ async function boot() {
     await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS target_subject_id INTEGER', "Column: target_subject_id");
     await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS is_school_wide BOOLEAN DEFAULT FALSE', "Column: is_school_wide");
     await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS attachment_path VARCHAR(500)', "Column: attachment_path");
+    
+    // Fix notice_reads for teachers
+    await applyFix('ALTER TABLE notice_reads ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES teachers(id) ON DELETE CASCADE', "Column: notice_reads.teacher_id");
+    await applyFix('CREATE UNIQUE INDEX IF NOT EXISTS notice_reads_notice_teacher_unique ON notice_reads (notice_id, teacher_id)', "Index: notice_reads_notice_teacher_unique");
+    
+    // Fix teacher_notice_reads to allow teacher_id or user_id
+    // We'll just add a teacher_id column to it as well if it doesn't exist
+    await applyFix('ALTER TABLE teacher_notice_reads ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES teachers(id) ON DELETE CASCADE', "Column: teacher_notice_reads.teacher_id");
+    await applyFix('CREATE UNIQUE INDEX IF NOT EXISTS teacher_notice_reads_notice_teacher_unique ON teacher_notice_reads (notice_id, teacher_id)', "Index: teacher_notice_reads_notice_teacher_unique");
     
     // Clean up absolute paths in database to make them web-accessible
     try {

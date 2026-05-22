@@ -17,6 +17,8 @@ const RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 20;
 const LOCKOUT_DURATION = 5 * 60 * 1000; // 5 minutes
 
+const { authenticate } = require('../middlewares/auth');
+
 router.post('/forgot-password',
   authLimiter,
   [body('email').isEmail()],
@@ -364,7 +366,7 @@ router.post('/login',
   }
 );
 
-router.get('/me', async (req, res) => {
+router.get('/me', authenticate, async (req, res) => {
   // Middleware 'authenticate' already attached req.user
   if (!req.user) return res.fail('Not authenticated.', [], 401);
   
@@ -381,6 +383,7 @@ router.get('/me', async (req, res) => {
  * Register push token for notifications
  */
 router.post('/push-token',
+  authenticate,
   [body('token').notEmpty()],
   validate,
   async (req, res, next) => {
@@ -398,6 +401,7 @@ router.post('/push-token',
         id = studentId;
       } else if (role === 'teacher') {
         column = 'teacher_id';
+        id = userId; // In teacher-mobile, userId in token IS the teacher's ID
       }
 
       await sequelize.query(`
