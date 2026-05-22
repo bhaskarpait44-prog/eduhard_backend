@@ -2338,10 +2338,12 @@ exports.studentResults = async (req, res, next) => {
         er.marks_obtained,
         er.grade,
         er.is_pass,
-        er.is_absent
+        er.is_absent,
+        es.combined_total_marks AS max_marks
       FROM exam_results er
       JOIN exams ex ON ex.id = er.exam_id
       JOIN subjects sub ON sub.id = er.subject_id
+      JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
       WHERE er.enrollment_id = :enrollmentId
       ${subjectFilter}
       ORDER BY ex.start_date DESC, sub.name ASC;

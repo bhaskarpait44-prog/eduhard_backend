@@ -233,7 +233,7 @@ exports.createAssignment = async (req, res, next) => {
     requireFields(req.body, ['teacher_id', 'class_id', 'section_id']);
 
     if (!is_class_teacher && !subject_id) {
-      return res.fail('subject_id is required for subject teacher assignments.', [], 422);
+      return res.fail('Subject must be selected for subject teacher assignments.', [], 422);
     }
 
     if (is_class_teacher) {
@@ -324,53 +324,161 @@ exports.createAssignment = async (req, res, next) => {
 exports.updateAssignment = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { teacher_id, class_id, section_id, subject_id, is_class_teacher, is_active } = req.body;
+
     const [[assignment]] = await sequelize.query(`
-      SELECT id, is_active
-      FROM teacher_assignments
-      WHERE id = :id
-      LIMIT 1;
+      SELECT * FROM teacher_assignments WHERE id = :id LIMIT 1;
     `, { replacements: { id } });
 
     if (!assignment) return res.fail('Assignment not found.', [], 404);
 
+    const session = await getCurrentSession(req.user.school_id);
+    const sessionId = session?.id || 0;
+
+    const finalTeacherId = teacher_id !== undefined ? Number(teacher_id) : assignment.teacher_id;
+    const finalClassId = class_id !== undefined ? Number(class_id) : assignment.class_id;
+    const finalSectionId = section_id !== undefined ? Number(section_id) : assignment.section_id;
+    const finalIsClassTeacher = is_class_teacher !== undefined ? Boolean(is_class_teacher) : assignment.is_class_teacher;
+    const finalSubjectId = finalIsClassTeacher ? null : (subject_id !== undefined ? (subject_id ? Number(subject_id) : null) : assignment.subject_id);
+    const finalIsActive = is_active !== undefined ? Boolean(is_active) : assignment.is_active;
+
+    // Validation if something changed
+    if (finalIsActive && (
+      finalTeacherId !== assignment.teacher_id ||
+      finalClassId !== assignment.class_id ||
+      finalSectionId !== assignment.section_id ||
+      finalSubjectId !== assignment.subject_id ||
+      finalIsClassTeacher !== assignment.is_class_teacher ||
+      (finalIsActive !== assignment.is_active && finalIsActive === true)
+    )) {
+      if (finalIsClassTeacher) {
+        const [[existingClassTeacher]] = await sequelize.query(`
+          SELECT id
+          FROM teacher_assignments
+          WHERE session_id = :sessionId
+            AND class_id = :classId
+            AND section_id = :sectionId
+            AND is_class_teacher = true
+            AND is_active = true
+            AND id != :id
+          LIMIT 1;
+        `, {
+          replacements: {
+            sessionId,
+            classId: finalClassId,
+            sectionId: finalSectionId,
+            id
+          },
+        });
+
+        if (existingClassTeacher) {
+          return res.fail('An active class teacher is already assigned to this section.', [], 422);
+        }
+      } else {
+        if (!finalSubjectId) {
+          return res.fail('Subject must be selected for subject teacher assignments.', [], 422);
+        }
+        const [[existingSubjectAssignment]] = await sequelize.query(`
+          SELECT id
+          FROM teacher_assignments
+          WHERE session_id = :sessionId
+            AND teacher_id = :teacherId
+            AND class_id = :classId
+            AND section_id = :sectionId
+            AND subject_id = :subjectId
+            AND is_active = true
+            AND id != :id
+          LIMIT 1;
+        `, {
+          replacements: {
+            sessionId,
+            teacherId: finalTeacherId,
+            classId: finalClassId,
+            sectionId: finalSectionId,
+            subjectId: finalSubjectId,
+            id
+          },
+        });
+
+        if (existingSubjectAssignment) {
+          return res.fail('This subject assignment already exists for the teacher.', [], 422);
+        }
+      }
+    }
+
     await sequelize.query(`
       UPDATE teacher_assignments
-      SET is_active = COALESCE(:isActive, is_active),
+      SET teacher_id = :teacherId,
+          class_id = :classId,
+          section_id = :sectionId,
+          subject_id = :subjectId,
+          is_class_teacher = :isClassTeacher,
+          is_active = :isActive,
           updated_at = NOW()
       WHERE id = :id;
     `, {
       replacements: {
         id,
-        isActive: req.body.is_active,
+        teacherId: finalTeacherId,
+        classId: finalClassId,
+        sectionId: finalSectionId,
+        subjectId: finalSubjectId,
+        isClassTeacher: finalIsClassTeacher,
+        isActive: finalIsActive,
       },
     });
 
-    if (req.body.is_active === true) {
-      const [[updatedAssignment]] = await sequelize.query(`
-        SELECT teacher_id, is_class_teacher
-        FROM teacher_assignments
-        WHERE id = :id
-        LIMIT 1;
-      `, { replacements: { id } });
-
-      if (updatedAssignment) {
-        await grantTeacherAssignmentPermissions(
-          Number(updatedAssignment.teacher_id),
-          { isClassTeacher: Boolean(updatedAssignment.is_class_teacher) },
-          req.user.id
-        );
-      }
+    if (finalIsActive === true) {
+      await grantTeacherAssignmentPermissions(
+        Number(finalTeacherId),
+        { isClassTeacher: finalIsClassTeacher },
+        req.user.id
+      );
     }
 
     await audit('teacher_assignments', Number(id), {
-      field: 'is_active',
-      oldValue: assignment.is_active,
-      newValue: req.body.is_active,
+      field: 'updated',
+      oldValue: JSON.stringify(assignment),
+      newValue: JSON.stringify({
+        teacher_id: finalTeacherId,
+        class_id: finalClassId,
+        section_id: finalSectionId,
+        subject_id: finalSubjectId,
+        is_class_teacher: finalIsClassTeacher,
+        is_active: finalIsActive,
+      }),
       reason: 'Admin updated teacher assignment',
     }, req);
 
     res.ok({ id: Number(id) }, 'Teacher assignment updated.');
   } catch (err) { next(err); }
+};
+
+exports.deleteAssignment = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const [[assignment]] = await sequelize.query(`
+      SELECT * FROM teacher_assignments WHERE id = :id LIMIT 1;
+    `, { replacements: { id } });
+
+    if (!assignment) return res.fail('Assignment not found.', [], 404);
+
+    await sequelize.query(`DELETE FROM teacher_assignments WHERE id = :id;`, { replacements: { id } });
+
+    await audit('teacher_assignments', Number(id), {
+      field: 'deleted',
+      oldValue: JSON.stringify(assignment),
+      newValue: null,
+      reason: 'Admin deleted teacher assignment',
+    }, req);
+
+    res.ok({ id: Number(id) }, 'Teacher assignment deleted.');
+  } catch (err) {
+    if (err.name === 'SequelizeForeignKeyConstraintError') {
+      return res.fail('Cannot delete assignment as it is referenced by other records. Try deactivating it instead.', [], 422);
+    }
+    next(err);
+  }
 };
 
 exports.timetable = async (req, res, next) => {
@@ -944,6 +1052,26 @@ exports.reviewLeave = async (req, res, next) => {
       type: 'leave_status',
       data: { leave_id: leave.id, status }
     }).catch(err => console.error('FCM Error (Leave):', err));
+
+    // Create System Notice
+    await sequelize.query(`
+      INSERT INTO notices (
+        school_id, title, body, posted_by_user_id, posted_by_role, audience, 
+        target_teacher_id, priority, created_at, updated_at
+      ) VALUES (
+        :schoolId, :title, :body, :userId, :role, 'specific_teacher',
+        :targetTeacherId, 'info', NOW(), NOW()
+      )
+    `, {
+      replacements: {
+        schoolId: req.user.school_id,
+        title: `Leave ${status.charAt(0).toUpperCase() + status.slice(1)}`,
+        body: `Your leave request for ${leave.from_date} to ${leave.to_date} has been ${status}.${review_note ? ' Note: ' + review_note : ''}`,
+        userId: req.user.id,
+        role: req.user.role,
+        targetTeacherId: leave.teacher_id
+      }
+    }).catch(err => console.error('Notice Error (Leave):', err));
 
     await audit('teacher_leaves', Number(id), {
       field: 'status',
@@ -1519,6 +1647,35 @@ exports.revokeLeave = async (req, res, next) => {
         reason: 'Admin revoked approved leave application',
       }, req);
     });
+
+    // FCM Notification for Revoke
+    sendNotification({
+      teacherId: leave.teacher_id,
+      title: 'Leave Application Revoked',
+      content: `Your approved leave application for ${leave.from_date} has been revoked by the administrator.`,
+      type: 'leave_status',
+      data: { leave_id: leave.id, status: 'cancelled' }
+    }).catch(err => console.error('FCM Error (Revoke):', err));
+
+    // Create System Notice for Revoke
+    sequelize.query(`
+      INSERT INTO notices (
+        school_id, title, body, posted_by_user_id, posted_by_role, audience, 
+        target_teacher_id, priority, created_at, updated_at
+      ) VALUES (
+        :schoolId, :title, :body, :userId, :role, 'specific_teacher',
+        :targetTeacherId, 'urgent', NOW(), NOW()
+      )
+    `, {
+      replacements: {
+        schoolId: req.user.school_id,
+        title: 'Leave Application Revoked',
+        body: `Your approved leave application for ${leave.from_date} has been revoked by the administrator.`,
+        userId: req.user.id,
+        role: req.user.role,
+        targetTeacherId: leave.teacher_id
+      }
+    }).catch(err => console.error('Notice Error (Revoke):', err));
 
     res.ok({ id: Number(id) }, 'Leave application revoked.');
   } catch (err) { next(err); }

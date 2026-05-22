@@ -65,6 +65,7 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 46. `20240101000046-add-exam-subject-timetable.js`
 47. `20240101000047-fix-exam-results-foreign-keys.js`
 48. `20240101000048-fix-exam-subjects-foreign-keys.js`
+49. `20240101000049-fix-homework-teacher-foreign-key.js`
 
 ## Canonical seed flow
 

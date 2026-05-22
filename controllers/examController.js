@@ -761,7 +761,7 @@ exports.approveAllSubjects = async (req, res, next) => {
           updated_by = :userId,
           updated_at = NOW()
       WHERE exam_id = :examId
-        AND review_status = 'submitted'
+        AND review_status IN ('submitted', 'draft')
       RETURNING subject_id;
     `, {
       replacements: {

@@ -163,7 +163,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
 
     // 1. Fetch Data
     const [[school]] = await sequelize.query(
-      `SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`,
+      `SELECT name, address, phone, logo_url FROM schools WHERE id = :schoolId LIMIT 1`,
       { replacements: { schoolId } }
     );
     if (!school) return res.fail('School record not found.');
@@ -187,6 +187,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
       JOIN classes c ON c.id = fs.class_id
       WHERE fs.session_id = :sessionId
         AND c.school_id = :schoolId
+        AND fs.is_active = true
         ${classQuery}
       ORDER BY c.name ASC, fs.frequency DESC, fs.name ASC
     `, { replacements });
@@ -202,6 +203,13 @@ exports.downloadStructurePdf = async (req, res, next) => {
       return acc;
     }, {});
 
+    // Helper: formatINR with ₹
+    const formatINR = (amount) =>
+      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+
     // 2. Setup PDF
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
@@ -212,12 +220,37 @@ exports.downloadStructurePdf = async (req, res, next) => {
     res.setHeader('Content-Disposition', `attachment; filename="fee_structure_${safeSessionName}.pdf"`);
     doc.pipe(res);
 
+    // Image fetcher helper
+    const fetchLogo = async (url) => {
+      if (!url) return null;
+      const protocol = url.startsWith('https') ? require('https') : require('http');
+      return new Promise((resolve) => {
+        protocol.get(url, (response) => {
+          if (response.statusCode !== 200) return resolve(null);
+          const chunks = [];
+          response.on('data', (chunk) => chunks.push(chunk));
+          response.on('end', () => resolve(Buffer.concat(chunks)));
+        }).on('error', () => resolve(null));
+      });
+    };
+
+    const logoBuffer = await fetchLogo(school.logo_url);
+
     // Header Helper
     const drawHeader = () => {
       doc.rect(0, 0, 595, 120).fill('#1e40af');
       doc.fillColor('white');
-      doc.font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 35);
-      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 58);
+      
+      let textX = 40;
+      if (logoBuffer) {
+        try {
+          doc.image(logoBuffer, 40, 30, { width: 60, height: 60 });
+          textX = 115;
+        } catch (e) { /* skip logo if invalid */ }
+      }
+
+      doc.font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), textX, 35);
+      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, textX, 58);
       
       doc.font('Helvetica-Bold').fontSize(14).text('ACADEMIC FEE STRUCTURE', 40, 85, { characterSpacing: 1 });
       doc.fontSize(10).text(`Academic Year: ${session.name} | ${class_id ? `Class: ${structures[0].class_name}` : 'All Classes'}`, 40, 102);
@@ -247,10 +280,37 @@ exports.downloadStructurePdf = async (req, res, next) => {
       doc.strokeColor('#e2e8f0').lineWidth(0.5).moveTo(startX, doc.y).lineTo(startX + 515, doc.y).stroke();
     };
 
+    const drawRow = (c, i, rowY, rowHeight) => {
+      // Background
+      if (i % 2 === 1) {
+        doc.fillColor('#f8fafc').rect(startX, rowY, 515, rowHeight).fill();
+      }
+
+      doc.fillColor(c.is_optional ? '#64748b' : '#1e293b');
+      doc.font(c.is_optional ? 'Helvetica-Oblique' : 'Helvetica').fontSize(9);
+
+      let rx = startX;
+      const name = c.is_optional ? `${c.name} (Optional)` : c.name;
+      
+      doc.text(name, rx + 5, rowY + 7, { width: colWidths[0] - 10 }); rx += colWidths[0];
+      doc.text(c.frequency.toUpperCase(), rx + 5, rowY + 7, { width: colWidths[1] - 10 }); rx += colWidths[1];
+      doc.text(formatINR(c.amount), rx + 5, rowY + 7, { width: colWidths[2] - 10, align: 'right' }); rx += colWidths[2];
+      doc.text(c.due_day || '-', rx + 5, rowY + 7, { width: colWidths[3] - 10, align: 'right' }); rx += colWidths[3];
+      doc.text(c.remarks || '-', rx + 5, rowY + 7, { width: colWidths[4] - 10 });
+
+      // Borders
+      doc.strokeColor('#e2e8f0').lineWidth(0.5);
+      doc.rect(startX, rowY, 515, rowHeight).stroke();
+    };
+
+    const classSummaries = [];
+
     // 3. Render Classes
     Object.keys(classGroups).forEach((className) => {
       const components = classGroups[className];
-      
+      const recurringFees = components.filter(c => c.frequency !== 'one_time');
+      const oneTimeFees = components.filter(c => c.frequency === 'one_time');
+
       // Class Title
       if (doc.y > 650) { doc.addPage(); drawHeader(); doc.y = 140; }
       doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(11).text(className.toUpperCase(), 40, doc.y);
@@ -260,15 +320,14 @@ exports.downloadStructurePdf = async (req, res, next) => {
       drawTableHeaders();
 
       let classTotalAnnual = 0;
+      let classTotalOneTime = 0;
 
-      components.forEach((c, i) => {
-        // Calculate needed height for this row (accounting for text wrap in remarks or name)
+      recurringFees.forEach((c, i) => {
         const name = c.is_optional ? `${c.name} (Optional)` : c.name;
         const nameHeight = doc.heightOfString(name, { width: colWidths[0] - 10 });
         const remarkHeight = doc.heightOfString(c.remarks || '-', { width: colWidths[4] - 10 });
         const rowHeight = Math.max(22, nameHeight + 10, remarkHeight + 10);
 
-        // Page break check
         if (doc.y + rowHeight > 750) {
           doc.addPage();
           drawHeader();
@@ -277,49 +336,129 @@ exports.downloadStructurePdf = async (req, res, next) => {
         }
 
         const rowY = doc.y;
-
-        // Background
-        if (i % 2 === 1) {
-          doc.fillColor('#f8fafc').rect(startX, rowY, 515, rowHeight).fill();
-        }
-
-        doc.fillColor(c.is_optional ? '#64748b' : '#1e293b');
-        doc.font(c.is_optional ? 'Helvetica-Oblique' : 'Helvetica').fontSize(9);
-
-        let rx = startX;
-        // Draw Data
-        doc.text(name, rx + 5, rowY + 7, { width: colWidths[0] - 10 }); rx += colWidths[0];
-        doc.text(c.frequency.toUpperCase(), rx + 5, rowY + 7, { width: colWidths[1] - 10 }); rx += colWidths[1];
-        doc.text(formatINR(c.amount), rx + 5, rowY + 7, { width: colWidths[2] - 10, align: 'right' }); rx += colWidths[2];
-        doc.text(c.due_day || '-', rx + 5, rowY + 7, { width: colWidths[3] - 10, align: 'right' }); rx += colWidths[3];
-        doc.text(c.remarks || '-', rx + 5, rowY + 7, { width: colWidths[4] - 10 });
-
-        // Borders
-        doc.strokeColor('#e2e8f0').lineWidth(0.5);
-        doc.rect(startX, rowY, 515, rowHeight).stroke();
-        
-        doc.y += rowHeight;
+        drawRow(c, i, rowY, rowHeight);
+        doc.y = rowY + rowHeight; // FIX: Explicit set doc.y
 
         // Total Calc
         if (!c.is_optional) {
           let m = 1;
           if (c.frequency === 'monthly') m = 12;
           else if (c.frequency === 'quarterly') m = 4;
+          else if (c.frequency === 'annual') m = 1; // FIX: "annual" per migration
           classTotalAnnual += (parseFloat(c.amount) * m);
         }
       });
 
-      // Class Summary Row
-      doc.fillColor('#f1f5f9').rect(startX, doc.y, 515, 25).fill();
+      // Recurring Total Row
+      const summaryY = doc.y; // FIX: save summaryY
+      doc.fillColor('#f1f5f9').rect(startX, summaryY, 515, 25).fill();
       doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(10);
-      doc.text('TOTAL ESTIMATED ANNUAL FEE (Non-Optional)', startX + 5, doc.y + 8);
-      doc.text(`INR ${formatINR(classTotalAnnual)}`, startX + 280, doc.y + 8, { width: colWidths[2] - 10, align: 'right' });
-      doc.strokeColor('#1e40af').lineWidth(1).rect(startX, doc.y, 515, 25).stroke();
-      
-      doc.y += 45;
+      doc.text('TOTAL ESTIMATED ANNUAL FEE (Non-Optional)', startX + 5, summaryY + 8);
+      doc.text(formatINR(classTotalAnnual), startX + 280, summaryY + 8, { width: colWidths[2] - 10, align: 'right' });
+      doc.strokeColor('#1e40af').lineWidth(1).rect(startX, summaryY, 515, 25).stroke();
+      doc.y = summaryY + 40;
+
+      // One-Time Fees Table
+      if (oneTimeFees.length > 0) {
+        if (doc.y > 650) { doc.addPage(); drawHeader(); doc.y = 140; }
+        doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(10).text('One-Time Fees', 40, doc.y);
+        doc.moveDown(0.5);
+        drawTableHeaders();
+
+        oneTimeFees.forEach((c, i) => {
+          const name = c.is_optional ? `${c.name} (Optional)` : c.name;
+          const nameHeight = doc.heightOfString(name, { width: colWidths[0] - 10 });
+          const remarkHeight = doc.heightOfString(c.remarks || '-', { width: colWidths[4] - 10 });
+          const rowHeight = Math.max(22, nameHeight + 10, remarkHeight + 10);
+
+          if (doc.y + rowHeight > 750) {
+            doc.addPage();
+            drawHeader();
+            doc.y = 140;
+            drawTableHeaders();
+          }
+
+          const rowY = doc.y;
+          drawRow(c, i, rowY, rowHeight);
+          doc.y = rowY + rowHeight;
+
+          if (!c.is_optional) {
+            classTotalOneTime += parseFloat(c.amount);
+          }
+        });
+
+        const otSummaryY = doc.y;
+        doc.fillColor('#f1f5f9').rect(startX, otSummaryY, 515, 25).fill();
+        doc.fillColor('#0f172a').font('Helvetica-Bold').fontSize(10);
+        doc.text('TOTAL ONE-TIME FEES (Non-Optional)', startX + 5, otSummaryY + 8);
+        doc.text(formatINR(classTotalOneTime), startX + 280, otSummaryY + 8, { width: colWidths[2] - 10, align: 'right' });
+        doc.strokeColor('#1e40af').lineWidth(1).rect(startX, otSummaryY, 515, 25).stroke();
+        doc.y = otSummaryY + 45;
+      } else {
+        doc.y += 5;
+      }
+
+      classSummaries.push({
+        name: className,
+        recurring: classTotalAnnual,
+        oneTime: classTotalOneTime,
+        grand: classTotalAnnual + classTotalOneTime
+      });
     });
 
-    // 4. Global Footer
+    // 4. Cross-class summary table
+    if (Object.keys(classGroups).length > 1) {
+      doc.addPage();
+      drawHeader();
+      doc.y = 140;
+
+      doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Fee Summary — All Classes', 40, doc.y);
+      doc.moveDown(1);
+
+      const summaryCols = [155, 120, 120, 120];
+      const summaryHeaders = ['Class Name', 'Recurring Annual', 'One-Time Total', 'Grand Total'];
+      
+      doc.fillColor('#dbeafe').rect(startX, doc.y, 515, 22).fill();
+      doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
+      let curX = startX;
+      summaryHeaders.forEach((h, i) => {
+        doc.text(h, curX + 5, doc.y + 7, { width: summaryCols[i] - 10, align: i > 0 ? 'right' : 'left' });
+        curX += summaryCols[i];
+      });
+      doc.y += 22;
+
+      let grandTotalRecurring = 0;
+      let grandTotalOneTime = 0;
+
+      classSummaries.forEach((s, i) => {
+        const rowY = doc.y;
+        if (i % 2 === 1) doc.fillColor('#f8fafc').rect(startX, rowY, 515, 22).fill();
+        
+        doc.fillColor('#1e293b').font('Helvetica').fontSize(9);
+        let rx = startX;
+        doc.text(s.name, rx + 5, rowY + 7); rx += summaryCols[0];
+        doc.text(formatINR(s.recurring), rx + 5, rowY + 7, { width: summaryCols[1] - 10, align: 'right' }); rx += summaryCols[1];
+        doc.text(formatINR(s.oneTime), rx + 5, rowY + 7, { width: summaryCols[2] - 10, align: 'right' }); rx += summaryCols[2];
+        doc.font('Helvetica-Bold').text(formatINR(s.grand), rx + 5, rowY + 7, { width: summaryCols[3] - 10, align: 'right' });
+        
+        doc.strokeColor('#e2e8f0').lineWidth(0.5).rect(startX, rowY, 515, 22).stroke();
+        doc.y += 22;
+
+        grandTotalRecurring += s.recurring;
+        grandTotalOneTime += s.oneTime;
+      });
+
+      const finalY = doc.y;
+      doc.fillColor('#1e40af').rect(startX, finalY, 515, 25).fill();
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(10);
+      doc.text('TOTAL SYSTEM FEES', startX + 5, finalY + 8);
+      let fx = startX + summaryCols[0];
+      doc.text(formatINR(grandTotalRecurring), fx + 5, finalY + 8, { width: summaryCols[1] - 10, align: 'right' }); fx += summaryCols[1];
+      doc.text(formatINR(grandTotalOneTime), fx + 5, finalY + 8, { width: summaryCols[2] - 10, align: 'right' }); fx += summaryCols[2];
+      doc.text(formatINR(grandTotalRecurring + grandTotalOneTime), fx + 5, finalY + 8, { width: summaryCols[3] - 10, align: 'right' });
+    }
+
+    // 5. Global Footer
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);

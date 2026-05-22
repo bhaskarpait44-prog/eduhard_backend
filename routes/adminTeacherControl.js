@@ -41,6 +41,7 @@ router.get('/teachers', ctrl.teachers);
 router.get('/assignments', ctrl.assignments);
 router.post('/assignments', ctrl.createAssignment);
 router.patch('/assignments/:id', ctrl.updateAssignment);
+router.delete('/assignments/:id', ctrl.deleteAssignment);
 
 router.get('/timetable', ctrl.timetable);
 router.post('/timetable', ctrl.createTimetableSlot);

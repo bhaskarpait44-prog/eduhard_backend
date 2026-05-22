@@ -605,3 +605,371 @@ exports.override = async (req, res, next) => {
     res.ok(updated, 'Attendance overridden.');
   } catch (err) { next(err); }
 };
+
+// ── NEW: Attendance Summary Report PDF ──────────────────────────────────────
+exports.downloadSummaryReportPdf = async (req, res, next) => {
+  try {
+    const { session_id, class_id, section_id, from_date, to_date } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!session_id || !class_id || !section_id || !from_date || !to_date) {
+      return res.fail('Missing required parameters.');
+    }
+
+    const [[school]] = await sequelize.query(`SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`, { replacements: { schoolId } });
+    if (!school) return res.fail('School record not found.');
+
+    const [[meta]] = await sequelize.query(`
+      SELECT c.name AS class_name, sec.name AS section_name, sess.name AS session_name
+      FROM classes c
+      JOIN sections sec ON sec.id = :sectionId AND sec.class_id = c.id
+      JOIN sessions sess ON sess.id = :sessionId
+      WHERE c.id = :classId LIMIT 1;
+    `, { replacements: { classId: class_id, sectionId: section_id, sessionId: session_id } });
+
+    if (!meta) return res.fail('Class, section, or session metadata not found.');
+
+    // Helper: formatINR with ₹ (Shared PDF Rule)
+    const formatINR = (amount) =>
+      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        e.roll_number,
+        s.first_name, s.last_name,
+        COUNT(*) FILTER (WHERE a.status = 'present') AS present,
+        COUNT(*) FILTER (WHERE a.status = 'absent')  AS absent,
+        COUNT(*) FILTER (WHERE a.status = 'leave')   AS leave,
+        COUNT(*) FILTER (WHERE a.status = 'half_day') AS half_day,
+        COUNT(*) FILTER (WHERE a.status NOT IN ('holiday')) AS total_days,
+        ROUND(
+          (COUNT(*) FILTER (WHERE a.status IN ('present','late'))
+           + COUNT(*) FILTER (WHERE a.status = 'half_day') * 0.5
+          )::numeric
+          / NULLIF(COUNT(*) FILTER (WHERE a.status NOT IN ('holiday'))::numeric, 0)
+          * 100, 1
+        ) AS percentage
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN attendance a ON a.enrollment_id = e.id
+        AND a.date BETWEEN :fromDate AND :toDate
+      WHERE e.session_id = :sessionId
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+        AND e.status = 'active'
+      GROUP BY e.id, e.roll_number, s.first_name, s.last_name
+      ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D','','g'),''),'999999')::int, s.first_name
+    `, { replacements: { fromDate: from_date, toDate: to_date, sessionId: session_id, classId: class_id, sectionId: section_id } });
+
+    if (!rows || rows.length === 0) {
+      return res.fail('No active enrollments found for the selected criteria.');
+    }
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${meta.class_name}_${meta.section_name}_${from_date}.pdf"`);
+    doc.pipe(res);
+
+    const drawHeader = () => {
+      doc.rect(0, 0, 595, 100).fill('#1e40af');
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 20);
+      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 42);
+      doc.font('Helvetica-Bold').fontSize(14).text('ATTENDANCE SUMMARY REPORT', 40, 62);
+      doc.font('Helvetica').fontSize(10).text(`From: ${new Date(from_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}  To: ${new Date(to_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, 40, 78);
+      doc.text(`Class: ${meta.class_name} | Section: ${meta.section_name} | Session: ${meta.session_name}`, 250, 78);
+      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleString()} | By: ${req.user.name}`, 400, 20, { align: 'right', width: 155 });
+    };
+
+    drawHeader();
+    doc.y = 110;
+
+    // Summary Stats Bar
+    const totalStudents = rows.length;
+    const avgPct = (rows.reduce((acc, r) => acc + parseFloat(r.percentage || 0), 0) / (totalStudents || 1)).toFixed(1);
+    const perfectAtt = rows.filter(r => parseFloat(r.percentage) >= 100).length;
+    const below75 = rows.filter(r => parseFloat(r.percentage) < 75).length;
+
+    doc.fillColor('#dbeafe').rect(40, doc.y, 515, 44).fill();
+    doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(14);
+    
+    const statBoxWidth = 515 / 4;
+    let curX = 40;
+    
+    const drawStat = (val, label, x) => {
+      doc.text(val, x, doc.y + 8, { width: statBoxWidth, align: 'center' });
+      doc.font('Helvetica').fontSize(8).text(label, x, doc.y + 24, { width: statBoxWidth, align: 'center' });
+      doc.font('Helvetica-Bold').fontSize(14);
+    };
+
+    drawStat(totalStudents, 'Total Students', curX); curX += statBoxWidth;
+    drawStat(`${avgPct}%`, 'Avg Attendance %', curX); curX += statBoxWidth;
+    drawStat(perfectAtt, 'Perfect Attendance', curX); curX += statBoxWidth;
+    drawStat(below75, 'Below 75%', curX);
+
+    doc.y += 60;
+
+    // Table
+    const colWidths = [40, 160, 45, 45, 40, 40, 45, 60];
+    const headers = ['Roll', 'Student Name', 'P', 'A', 'L', 'HD', 'Days', '%'];
+
+    const drawTableHeaders = () => {
+      doc.fillColor('#dbeafe').rect(40, doc.y, 515, 22).fill();
+      doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
+      let tx = 40;
+      headers.forEach((h, i) => {
+        const align = i > 1 ? 'right' : 'left';
+        doc.text(h, tx + 5, doc.y + 7, { width: colWidths[i] - 10, align });
+        tx += colWidths[i];
+      });
+      doc.y += 22;
+    };
+
+    drawTableHeaders();
+
+    rows.forEach((row, i) => {
+      const rowHeight = 22;
+      if (doc.y + rowHeight > 750) {
+        doc.addPage();
+        drawHeader();
+        doc.y = 110;
+        drawTableHeaders();
+      }
+
+      const rowY = doc.y;
+      const pct = parseFloat(row.percentage || 0);
+      const isLow = pct < 75;
+
+      if (isLow) doc.fillColor('#fef2f2').rect(40, rowY, 515, rowHeight).fill();
+      else if (i % 2 === 1) doc.fillColor('#f8fafc').rect(40, rowY, 515, rowHeight).fill();
+
+      doc.fillColor('#1e293b').font('Helvetica').fontSize(9);
+      let rx = 40;
+      doc.text(row.roll_number || '-', rx + 5, rowY + 7); rx += colWidths[0];
+      doc.text(`${row.first_name} ${row.last_name}`, rx + 5, rowY + 7, { width: colWidths[1] - 10 }); rx += colWidths[1];
+      doc.text(row.present, rx + 5, rowY + 7, { width: colWidths[2] - 10, align: 'right' }); rx += colWidths[2];
+      doc.text(row.absent, rx + 5, rowY + 7, { width: colWidths[3] - 10, align: 'right' }); rx += colWidths[3];
+      doc.text(row.leave, rx + 5, rowY + 7, { width: colWidths[4] - 10, align: 'right' }); rx += colWidths[4];
+      doc.text(row.half_day, rx + 5, rowY + 7, { width: colWidths[5] - 10, align: 'right' }); rx += colWidths[5];
+      doc.text(row.total_days, rx + 5, rowY + 7, { width: colWidths[6] - 10, align: 'right' }); rx += colWidths[6];
+
+      let pctColor = '#15803d';
+      if (pct < 75) pctColor = '#b91c1c';
+      else if (pct < 90) pctColor = '#b45309';
+
+      doc.fillColor(pctColor).font('Helvetica-Bold').text(`${pct}%`, rx + 5, rowY + 7, { width: colWidths[7] - 10, align: 'right' });
+      
+      doc.y = rowY + rowHeight;
+    });
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, 820);
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, 820, { align: 'right', width: 100 });
+    }
+
+    doc.end();
+  } catch (err) { next(err); }
+};
+
+// ── NEW: Individual Student Attendance Card PDF ────────────────────────────
+exports.downloadStudentCardPdf = async (req, res, next) => {
+  try {
+    const { enrollment_id, from_date, to_date } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!enrollment_id || !from_date || !to_date) return res.fail('Missing parameters.');
+
+    const [[school]] = await sequelize.query(`SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`, { replacements: { schoolId } });
+    if (!school) return res.fail('School record not found.');
+
+    const [[student]] = await sequelize.query(`
+      SELECT 
+        s.first_name, s.last_name, s.admission_no, 
+        c.name AS class_name, sec.name AS section_name,
+        sp.photo_path
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      JOIN classes c ON c.id = e.class_id
+      JOIN sections sec ON sec.id = e.section_id
+      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE e.id = :enrollmentId LIMIT 1
+    `, { replacements: { enrollmentId: enrollment_id } });
+
+    if (!student) return res.fail('Student enrollment record not found.');
+
+    // Helper: formatINR with ₹ (Shared PDF Rule)
+    const formatINR = (amount) =>
+      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+
+    const [records] = await sequelize.query(`
+      SELECT date, status FROM attendance 
+      WHERE enrollment_id = :enrollmentId AND date BETWEEN :fromDate AND :toDate
+      ORDER BY date ASC
+    `, { replacements: { enrollmentId: enrollment_id, fromDate: from_date, toDate: to_date } });
+
+    if (!records || records.length === 0) {
+      return res.fail('No attendance records found for the selected date range.');
+    }
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_${student.first_name}.pdf"`);
+    doc.pipe(res);
+
+    const drawHeader = () => {
+      doc.rect(0, 0, 595, 100).fill('#1e40af');
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 20);
+      doc.font('Helvetica-Bold').fontSize(14).text('STUDENT ATTENDANCE RECORD', 40, 62);
+      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleString()}`, 400, 20, { align: 'right', width: 155 });
+    };
+
+    drawHeader();
+    doc.y = 120;
+
+    // Student Info Card
+    doc.fillColor('#f8fafc').rect(40, 110, 515, 100).fill().stroke('#e2e8f0');
+    doc.fillColor('#1e293b').font('Helvetica-Bold').fontSize(14).text(`${student.first_name} ${student.last_name}`, 60, 125);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${student.admission_no}`, 60, 145);
+    doc.text(`Class: ${student.class_name} (${student.section_name})`, 60, 160);
+    doc.text(`Period: ${from_date} to ${to_date}`, 60, 175);
+
+    // Stats Ring
+    const stats = await getAttendancePercent(parseInt(enrollment_id));
+    const pct = parseFloat(stats.percentage || 0);
+    const ringX = 480, ringY = 160, radius = 36;
+    
+    doc.save();
+    doc.lineWidth(8).strokeColor('#f1f5f9').circle(ringX, ringY, radius).stroke();
+    
+    let ringColor = '#15803d';
+    if (pct < 75) ringColor = '#b91c1c';
+    else if (pct < 90) ringColor = '#b45309';
+
+    const endAngle = (pct / 100) * 360;
+    // PDFKit uses degrees for arcs, 0 is at 3 o'clock, clockwise.
+    // To start at 12 o'clock, start at -90.
+    doc.lineWidth(8).strokeColor(ringColor)
+       .arc(ringX, ringY, radius, -90, (endAngle - 90))
+       .stroke();
+    doc.restore();
+
+    doc.fillColor('#1e293b').font('Helvetica-Bold').fontSize(16).text(`${pct.toFixed(0)}%`, ringX - 30, ringY - 8, { width: 60, align: 'center' });
+
+    // Monthly Breakdown Table
+    doc.y = 230;
+    doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Monthly Breakdown', 40, doc.y);
+    doc.moveDown(0.5);
+
+    const months = {};
+    records.forEach(r => {
+      const m = new Date(r.date).toLocaleString('default', { month: 'long', year: 'numeric' });
+      if (!months[m]) months[m] = { present: 0, absent: 0, leave: 0, half_day: 0, working: 0 };
+      if (r.status !== 'holiday') months[m].working++;
+      if (r.status === 'present' || r.status === 'late') months[m].present++;
+      else if (r.status === 'absent') months[m].absent++;
+      else if (r.status === 'leave') months[m].leave++;
+      else if (r.status === 'half_day') months[m].half_day++;
+    });
+
+    const mCols = [140, 60, 60, 60, 60, 75, 60];
+    const mHeaders = ['Month', 'P', 'A', 'L', 'HD', 'Working', '%'];
+    
+    doc.fillColor('#dbeafe').rect(40, doc.y, 515, 20).fill();
+    doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
+    let mx = 40;
+    mHeaders.forEach((h, i) => { doc.text(h, mx + 5, doc.y + 6, { width: mCols[i] - 10, align: i > 0 ? 'right' : 'left' }); mx += mCols[i]; });
+    doc.y += 20;
+
+    Object.entries(months).forEach(([name, data], i) => {
+      const rowY = doc.y;
+      if (i % 2 === 1) doc.fillColor('#f8fafc').rect(40, rowY, 515, 20).fill();
+      doc.fillColor('#1e293b').font('Helvetica').fontSize(9);
+      
+      const effective = data.present + (data.half_day * 0.5);
+      const mPct = data.working > 0 ? ((effective / data.working) * 100).toFixed(1) : '0.0';
+      
+      let rx = 40;
+      doc.text(name, rx + 5, rowY + 6); rx += mCols[0];
+      doc.text(data.present, rx + 5, rowY + 6, { width: mCols[1] - 10, align: 'right' }); rx += mCols[1];
+      doc.text(data.absent, rx + 5, rowY + 6, { width: mCols[2] - 10, align: 'right' }); rx += mCols[2];
+      doc.text(data.leave, rx + 5, rowY + 6, { width: mCols[3] - 10, align: 'right' }); rx += mCols[3];
+      doc.text(data.half_day, rx + 5, rowY + 6, { width: mCols[4] - 10, align: 'right' }); rx += mCols[4];
+      doc.text(data.working, rx + 5, rowY + 6, { width: mCols[5] - 10, align: 'right' }); rx += mCols[5];
+      doc.font('Helvetica-Bold').text(`${mPct}%`, rx + 5, rowY + 6, { width: mCols[6] - 10, align: 'right' });
+      doc.y += 20;
+    });
+
+    // Calendar Grid (Miniature squares)
+    doc.moveDown(1.5);
+    doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Attendance Calendar', 40, doc.y);
+    doc.moveDown(0.5);
+
+    const monthList = [...new Set(records.map(r => new Date(r.date).toISOString().slice(0, 7)))];
+    
+    for (const mStr of monthList) {
+      if (doc.y > 650) doc.addPage() && drawHeader() && (doc.y = 120);
+      
+      const [y, m] = mStr.split('-').map(Number);
+      const mName = new Date(y, m - 1).toLocaleString('default', { month: 'long' });
+      
+      doc.fillColor('#475569').font('Helvetica-Bold').fontSize(9).text(mName, 40, doc.y);
+      doc.moveDown(0.3);
+      
+      let gridX = 40;
+      const firstDay = new Date(y, m - 1, 1).getDay(); // 0=Sun
+      const adjustedFirstDay = firstDay === 0 ? 6 : firstDay - 1; // 0=Mon
+      const daysInMonth = new Date(y, m, 0).getDate();
+      
+      const dayHeaders = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+      doc.fontSize(7).font('Helvetica');
+      dayHeaders.forEach((h, i) => doc.text(h, gridX + i * 15, doc.y, { width: 15, align: 'center' }));
+      doc.y += 10;
+
+      let currentX = gridX + adjustedFirstDay * 15;
+      let currentY = doc.y;
+
+      for (let d = 1; d <= daysInMonth; d++) {
+        const dStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+        const rec = records.find(r => r.date === dStr);
+        
+        let color = '#f1f5f9'; // Not marked
+        if (rec) {
+          if (rec.status === 'present' || rec.status === 'late') color = '#dcfce7';
+          else if (rec.status === 'absent') color = '#fee2e2';
+          else if (rec.status === 'leave') color = '#fef3c7';
+          else if (rec.status === 'half_day') color = '#dbeafe';
+        }
+        
+        doc.rect(currentX + 1.5, currentY + 1.5, 12, 12).fill(color);
+        
+        if ((adjustedFirstDay + d) % 7 === 0) {
+          currentX = gridX;
+          currentY += 15;
+        } else {
+          currentX += 15;
+        }
+      }
+      doc.y = currentY + 25;
+    }
+
+    // Legend
+    doc.switchToPage(doc.bufferedPageRange().count - 1);
+    doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+    doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, 820);
+    doc.text(`Page 1 of 1`, 450, 820, { align: 'right', width: 100 });
+
+    doc.end();
+  } catch (err) { next(err); }
+};

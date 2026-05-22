@@ -17,6 +17,10 @@ router.get('/left', requireAdminOrTeacher, ctrl.getLeftStudents);
 // ── Graduated Students ───────────────────────────────────────────────────────
 router.get('/graduated', requireAdminOrTeacher, ctrl.getGraduatedStudents);
 
+// ── PDF Downloads ────────────────────────────────────────────────────────────
+router.get('/left/download', requireAdminOrTeacher, ctrl.downloadLeftStudentsPdf);
+router.get('/graduated/download', requireAdminOrTeacher, ctrl.downloadGraduatedStudentsPdf);
+
 // ── Student Actions ──────────────────────────────────────────────────────────
 
 // Mark as Left
