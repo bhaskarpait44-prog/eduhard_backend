@@ -443,4 +443,27 @@ router.post('/refresh', async (req, res) => {
   }
 });
 
+/**
+ * Logout - Blacklist the current token
+ */
+router.post('/logout', authenticate, async (req, res) => {
+  try {
+    const header = req.headers.authorization;
+    const token = header.split(' ')[1];
+    const decoded = jwt.decode(token);
+
+    if (decoded && decoded.exp) {
+      const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+      if (ttl > 0) {
+        const redis = require('../config/redis');
+        await redis.setex(`blacklist:${token}`, ttl, 'true');
+      }
+    }
+
+    res.ok({}, 'Logged out successfully.');
+  } catch (err) {
+    res.fail('Logout failed.', [err.message]);
+  }
+});
+
 module.exports = router;

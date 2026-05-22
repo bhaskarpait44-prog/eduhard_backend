@@ -6,6 +6,7 @@ const validate = require('../middlewares/validate');
 const { requireAdmin, requireAdminOrTeacher, requireRole } = require('../middlewares/auth');
 const { requirePermission } = require('../middlewares/checkPermission');
 const ctrl     = require('../controllers/studentController');
+const { cache } = require('../middlewares/cache');
 const multer   = require('multer');
 const path     = require('path');
 
@@ -33,9 +34,9 @@ router.post('/',                  requireAdmin, [
   body('profile.email').isEmail().withMessage('A valid student email is required'),
 ], validate, ctrl.admit);
 
-router.get('/',                   requireRole('admin', 'teacher', 'receptionist'), ctrl.list);
+router.get('/',                   requireRole('admin', 'teacher', 'receptionist'), cache(300), ctrl.list);
 
-router.get('/:id',                requireAdminOrTeacher, [
+router.get('/:id',                requireAdminOrTeacher, cache(600), [
   param('id').isInt(),
 ], validate, ctrl.getById);
 

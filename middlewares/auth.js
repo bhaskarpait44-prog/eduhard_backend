@@ -9,6 +9,7 @@
 const jwt = require('jsonwebtoken');
 const sequelize = require('../config/database');
 const { normalizeUserRole } = require('../utils/roles');
+const redis = require('../config/redis');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -68,6 +69,20 @@ const authenticate = async (req, res, next) => {
     }
 
     const token = header.split(' ')[1];
+
+    // Check if token is blacklisted in Redis (only if Redis is connected)
+    if (redis.status === 'ready') {
+      const isBlacklisted = await redis.get(`blacklist:${token}`);
+      if (isBlacklisted) {
+        return res.status(401).json({
+          success: false,
+          data: null,
+          message: 'Token has been invalidated. Please log in again.',
+          errors: ['Token blacklisted'],
+        });
+      }
+    }
+
     const decoded = jwt.verify(token, JWT_SECRET);
 
     if (decoded.studentId || decoded.role === 'student') {

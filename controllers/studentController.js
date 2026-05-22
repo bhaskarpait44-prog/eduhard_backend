@@ -5,6 +5,7 @@ const bcrypt           = require('bcryptjs');
 const auditLogger      = require('../utils/auditLogger');
 const profileVersioning = require('../utils/profileVersioning');
 const { generateStudentPassword } = require('../utils/studentCredentials');
+const { invalidateCache } = require('../middlewares/cache');
 
 // ── GET /api/students ────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
@@ -331,6 +332,9 @@ exports.admit = async (req, res, next) => {
         }
       },
     }, 'Student admitted and parent account linked/created successfully.', 201);
+
+    // Invalidate student list cache
+    invalidateCache(schoolId, '/api/students*');
   } catch (err) { next(err); }
 };
 
@@ -883,6 +887,9 @@ exports.updateIdentity = async (req, res, next) => {
     `, { replacements: { ...updates, id } });
 
     res.ok(updated, 'Student identity updated. Audit log written.');
+
+    // Invalidate student list and detail cache
+    invalidateCache(req.user.school_id, '/api/students*');
   } catch (err) { next(err); }
 };
 
@@ -911,6 +918,9 @@ exports.updateProfile = async (req, res, next) => {
       new_version : result.newVersion,
       old_version : { id: result.oldVersion.id, valid_from: result.oldVersion.valid_from, valid_to: result.oldVersion.valid_to },
     }, 'Profile updated. New version created.');
+
+    // Invalidate student list and detail cache
+    invalidateCache(req.user.school_id, '/api/students*');
   } catch (err) { next(err); }
 };
 
@@ -1043,6 +1053,9 @@ exports.toggleStatus = async (req, res, next) => {
     });
 
     res.ok({ is_active: newIsActive }, `Student account ${newIsActive ? 'activated' : 'deactivated'} successfully.`);
+
+    // Invalidate student list and detail cache
+    invalidateCache(schoolId, '/api/students*');
   } catch (err) { next(err); }
 };
 
@@ -1081,6 +1094,9 @@ exports.remove = async (req, res, next) => {
     });
 
     res.ok({}, 'Student deleted successfully.');
+
+    // Invalidate student list and detail cache
+    invalidateCache(schoolId, '/api/students*');
   } catch (err) { next(err); }
 };
 
