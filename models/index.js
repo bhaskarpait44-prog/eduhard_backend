@@ -48,6 +48,7 @@ const LibraryBook          = require('./LibraryBook');
 const LibraryIssue         = require('./LibraryIssue');
 const LibrarySetting       = require('./LibrarySetting');
 const Notice               = require('./Notice');
+const Certificate          = require('./Certificate');
 
 
 // ── Associations ────────────────────────────────────────────────────────────
@@ -69,6 +70,9 @@ School.hasMany(StaffAttendance, { foreignKey: 'school_id', as: 'staffAttendanceR
 StaffAttendance.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 School.hasMany(Expense, { foreignKey: 'school_id', as: 'expenses' });
 Expense.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+
+School.hasMany(Certificate, { foreignKey: 'school_id', as: 'certificates' });
+Certificate.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 
 School.hasMany(SalaryStructure, { foreignKey: 'school_id', as: 'salaryStructures' });
 SalaryStructure.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
@@ -263,6 +267,16 @@ Notice.belongsTo(Student, { foreignKey: 'target_student_id', as: 'targetStudent'
 Notice.belongsTo(Teacher, { foreignKey: 'target_teacher_id', as: 'targetTeacher' });
 Notice.belongsTo(Subject, { foreignKey: 'target_subject_id', as: 'targetSubject' });
 
+// Certificates
+Certificate.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+Student.hasMany(Certificate, { foreignKey: 'student_id', as: 'certificates' });
+
+Certificate.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
+Teacher.hasMany(Certificate, { foreignKey: 'teacher_id', as: 'certificates' });
+
+Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
+User.hasMany(Certificate, { foreignKey: 'issued_by', as: 'issuedCertificates' });
+
 // AuditLog has no Sequelize association — queried by table_name + record_id directly
 
 const db = {
@@ -315,6 +329,7 @@ const db = {
   LibraryBook,
   LibraryIssue,
   LibrarySetting,
+  Certificate,
 };
 
 module.exports = db;

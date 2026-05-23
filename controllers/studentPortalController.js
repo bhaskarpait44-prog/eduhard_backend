@@ -1979,17 +1979,130 @@ exports.materialDetail = async (req, res, next) => {
 exports.attendanceExport = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
+    const { from_date, to_date } = req.query;
+    
+    // Default to current year if no dates provided
+    const now = new Date();
+    const from = from_date || `${now.getFullYear()}-01-01`;
+    const to = to_date || now.toISOString().slice(0, 10);
+
+    const [[school]] = await sequelize.query(`
+      SELECT name, address, phone 
+      FROM schools 
+      WHERE id = :schoolId 
+      LIMIT 1
+    `, { replacements: { schoolId: req.user.school_id } });
+
     const [records] = await sequelize.query(`
       SELECT date, status, override_reason
       FROM attendance
       WHERE enrollment_id = :enrollmentId
+        AND date BETWEEN :from AND :to
       ORDER BY date DESC;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
+    `, { 
+      replacements: { 
+        enrollmentId: context.enrollmentId,
+        from,
+        to
+      } 
+    });
 
-    // In a real app, this would generate a PDF or CSV. 
-    // For now, we return the data which the frontend can handle or we send a message.
-    res.ok({ records }, 'Attendance data for export loaded.');
-  } catch (err) { next(err); }
+    if (!records || records.length === 0) {
+      return res.fail('No attendance records found for the selected period.', [], 404);
+    }
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${context.student.first_name}.pdf"`);
+    doc.pipe(res);
+
+    // Header
+    doc.rect(0, 0, 595, 100).fill('#7C3AED');
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(20).text(school.name.toUpperCase(), 40, 25);
+    doc.font('Helvetica').fontSize(10).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 50);
+    doc.font('Helvetica-Bold').fontSize(14).text('STUDENT ATTENDANCE REPORT', 40, 70);
+    doc.fontSize(8).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 155 });
+
+    doc.y = 120;
+
+    // Student Details
+    doc.fillColor('#F8FAFC').rect(40, 110, 515, 80).fill().stroke('#E2E8F0');
+    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, 125);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no}`, 60, 145);
+    doc.text(`Class: ${context.student.class_name} (${context.student.section_name}) | Roll: ${context.student.roll_number || 'N/A'}`, 60, 160);
+    doc.text(`Period: ${from} to ${to}`, 60, 175);
+
+    // Stats
+    const summary = await getAttendanceSummary(context.enrollmentId);
+    const pct = parseFloat(summary.percentage || 0);
+    
+    doc.fillColor('#7C3AED').rect(400, 120, 140, 60).fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${pct.toFixed(1)}%`, 400, 135, { width: 140, align: 'center' });
+    doc.fontSize(9).text('Overall Attendance', 400, 155, { width: 140, align: 'center' });
+
+    doc.y = 210;
+    doc.fillColor('#7C3AED').font('Helvetica-Bold').fontSize(12).text('Attendance History', 40, doc.y);
+    doc.moveDown(0.5);
+
+    // Table Headers
+    const colWidths = [120, 120, 275];
+    const headers = ['Date', 'Status', 'Remarks'];
+    
+    doc.fillColor('#F1F5F9').rect(40, doc.y, 515, 20).fill();
+    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(10);
+    let hx = 40;
+    headers.forEach((h, i) => {
+      doc.text(h, hx + 10, doc.y + 5, { width: colWidths[i] - 10 });
+      hx += colWidths[i];
+    });
+    doc.y += 20;
+
+    // Table Rows
+    records.forEach((record, index) => {
+      if (doc.y > 750) {
+        doc.addPage();
+        // Re-draw mini header on new page
+        doc.rect(0, 0, 595, 40).fill('#7C3AED');
+        doc.fillColor('white').font('Helvetica-Bold').fontSize(12).text('Attendance History (Continued)', 40, 15);
+        doc.y = 60;
+      }
+
+      const rowY = doc.y;
+      if (index % 2 === 1) doc.fillColor('#F8FAFC').rect(40, rowY, 515, 20).fill();
+      
+      doc.fillColor('#1E293B').font('Helvetica').fontSize(10);
+      let rx = 40;
+      
+      const formattedDate = new Date(record.date).toLocaleDateString('en-GB', { 
+        day: '2-digit', month: 'short', year: 'numeric' 
+      });
+      
+      doc.text(formattedDate, rx + 10, rowY + 5); rx += colWidths[0];
+      
+      let statusColor = '#16A34A'; // present
+      if (record.status === 'absent') statusColor = '#EF4444';
+      else if (record.status === 'late' || record.status === 'half_day') statusColor = '#D97706';
+      
+      doc.fillColor(statusColor).font('Helvetica-Bold').text(record.status.toUpperCase(), rx + 10, rowY + 5); 
+      rx += colWidths[1];
+      
+      doc.fillColor('#64748B').font('Helvetica').text(record.override_reason || record.remarks || '-', rx + 10, rowY + 5, { width: colWidths[2] - 10 });
+      
+      doc.y = rowY + 20;
+    });
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fillColor('#94A3B8').fontSize(8).text(`Page ${i + 1} of ${range.count}`, 40, 800, { align: 'center', width: 515 });
+    }
+
+    doc.end();
+  } catch (err) { 
+    next(err); 
+  }
 };
 
 exports.resultsExport = async (req, res, next) => {
@@ -1997,10 +2110,38 @@ exports.resultsExport = async (req, res, next) => {
     const context = await getStudentContext(req);
     const examId = Number(req.params.examId);
     
-    // Use existing reportCard logic for data
+    // Fee check
+    const feeSummary = await getFeeSummary(context);
+    const [[sr]] = await sequelize.query(`
+      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
+    `, { replacements: { enrollmentId: context.enrollmentId } });
+    
+    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
+
+    if (isWithheld) {
+      return res.fail(`Result withheld due to pending fees of ${feeSummary.total_pending}.`, [], 403);
+    }
+
+    const [[exam]] = await sequelize.query(`
+      SELECT id, name, exam_type, start_date, end_date, status
+      FROM exams
+      WHERE id = :examId
+      LIMIT 1;
+    `, { replacements: { examId } });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [[school]] = await sequelize.query(`
+      SELECT name, address, phone 
+      FROM schools 
+      WHERE id = :schoolId 
+      LIMIT 1
+    `, { replacements: { schoolId: req.user.school_id } });
+
     const [rows] = await sequelize.query(`
       SELECT
         sub.name AS subject_name,
+        sub.combined_total_marks AS total_marks,
         er.marks_obtained,
         er.grade,
         er.is_pass
@@ -2016,6 +2157,84 @@ exports.resultsExport = async (req, res, next) => {
       }
     });
 
-    res.ok({ results: rows }, 'Exam results for export loaded.');
+    if (!rows || rows.length === 0) {
+      return res.fail('No result records found for this exam.', [], 404);
+    }
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Result_${exam.name}_${context.student.first_name}.pdf"`);
+    doc.pipe(res);
+
+    // Header
+    doc.rect(0, 0, 595, 100).fill('#1E40AF');
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(20).text(school.name.toUpperCase(), 40, 25);
+    doc.font('Helvetica').fontSize(10).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 50);
+    doc.font('Helvetica-Bold').fontSize(14).text('EXAMINATION REPORT CARD', 40, 70);
+    doc.fontSize(8).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 155 });
+
+    doc.y = 120;
+
+    // Student & Exam Details
+    doc.fillColor('#F8FAFC').rect(40, 110, 515, 80).fill().stroke('#E2E8F0');
+    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, 125);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no} | Roll: ${context.student.roll_number || 'N/A'}`, 60, 145);
+    doc.text(`Class: ${context.student.class_name} (${context.student.section_name})`, 60, 160);
+    doc.font('Helvetica-Bold').text(`Exam: ${exam.name} (${exam.exam_type})`, 60, 175);
+
+    const totalObtained = rows.reduce((sum, row) => sum + Number(row.marks_obtained || 0), 0);
+    const totalMax = rows.reduce((sum, row) => sum + Number(row.total_marks || 0), 0);
+    const percentage = totalMax > 0 ? ((totalObtained / totalMax) * 100).toFixed(1) : '0.0';
+
+    doc.fillColor('#1E40AF').rect(400, 120, 140, 60).fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${percentage}%`, 400, 135, { width: 140, align: 'center' });
+    doc.fontSize(9).text('Final Percentage', 400, 155, { width: 140, align: 'center' });
+
+    doc.y = 210;
+    doc.fillColor('#1E40AF').font('Helvetica-Bold').fontSize(12).text('Subject Wise Marks', 40, doc.y);
+    doc.moveDown(0.5);
+
+    // Table Headers
+    const colWidths = [200, 100, 100, 115];
+    const headers = ['Subject', 'Max Marks', 'Obtained', 'Grade'];
+    
+    doc.fillColor('#EFF6FF').rect(40, doc.y, 515, 20).fill();
+    doc.fillColor('#1E3A8A').font('Helvetica-Bold').fontSize(10);
+    let hx = 40;
+    headers.forEach((h, i) => {
+      doc.text(h, hx + 10, doc.y + 5, { width: colWidths[i] - 10 });
+      hx += colWidths[i];
+    });
+    doc.y += 20;
+
+    // Table Rows
+    rows.forEach((row, index) => {
+      const rowY = doc.y;
+      if (index % 2 === 1) doc.fillColor('#F8FAFC').rect(40, rowY, 515, 20).fill();
+      
+      doc.fillColor('#1E293B').font('Helvetica').fontSize(10);
+      let rx = 40;
+      doc.text(row.subject_name, rx + 10, rowY + 5); rx += colWidths[0];
+      doc.text(String(row.total_marks), rx + 10, rowY + 5); rx += colWidths[1];
+      
+      const obt = row.marks_obtained ?? 'ABS';
+      const isPass = row.is_pass !== false;
+      doc.fillColor(isPass ? '#1E293B' : '#EF4444').font(isPass ? 'Helvetica' : 'Helvetica-Bold').text(String(obt), rx + 10, rowY + 5); 
+      rx += colWidths[2];
+      
+      doc.fillColor('#1E293B').font('Helvetica-Bold').text(row.grade || '-', rx + 10, rowY + 5);
+      
+      doc.y = rowY + 20;
+    });
+
+    // Summary at bottom
+    doc.moveDown(1);
+    doc.strokeColor('#E2E8F0').lineWidth(1).moveTo(40, doc.y).lineTo(555, doc.y).stroke();
+    doc.moveDown(0.5);
+    doc.font('Helvetica-Bold').fontSize(11).text(`Grand Total: ${totalObtained} / ${totalMax}`, 40, doc.y, { align: 'right', width: 515 });
+
+    doc.end();
   } catch (err) { next(err); }
 };
