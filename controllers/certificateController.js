@@ -9,27 +9,31 @@ const certificateController = {
       const { school_id } = req.user;
       const { type, recipient_type, student_id, teacher_id, status, search, page = 1, limit = 20 } = req.query;
 
-      const where = { school_id };
-      if (type) where.type = type;
-      if (recipient_type) where.recipient_type = recipient_type;
-      if (student_id) where.student_id = student_id;
-      if (teacher_id) where.teacher_id = teacher_id;
-      if (status) where.status = status;
+      const andConditions = [{ school_id }];
+      if (type)           andConditions.push({ type });
+      if (status)         andConditions.push({ status });
+      if (student_id)     andConditions.push({ student_id });
+      if (teacher_id)     andConditions.push({ teacher_id });
+      if (recipient_type) andConditions.push({ recipient_type });
 
       if (search) {
-        where[Op.or] = [
-          { certificate_no: { [Op.iLike]: `%${search}%` } },
-          { '$student.first_name$': { [Op.iLike]: `%${search}%` } },
-          { '$student.last_name$': { [Op.iLike]: `%${search}%` } },
-          { '$teacher.first_name$': { [Op.iLike]: `%${search}%` } },
-          { '$teacher.last_name$': { [Op.iLike]: `%${search}%` } },
-        ];
+        andConditions.push({
+          [Op.or]: [
+            { certificate_no: { [Op.iLike]: `%${search}%` } },
+            { '$student.first_name$': { [Op.iLike]: `%${search}%` } },
+            { '$student.last_name$': { [Op.iLike]: `%${search}%` } },
+            { '$teacher.first_name$': { [Op.iLike]: `%${search}%` } },
+            { '$teacher.last_name$': { [Op.iLike]: `%${search}%` } },
+          ]
+        });
       }
 
+      const where = { [Op.and]: andConditions };
       const offset = (page - 1) * limit;
 
       const { count, rows } = await Certificate.findAndCountAll({
         where,
+        subQuery: false,
         include: [
           { 
             model: Student, 
@@ -39,6 +43,7 @@ const certificateController = {
               {
                 model: Enrollment,
                 as: 'enrollments',
+                separate: true,
                 limit: 1,
                 order: [['created_at', 'DESC']],
                 include: [{ model: Class, as: 'class', attributes: ['name'] }]
@@ -156,6 +161,7 @@ const certificateController = {
             {
               model: Enrollment,
               as: 'enrollments',
+              separate: true,
               limit: 1,
               order: [['created_at', 'DESC']],
               include: [{ model: Class, as: 'class', attributes: ['name'] }]
@@ -211,6 +217,7 @@ const certificateController = {
               {
                 model: Enrollment,
                 as: 'enrollments',
+                separate: true,
                 limit: 1,
                 order: [['created_at', 'DESC']],
                 include: [{ model: Class, as: 'class', attributes: ['name'] }]
