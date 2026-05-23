@@ -48,12 +48,10 @@ const Certificate = sequelize.define('Certificate', {
     type: DataTypes.ENUM('active', 'revoked'),
     defaultValue: 'active',
   },
-  pdf_path: {
-    type: DataTypes.STRING,
-  },
 }, {
   tableName: 'certificates',
   timestamps: true,
+  underscored: true,
 });
 
 module.exports = Certificate;
