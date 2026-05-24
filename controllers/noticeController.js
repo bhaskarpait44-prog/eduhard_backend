@@ -3,6 +3,7 @@
 const sequelize = require('../config/database');
 const { sendPushToStudents, sendPushToUsers, sendPushToTeachers } = require('../utils/pushNotifier');
 const { Notice } = require('../models');
+const { invalidateCache } = require('../middlewares/cache');
 
 /**
  * Helper to resolve audience to student IDs for push notifications
@@ -185,6 +186,7 @@ exports.createNotice = async (req, res, next) => {
     });
 
     const createdNotice = result[0];
+    invalidateCache(schoolId, '/api/notices*');
     res.ok(createdNotice, 'Notice posted successfully.', 201);
 
     // Push notifications in background
@@ -300,6 +302,7 @@ exports.updateNotice = async (req, res, next) => {
     if (attachment_path !== undefined) updateData.attachment_path = attachment_path;
 
     await notice.update(updateData);
+    invalidateCache(schoolId, '/api/notices*');
     res.ok(notice, 'Notice updated successfully.');
   } catch (err) { next(err); }
 };
@@ -322,6 +325,7 @@ exports.deleteNotice = async (req, res, next) => {
       RETURNING id
     `, { replacements });
     if (result.length === 0) return res.fail('Notice not found.', [], 404);
+    invalidateCache(schoolId, '/api/notices*');
     res.ok(null, 'Notice deleted.');
   } catch (err) { next(err); }
 };

@@ -3,6 +3,21 @@
 const { Certificate, Student, Teacher, User, School, Enrollment, Class, Family } = require('../models');
 const { Op } = require('sequelize');
 
+/**
+ * Helper to format date as "DD Month YYYY"
+ */
+const formatDate = (date) => {
+  if (!date) return 'N/A';
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return date;
+  const day = d.getDate();
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+  return `${day} ${months[d.getMonth()]} ${d.getFullYear()}`;
+};
+
 const certificateController = {
   async getCertificates(req, res) {
     try {
@@ -30,13 +45,38 @@ const certificateController = {
       if (recipient_type) andConditions.push({ recipient_type });
 
       if (search) {
+        // Bug 9 Fix: Search matching student/teacher IDs first to avoid findAndCountAll count issues with associations
+        const matchingStudents = await Student.findAll({
+          where: {
+            school_id,
+            [Op.or]: [
+              { first_name: { [Op.iLike]: `%${search}%` } },
+              { last_name: { [Op.iLike]: `%${search}%` } },
+              { admission_no: { [Op.iLike]: `%${search}%` } },
+            ]
+          },
+          attributes: ['id']
+        });
+        const studentIds = matchingStudents.map(s => s.id);
+
+        const matchingTeachers = await Teacher.findAll({
+          where: {
+            school_id,
+            [Op.or]: [
+              { first_name: { [Op.iLike]: `%${search}%` } },
+              { last_name: { [Op.iLike]: `%${search}%` } },
+              { employee_id: { [Op.iLike]: `%${search}%` } },
+            ]
+          },
+          attributes: ['id']
+        });
+        const teacherIds = matchingTeachers.map(t => t.id);
+
         andConditions.push({
           [Op.or]: [
             { certificate_no: { [Op.iLike]: `%${search}%` } },
-            { '$student.first_name$': { [Op.iLike]: `%${search}%` } },
-            { '$student.last_name$': { [Op.iLike]: `%${search}%` } },
-            { '$teacher.first_name$': { [Op.iLike]: `%${search}%` } },
-            { '$teacher.last_name$': { [Op.iLike]: `%${search}%` } },
+            { student_id: { [Op.in]: studentIds } },
+            { teacher_id: { [Op.in]: teacherIds } },
           ]
         });
       }
@@ -45,14 +85,13 @@ const certificateController = {
 
       const { count, rows } = await Certificate.findAndCountAll({
         where,
-        subQuery: false,
         distinct: true,
         include: [
           { 
             model: Student, 
             as: 'student', 
             attributes: ['first_name', 'last_name', 'admission_no'],
-            required: false, // Ensure LEFT JOIN
+            required: false,
             include: [
               {
                 model: Enrollment,
@@ -72,7 +111,7 @@ const certificateController = {
             model: Teacher, 
             as: 'teacher', 
             attributes: ['first_name', 'last_name', 'employee_id', 'designation'],
-            required: false // Ensure LEFT JOIN
+            required: false
           },
           { model: User, as: 'issuer', attributes: ['name'] },
           { model: School, as: 'school' },
@@ -98,6 +137,7 @@ const certificateController = {
 
         return {
           ...c,
+          issued_date: formatDate(c.issued_date), // Bug 1 normalization
           recipient,
           school: c.school
         };
@@ -222,9 +262,11 @@ const certificateController = {
         };
       }
 
+      const c = certificate.toJSON();
       return res.ok({ 
         certificate: {
-          ...certificate.toJSON(),
+          ...c,
+          issued_date: formatDate(c.issued_date), // Bug 1 normalization
           school,
           recipient,
         } 
@@ -285,6 +327,7 @@ const certificateController = {
       return res.ok({ 
         certificate: {
           ...c,
+          issued_date: formatDate(c.issued_date), // Bug 1 normalization
           recipient,
           school: c.school
         } 

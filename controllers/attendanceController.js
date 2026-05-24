@@ -2,6 +2,7 @@
 
 const sequelize = require('../config/database');
 const { getAttendancePercent } = require('../utils/attendanceCalculator');
+const { invalidateCache } = require('../middlewares/cache');
 
 function parseOptionalInteger(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -61,6 +62,8 @@ exports.markSingle = async (req, res, next) => {
     `, { replacements: { enrollment_id, date, status, method, marked_by: req.user.id } });
 
     res.ok(record, 'Attendance marked.', 201);
+    invalidateCache(req.user.school_id, '/api/attendance*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -116,6 +119,8 @@ exports.markBulk = async (req, res, next) => {
       skipped : 0,
       updated_enrollment_ids: updated,
     }, `${inserted.length} record(s) marked. ${updated.length} updated.`);
+    invalidateCache(req.user.school_id, '/api/attendance*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -603,6 +608,8 @@ exports.override = async (req, res, next) => {
 
     if (!updated) return res.fail('Attendance record not found.', [], 404);
     res.ok(updated, 'Attendance overridden.');
+    invalidateCache(req.user.school_id, '/api/attendance*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 

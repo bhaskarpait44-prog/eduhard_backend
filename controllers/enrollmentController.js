@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { invalidateCache } = require('../middlewares/cache');
 
 async function getSessionMeta(sessionId, schoolId) {
   const [[session]] = await sequelize.query(`
@@ -144,6 +145,9 @@ exports.enroll = async (req, res, next) => {
     `, { replacements: { student_id, session_id, class_id, section_id, stream: normalizedStream, roll_number: finalRollNumber, joined_date, joining_type } });
 
     res.ok(enrollment, 'Student enrolled successfully.', 201);
+    invalidateCache(req.user.school_id, '/api/enrollments*');
+    invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -268,6 +272,9 @@ exports.promote = async (req, res, next) => {
     });
 
     res.ok({ promoted_count: promoted.length, students: promoted }, `${promoted.length} student(s) promoted.`);
+    invalidateCache(req.user.school_id, '/api/enrollments*');
+    invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -585,6 +592,9 @@ exports.processPromotions = async (req, res, next) => {
       skipped_count: processed.filter((row) => row.action === 'skipped_existing_target').length,
       items: processed,
     }, `${processed.length} student promotion record(s) processed.`);
+    invalidateCache(req.user.school_id, '/api/enrollments*');
+    invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -631,6 +641,9 @@ exports.transfer = async (req, res, next) => {
     });
 
     res.ok({ enrollment_id, new_section_id }, 'Student transferred to new section.');
+    invalidateCache(req.user.school_id, '/api/enrollments*');
+    invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 

@@ -1,19 +1,28 @@
 'use strict';
 const sequelize = require('../config/database');
 const { ADMIN_ROLES, DEFAULT_ROLE_PERMISSIONS } = require('../utils/permissionConstants');
+const redis = require('../config/redis');
 
 /**
  * Permission cache: user_id → Set of permission names
- * Cache TTL: 5 minutes. Cleared on permission update.
+ * Cache TTL: 5 minutes.
+ * Bug 8 Fix: Use Redis instead of in-process Map to support multi-process deployments
  */
-const permCache = new Map();  // { userId: { perms: Set, expiry: Date } }
-const CACHE_TTL = 5 * 60 * 1000;  // 5 minutes
+const CACHE_TTL = 300; // 5 minutes in seconds for Redis
 
 async function loadUserPermissions(userId, userRole = null) {
-  const cacheKey = `${userRole || 'user'}_${userId}`;
-  const cached = permCache.get(cacheKey);
-  if (cached && cached.expiry > Date.now()) {
-    return cached.perms;
+  const cacheKey = `perms:${userRole || 'user'}:${userId}`;
+  
+  // Try to load from Redis first
+  if (redis.status === 'ready') {
+    try {
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        return new Set(JSON.parse(cached));
+      }
+    } catch (e) {
+      console.error('[PermissionCache] Load error:', e.message);
+    }
   }
 
   const tableName = userRole === 'teacher' ? 'teacher_permissions' : 'user_permissions';
@@ -26,10 +35,20 @@ async function loadUserPermissions(userId, userRole = null) {
     WHERE up.${idColumn} = :userId;
   `, { replacements: { userId } });
 
-  const perms = new Set(rows.map(r => r.name));
+  const permsArray = rows.map(r => r.name);
+  const perms = new Set(permsArray);
   const defaults = DEFAULT_ROLE_PERMISSIONS[userRole] || [];
   defaults.forEach((permission) => perms.add(permission));
-  permCache.set(cacheKey, { perms, expiry: Date.now() + CACHE_TTL });
+  
+  // Save to Redis
+  if (redis.status === 'ready') {
+    try {
+      await redis.setex(cacheKey, CACHE_TTL, JSON.stringify(Array.from(perms)));
+    } catch (e) {
+      console.error('[PermissionCache] Save error:', e.message);
+    }
+  }
+
   return perms;
 }
 
@@ -46,12 +65,24 @@ async function teacherHasActiveAssignment(userId) {
 }
 
 // Call this after any permission change to clear the cache for a user
-function clearPermissionCache(userId, userRole = 'user') {
-  if (userId) {
-    const cacheKey = `${userRole}_${userId}`;
-    permCache.delete(cacheKey);
-  } else {
-    permCache.clear();
+async function clearPermissionCache(userId, userRole = 'user') {
+  if (redis.status !== 'ready') return;
+
+  try {
+    if (userId) {
+      const cacheKey = `perms:${userRole}:${userId}`;
+      await redis.del(cacheKey);
+    } else {
+      // If no userId, wipe all perms (e.g. system-wide change)
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'perms:*', 'COUNT', 100);
+        cursor = nextCursor;
+        if (keys.length > 0) await redis.del(...keys);
+      } while (cursor !== '0');
+    }
+  } catch (e) {
+    console.error('[PermissionCache] Clear error:', e.message);
   }
 }
 

@@ -335,6 +335,7 @@ exports.admit = async (req, res, next) => {
 
     // Invalidate student list cache
     invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -890,6 +891,7 @@ exports.updateIdentity = async (req, res, next) => {
 
     // Invalidate student list and detail cache
     invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -921,6 +923,7 @@ exports.updateProfile = async (req, res, next) => {
 
     // Invalidate student list and detail cache
     invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -1056,6 +1059,7 @@ exports.toggleStatus = async (req, res, next) => {
 
     // Invalidate student list and detail cache
     invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -1097,6 +1101,7 @@ exports.remove = async (req, res, next) => {
 
     // Invalidate student list and detail cache
     invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 

@@ -4,6 +4,7 @@ const XLSX = require('xlsx');
 const sequelize = require('../config/database');
 const examEngine = require('../utils/examEngine');
 const computeSubjectMarks = require('../utils/computeSubjectMarks');
+const { invalidateCache } = require('../middlewares/cache');
 
 const toNumberOrNull = (value) => {
   if (value === '' || value === null || value === undefined) return null;
@@ -462,6 +463,9 @@ exports.create = async (req, res, next) => {
     });
 
     res.ok(exam, 'Exam created.', 201);
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -518,6 +522,9 @@ exports.update = async (req, res, next) => {
     `, { replacements: { id, status, userId: req.user.id } });
 
     res.ok({ id: Number(id), status }, `Exam ${status === 'published' ? 'published' : 'moved back to draft'}.`);
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -644,6 +651,9 @@ exports.updateTimetable = async (req, res, next) => {
     });
 
     res.ok({ updated_count: subjects.length }, 'Exam timetable saved.');
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -719,6 +729,9 @@ exports.reviewSubject = async (req, res, next) => {
       review_status,
       review_note,
     }, `Subject ${review_status}.`);
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -788,6 +801,9 @@ exports.approveAllSubjects = async (req, res, next) => {
       approved_count: updatedRows.length,
       subject_ids: updatedRows.map((row) => Number(row.subject_id)),
     }, updatedRows.length > 0 ? 'All submitted subjects approved.' : 'No submitted subjects were pending approval.');
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -946,6 +962,9 @@ exports.uploadMarks = async (req, res, next) => {
     });
 
     res.ok({ processed: processedCount }, `Successfully uploaded marks for ${processedCount} students.`);
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -982,5 +1001,8 @@ exports.remove = async (req, res, next) => {
     `, { replacements: { id } });
 
     res.ok({ id: Number(id) }, 'Exam deleted successfully.');
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };

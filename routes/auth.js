@@ -12,12 +12,16 @@ const { loadUserPermissions } = require('../middlewares/checkPermission');
 const { normalizeUserRole } = require('../utils/roles');
 const { sendEmail } = require('../utils/mailer');
 const studentLoginValidation = require('../middlewares/studentLoginValidator');
+const redis = require('../config/redis');
 
 const RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 20;
 const LOCKOUT_DURATION = 5 * 60 * 1000; // 5 minutes
 
 const { authenticate } = require('../middlewares/auth');
+
+// Bug 6 Fix: Use process.env.JWT_SECRET directly. Startup check in server.js ensures it exists.
+const JWT_SECRET = process.env.JWT_SECRET;
 
 router.post('/forgot-password',
   authLimiter,
@@ -226,7 +230,7 @@ router.post('/student/login',
           name: student.name,
           email: student.email 
         },
-        process.env.JWT_SECRET || 'secret',
+        JWT_SECRET,
         { expiresIn: '24h' }
       );
 
@@ -346,7 +350,7 @@ router.post('/login',
           name: user.name,
           email: user.email 
         },
-        process.env.JWT_SECRET || 'secret',
+        JWT_SECRET,
         { expiresIn: '24h' }
       );
 
@@ -420,12 +424,23 @@ router.post('/push-token',
   }
 );
 
+// Bug 5 Fix: Check if refresh token is blacklisted
 router.post('/refresh', async (req, res) => {
   try {
     const { refresh_token } = req.body;
     if (!refresh_token) return res.fail('Invalid refresh token.', [], 401);
 
-    const decoded = jwt.verify(refresh_token, process.env.JWT_SECRET || 'secret');
+    // Bug 7: Hash the token before checking blacklist
+    const tokenHash = crypto.createHash('sha256').update(refresh_token).digest('hex');
+
+    if (redis.status === 'ready') {
+      const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
+      if (isBlacklisted) {
+        return res.fail('Token has been revoked. Please log in again.', [], 401);
+      }
+    }
+
+    const decoded = jwt.verify(refresh_token, JWT_SECRET);
     const payload = {
       userId: decoded.userId,
       schoolId: decoded.schoolId,
@@ -435,7 +450,7 @@ router.post('/refresh', async (req, res) => {
       studentId: decoded.studentId
     };
 
-    const token = jwt.sign(payload, process.env.JWT_SECRET || 'secret', { expiresIn: '24h' });
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
 
     return res.ok({ token, refresh_token }, 'Token refreshed successfully.');
   } catch (err) {
@@ -444,21 +459,34 @@ router.post('/refresh', async (req, res) => {
 });
 
 /**
- * Logout - Blacklist the current token
+ * Logout - Blacklist both access and refresh tokens
  */
 router.post('/logout', authenticate, async (req, res) => {
   try {
+    const { refresh_token } = req.body;
     const header = req.headers.authorization;
-    const token = header.split(' ')[1];
-    const decoded = jwt.decode(token);
-
-    if (decoded && decoded.exp) {
-      const ttl = decoded.exp - Math.floor(Date.now() / 1000);
-      if (ttl > 0) {
-        const redis = require('../config/redis');
-        await redis.setex(`blacklist:${token}`, ttl, 'true');
+    const accessToken = header.split(' ')[1];
+    
+    // Bug 4 Fix: Blacklist both tokens if they exist and have exp
+    const blacklistToken = async (token) => {
+      if (!token) return;
+      try {
+        const decoded = jwt.decode(token);
+        if (decoded && decoded.exp) {
+          const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+          if (ttl > 0 && redis.status === 'ready') {
+            // Bug 7: Store SHA-256 hash instead of full token
+            const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+            await redis.setex(`blacklist:${tokenHash}`, ttl, '1');
+          }
+        }
+      } catch (e) {
+        console.error('[Logout] Failed to blacklist token:', e.message);
       }
-    }
+    };
+
+    await blacklistToken(accessToken);
+    if (refresh_token) await blacklistToken(refresh_token);
 
     res.ok({}, 'Logged out successfully.');
   } catch (err) {

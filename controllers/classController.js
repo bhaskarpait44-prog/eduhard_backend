@@ -3,6 +3,7 @@ const PDFDocument = require('pdfkit');
 const sequelize = require('../config/database');
 const { Class, Section, Subject, Teacher } = require('../models');
 const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
+const { invalidateCache } = require('../middlewares/cache');
 
 // ── Audit context helper ──────────────────────────────────────────────────
 const auditCtx = (req) => ({
@@ -262,6 +263,7 @@ exports.create = async (req, res, next) => {
       ...auditCtx(req),
     });
 
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(cls, 'Class created successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -397,6 +399,7 @@ exports.update = async (req, res, next) => {
       });
     }
 
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(cls, 'Class updated successfully.');
   } catch (err) { next(err); }
 };
@@ -462,6 +465,7 @@ exports.remove = async (req, res, next) => {
       ...auditCtx(req),
     });
 
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(
       { closed_enrollments: force ? parseInt(cnt, 10) : 0 },
       force && parseInt(cnt) > 0
@@ -493,6 +497,7 @@ exports.toggleActive = async (req, res, next) => {
       ...auditCtx(req),
     });
 
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(cls, `Class ${newStatus ? 'activated' : 'deactivated'} successfully.`);
   } catch (err) { next(err); }
 };
@@ -772,6 +777,7 @@ exports.createSection = async (req, res, next) => {
       capacity,
       class_teacher_id: class_teacher_id || null
     });
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok(section, 'Section added successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -788,6 +794,7 @@ exports.updateSection = async (req, res, next) => {
     if (!section) return res.fail('Section not found.', [], 404);
 
     await section.update({ name, capacity, is_active, class_teacher_id: class_teacher_id || null });
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok(section, 'Section updated successfully.');
   } catch (err) { next(err); }
 };
@@ -815,6 +822,7 @@ exports.deleteSection = async (req, res, next) => {
     }
 
     await section.update({ is_deleted: true });
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok({}, 'Section deleted successfully.');
   } catch (err) { next(err); }
 };

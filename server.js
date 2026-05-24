@@ -9,6 +9,12 @@
  */
 
 require('dotenv').config();
+
+if (!process.env.JWT_SECRET) {
+  console.error('FATAL: JWT_SECRET environment variable is not set. Application cannot start.');
+  process.exit(1);
+}
+
 const logger = require('./utils/logger');
 const sequelize = require('./config/database');
 const app = require('./app');
@@ -90,7 +96,7 @@ async function boot() {
     }
 
     app.listen(PORT, '0.0.0.0', () => {
-      const LOCAL_IP = '10.137.4.32';
+      const LOCAL_IP = '10.241.71.32';
       logger.info(`Server running on port ${PORT}`);
       logger.info(`Local access: http://localhost:${PORT}`);
       logger.info(`Mobile access: http://${LOCAL_IP}:${PORT}`);

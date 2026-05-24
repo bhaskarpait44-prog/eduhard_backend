@@ -7,6 +7,7 @@
  */
 
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const sequelize = require('../config/database');
 const { normalizeUserRole } = require('../utils/roles');
 const redis = require('../config/redis');
@@ -70,9 +71,13 @@ const authenticate = async (req, res, next) => {
 
     const token = header.split(' ')[1];
 
+    // Bug 7 Fix: Use SHA-256 hash instead of storing full JWT as Redis key
+    // This saves memory and keeps key size consistent
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
     // Check if token is blacklisted in Redis (only if Redis is connected)
     if (redis.status === 'ready') {
-      const isBlacklisted = await redis.get(`blacklist:${token}`);
+      const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
       if (isBlacklisted) {
         return res.status(401).json({
           success: false,

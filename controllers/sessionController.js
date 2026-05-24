@@ -2,6 +2,7 @@
 
 const sequelize = require('../config/database');
 const { retroactiveHoliday } = require('../utils/attendanceCalculator');
+const { invalidateCache } = require('../middlewares/cache');
 
 // ── POST /api/sessions ───────────────────────────────────────────────────────
 exports.create = async (req, res, next) => {
@@ -40,6 +41,8 @@ exports.create = async (req, res, next) => {
       });
 
       res.ok(session, 'Session created.', 201);
+      invalidateCache(schoolId, '/api/sessions*');
+      invalidateCache(schoolId, '/api/dashboard*');
     });
   } catch (err) { next(err); }
 };
@@ -125,6 +128,8 @@ exports.activate = async (req, res, next) => {
 
       if (!session) return res.fail('Session not found.', [], 404);
       res.ok(session, `Session "${session.name}" activated.`);
+      invalidateCache(req.user.school_id, '/api/sessions*');
+      invalidateCache(req.user.school_id, '/api/dashboard*');
     });
   } catch (err) { next(err); }
 };
@@ -160,6 +165,9 @@ exports.addHoliday = async (req, res, next) => {
       ? `Holiday added. ${retroResult.affectedCount} attendance record(s) updated retroactively.`
       : 'Holiday added.'
     , 201);
+    invalidateCache(req.user.school_id, '/api/sessions*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/attendance*');
   } catch (err) { next(err); }
 };
 
@@ -194,5 +202,6 @@ exports.lock = async (req, res, next) => {
     if (!session) return res.fail('Session not found.', [], 404);
 
     res.ok(session, `Session "${session.name}" has been locked.`);
+    invalidateCache(schoolId, '/api/sessions*');
   } catch (err) { next(err); }
 };

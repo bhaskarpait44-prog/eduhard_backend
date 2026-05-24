@@ -2,6 +2,7 @@
 
 const sequelize  = require('../config/database');
 const feeManager = require('../utils/feeManager');
+const { invalidateCache } = require('../middlewares/cache');
 
 const formatINR = (amount) => {
   return Number(amount).toLocaleString('en-IN', {
@@ -541,6 +542,8 @@ exports.createStructure = async (req, res, next) => {
     });
 
     res.ok(payload, 'Fee structure created.', 201);
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -565,6 +568,8 @@ exports.deleteStructure = async (req, res, next) => {
     if (!deleted) return res.fail('Fee structure not found.', [], 404);
 
     res.ok({ id }, 'Fee structure deleted.');
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -572,6 +577,8 @@ exports.generate = async (req, res, next) => {
   try {
     const result = await feeManager.generateInvoices(req.body.session_id);
     res.ok(result, `${result.invoicesCreated} invoice(s) generated.`);
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -616,6 +623,8 @@ exports.recordPayment = async (req, res, next) => {
     });
 
     res.ok(result, `Payment of ₹${result.amountApplied} applied. Status: ${result.newStatus}.`, 201);
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -624,6 +633,8 @@ exports.carryForward = async (req, res, next) => {
     const { student_id, from_session_id, to_session_id } = req.body;
     const result = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id);
     res.ok(result, `${result.invoicesCarried} invoice(s) carried forward. Total: ₹${result.totalAmountCarried}.`);
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 

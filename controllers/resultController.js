@@ -3,6 +3,7 @@
 const sequelize    = require('../config/database');
 const examEngine   = require('../utils/examEngine');
 const { MarkHistory, GradingScale } = require('../models');
+const { invalidateCache } = require('../middlewares/cache');
 
 async function getClassReviewSummary(sessionId, classId) {
   const [[row]] = await sequelize.query(`
@@ -145,6 +146,8 @@ exports.enterMarks = async (req, res, next) => {
 
     const examStatus = await syncExamStatus(exam_id);
 
+    invalidateCache(exam.school_id, '/api/results*');
+    invalidateCache(exam.school_id, '/api/dashboard*');
     res.ok({ exam_id, enrollment_id, results: saved, exam_status: examStatus }, `${saved.length} subject result(s) saved.`);
   } catch (err) { next(err); }
 };
@@ -632,6 +635,8 @@ exports.calculate = async (req, res, next) => {
     }
 
     const result = await examEngine.calculateResult(enrollment_id, session_id);
+    invalidateCache(req.user.school_id, '/api/results*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok(result, `Result calculated: ${result.result.toUpperCase()} (${result.percentage}%).`);
   } catch (err) { next(err); }
 };
@@ -701,6 +706,8 @@ exports.bulkCalculate = async (req, res, next) => {
     }
 
     res.ok(summary, `Processed ${summary.total} student(s). ${summary.calculated} calculated, ${summary.released} released.`);
+    invalidateCache(req.user.school_id, '/api/results*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -730,6 +737,8 @@ exports.release = async (req, res, next) => {
       }
     });
 
+    invalidateCache(req.user.school_id, '/api/results*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok({ enrollment_id, release_result: !!release }, `Result ${release ? 'released' : 'withheld'} successfully.`);
   } catch (err) { next(err); }
 };
@@ -738,6 +747,8 @@ exports.override = async (req, res, next) => {
   try {
     const { enrollment_id, new_result, reason } = req.body;
     const result = await examEngine.overrideResult(enrollment_id, new_result, reason, req.user.id);
+    invalidateCache(req.user.school_id, '/api/results*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok(result, `Result overridden: ${result.oldResult} → ${result.newResult}.`);
   } catch (err) { next(err); }
 };
@@ -926,6 +937,8 @@ exports.overrideMark = async (req, res, next) => {
       await examEngine.calculateResult(enrollment_id, exam.session_id);
     }
 
+    invalidateCache(exam.school_id, '/api/results*');
+    invalidateCache(exam.school_id, '/api/dashboard*');
     res.ok(updatedRows[0], 'Marks overridden successfully.');
   } catch (err) { next(err); }
 };

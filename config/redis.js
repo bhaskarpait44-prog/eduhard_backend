@@ -2,29 +2,39 @@
 
 const Redis = require('ioredis');
 
+const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+
 const redisConfig = {
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: process.env.REDIS_PORT || 6379,
   password: process.env.REDIS_PASSWORD || null,
-  lazyConnect: true,
-  // Set to null to allow ioredis to keep retrying in the background 
-  // without failing the current request with MaxRetriesPerRequestError
-  maxRetriesPerRequest: null,
-  enableOfflineQueue: true,
+  lazyConnect: !REDIS_ENABLED, // Don't connect if disabled
+  maxRetriesPerRequest: 10,
+  enableOfflineQueue: false,
   retryStrategy(times) {
-    // Keep retrying every 5 seconds if down
-    return 5000;
+    if (!REDIS_ENABLED || times > 10) {
+      if (REDIS_ENABLED) console.error('[Redis] Max retry attempts reached. Stopping retries.');
+      return null; 
+    }
+    return Math.min(times * 500, 5000);
   },
 };
 
 const redis = new Redis(redisConfig);
 
-redis.on('error', (err) => {
-  console.error('[Redis] Error:', err.message);
-});
+if (REDIS_ENABLED) {
+  redis.on('error', (err) => {
+    // Only log connection errors if we actually expect Redis to be there
+    if (err.code !== 'ECONNREFUSED') {
+      console.error('[Redis] Error:', err.message);
+    }
+  });
 
-redis.on('connect', () => {
-  console.log('[Redis] Connected to server.');
-});
+  redis.on('connect', () => {
+    console.log('[Redis] Connected to server.');
+  });
+} else {
+  console.log('[Redis] Caching is disabled via REDIS_ENABLED=false');
+}
 
 module.exports = redis;
