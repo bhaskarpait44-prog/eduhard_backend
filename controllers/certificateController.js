@@ -7,7 +7,20 @@ const certificateController = {
   async getCertificates(req, res) {
     try {
       const { school_id } = req.user;
-      const { type, recipient_type, student_id, teacher_id, status, search, page = 1, limit = 20 } = req.query;
+      const { 
+        type, 
+        recipient_type, 
+        student_id, 
+        teacher_id, 
+        status, 
+        search, 
+        page = 1, 
+        limit = 20 
+      } = req.query;
+
+      const pLimit = parseInt(limit) || 20;
+      const pPage = parseInt(page) || 1;
+      const offset = (pPage - 1) * pLimit;
 
       const andConditions = [{ school_id }];
       if (type)           andConditions.push({ type });
@@ -29,22 +42,22 @@ const certificateController = {
       }
 
       const where = { [Op.and]: andConditions };
-      const offset = (page - 1) * limit;
 
       const { count, rows } = await Certificate.findAndCountAll({
         where,
         subQuery: false,
+        distinct: true,
         include: [
           { 
             model: Student, 
             as: 'student', 
             attributes: ['first_name', 'last_name', 'admission_no'],
+            required: false, // Ensure LEFT JOIN
             include: [
               {
                 model: Enrollment,
                 as: 'enrollments',
                 separate: true,
-                limit: 1,
                 order: [['created_at', 'DESC']],
                 include: [{ model: Class, as: 'class', attributes: ['name'] }]
               },
@@ -55,27 +68,32 @@ const certificateController = {
               }
             ]
           },
-          { model: Teacher, as: 'teacher', attributes: ['first_name', 'last_name', 'employee_id', 'designation'] },
+          { 
+            model: Teacher, 
+            as: 'teacher', 
+            attributes: ['first_name', 'last_name', 'employee_id', 'designation'],
+            required: false // Ensure LEFT JOIN
+          },
           { model: User, as: 'issuer', attributes: ['name'] },
           { model: School, as: 'school' },
         ],
         order: [['created_at', 'DESC']],
-        limit: parseInt(limit),
-        offset: parseInt(offset),
+        limit: pLimit,
+        offset: offset >= 0 ? offset : 0,
       });
 
       // Transform rows for frontend PDF compatibility
       const transformedRows = rows.map(cert => {
         const c = cert.toJSON();
         const recipient = c.recipient_type === 'student' ? {
-          name: `${c.student?.first_name} ${c.student?.last_name}`,
+          name: `${c.student?.first_name || ''} ${c.student?.last_name || ''}`.trim() || 'N/A',
           father_name: c.student?.family?.primary_contact || 'N/A',
-          admission_no: c.student?.admission_no,
+          admission_no: c.student?.admission_no || 'N/A',
           class_name: c.student?.enrollments?.[0]?.class?.name || 'N/A'
         } : {
-          name: `${c.teacher?.first_name} ${c.teacher?.last_name}`,
-          employee_id: c.teacher?.employee_id,
-          designation: c.teacher?.designation
+          name: `${c.teacher?.first_name || ''} ${c.teacher?.last_name || ''}`.trim() || 'N/A',
+          employee_id: c.teacher?.employee_id || 'N/A',
+          designation: c.teacher?.designation || 'Teacher'
         };
 
         return {
@@ -123,6 +141,22 @@ const certificateController = {
 
       const prefix = prefixMap[type] || 'CERT';
       const year = new Date().getFullYear();
+
+      // Duplicate check
+      const existing = await Certificate.findOne({
+        where: {
+          school_id,
+          type,
+          recipient_type,
+          student_id: recipient_type === 'student' ? student_id : null,
+          teacher_id: recipient_type === 'staff' ? teacher_id : null,
+          status: 'active'
+        }
+      });
+
+      if (existing && type === 'transfer') {
+        return res.fail('A Transfer Certificate has already been issued for this student.', [], 400);
+      }
       
       const lastCert = await Certificate.findOne({
         where: {
@@ -193,7 +227,6 @@ const certificateController = {
           ...certificate.toJSON(),
           school,
           recipient,
-          issued_date: new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
         } 
       });
     } catch (error) {
