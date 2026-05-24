@@ -14,6 +14,18 @@ const redis = require('../config/redis');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
+/**
+ * Helper to update user's online status in Redis
+ * Uses a 5-minute TTL as a heartbeat
+ */
+const trackOnlineStatus = (user) => {
+  if (redis.status === 'ready' && user) {
+    const { id, role, school_id } = user;
+    const key = `online:${school_id}:${role}:${id}`;
+    redis.set(key, '1', 'EX', 300).catch(() => {});
+  }
+};
+
 async function resolveStudentFromToken(decoded) {
   if (decoded.studentId) {
     const [[student]] = await sequelize.query(`
@@ -112,6 +124,7 @@ const authenticate = async (req, res, next) => {
         is_active: student.is_active,
       };
 
+      trackOnlineStatus(req.user);
       return next();
     }
 
@@ -140,6 +153,7 @@ const authenticate = async (req, res, next) => {
         role: 'teacher',
         is_active: teacher.is_active,
       };
+      trackOnlineStatus(req.user);
       return next();
     }
 
@@ -169,6 +183,7 @@ const authenticate = async (req, res, next) => {
         role: 'parent',
         is_active: true,
       };
+      trackOnlineStatus(req.user);
       return next();
     }
 
@@ -192,6 +207,8 @@ const authenticate = async (req, res, next) => {
       ...user,
       role: normalizeUserRole(user.role),
     };
+
+    trackOnlineStatus(req.user);
     next();
   } catch (err) {
     const message = err.name === 'TokenExpiredError'

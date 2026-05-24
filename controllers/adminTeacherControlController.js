@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const redis = require('../config/redis');
 const { clearPermissionCache } = require('../middlewares/checkPermission');
 
 const DAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -173,7 +174,7 @@ exports.overview = async (req, res, next) => {
 
 exports.teachers = async (req, res, next) => {
   try {
-    const [rows] = await sequelize.query(`
+    const [teachers] = await sequelize.query(`
       SELECT
         id,
         first_name,
@@ -195,7 +196,18 @@ exports.teachers = async (req, res, next) => {
       },
     });
 
-    res.ok({ teachers: rows }, `${rows.length} teacher(s) found.`);
+    // Check online status in Redis
+    const teachersWithOnlineStatus = await Promise.all(teachers.map(async (teacher) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${req.user.school_id}:teacher:${teacher.id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return { ...teacher, is_online };
+    }));
+
+    res.ok({ teachers: teachersWithOnlineStatus }, `${teachersWithOnlineStatus.length} teacher(s) found.`);
   } catch (err) { next(err); }
 };
 
@@ -222,7 +234,18 @@ exports.assignments = async (req, res, next) => {
       ORDER BY ta.is_active DESC, u.first_name ASC, u.last_name ASC, c.name ASC, sec.name ASC, ta.is_class_teacher DESC;
     `, { replacements: { sessionId: session?.id || 0 } });
 
-    res.ok({ session, assignments: rows }, `${rows.length} teacher assignment(s) found.`);
+    // Check online status in Redis for each teacher in the assignments
+    const assignmentsWithOnlineStatus = await Promise.all(rows.map(async (row) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${req.user.school_id}:teacher:${row.teacher_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return { ...row, is_online };
+    }));
+
+    res.ok({ session, assignments: assignmentsWithOnlineStatus }, `${assignmentsWithOnlineStatus.length} teacher assignment(s) found.`);
   } catch (err) { next(err); }
 };
 

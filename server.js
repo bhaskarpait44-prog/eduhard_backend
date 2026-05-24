@@ -96,7 +96,7 @@ async function boot() {
     }
 
     app.listen(PORT, '0.0.0.0', () => {
-      const LOCAL_IP = '10.241.71.32';
+      const LOCAL_IP = '10.75.163.32';
       logger.info(`Server running on port ${PORT}`);
       logger.info(`Local access: http://localhost:${PORT}`);
       logger.info(`Mobile access: http://${LOCAL_IP}:${PORT}`);

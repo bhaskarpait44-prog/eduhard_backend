@@ -50,18 +50,35 @@ const createLimiter = (max, windowMs, message) => {
 // More robust FailSafe store implementation
 class RobustRedisStore {
   constructor(options) {
+    this.options = options;
     this.redisStore = REDIS_ENABLED ? new RedisStore(options) : null;
+    this.windowMs = options.windowMs || 60000;
+  }
+
+  async init(options) {
+    this.windowMs = options.windowMs || this.windowMs;
+    if (this.redisStore && typeof this.redisStore.init === 'function') {
+      try {
+        await this.redisStore.init(options);
+      } catch (err) {
+        // Initialization might fail if Redis is not yet connected.
+        // We catch it here to allow the server to start; 
+        // increment() will handle the actual fallback behavior.
+      }
+    }
   }
 
   async increment(key) {
+    // If Redis is not ready, immediately use memory fallback
     if (!this.redisStore || redis.status !== 'ready') {
-      return { totalHits: 1, resetTime: new Date(Date.now() + 60000) };
+      return { totalHits: 1, resetTime: new Date(Date.now() + this.windowMs) };
     }
     try {
       return await this.redisStore.increment(key);
     } catch (err) {
+      // If a command fails (e.g. connection lost), log once and fallback
       console.error('[RateLimit] Redis increment failed, falling back:', err.message);
-      return { totalHits: 1, resetTime: new Date(Date.now() + 60000) };
+      return { totalHits: 1, resetTime: new Date(Date.now() + this.windowMs) };
     }
   }
 
@@ -80,12 +97,13 @@ class RobustRedisStore {
   }
 }
 
-const robustLimiter = (max, windowMs, message) => {
+const robustLimiter = (max, windowMs, message, keyPrefix) => {
   return rateLimit({
     windowMs,
     max,
     standardHeaders: true,
     legacyHeaders: false,
+    requestPropertyName: `rateLimit_${keyPrefix}`, // Fix ERR_ERL_DOUBLE_COUNT
     message: {
       success: false,
       message: message || 'Too many requests, please try again later.',
@@ -93,6 +111,8 @@ const robustLimiter = (max, windowMs, message) => {
     },
     store: new RobustRedisStore({
       sendCommand: (...args) => redis.call(...args),
+      prefix: `rl:${keyPrefix}:`,
+      windowMs, // Pass windowMs to constructor as well
     }),
   });
 };
@@ -100,12 +120,12 @@ const robustLimiter = (max, windowMs, message) => {
 /**
  * Global API rate limiter: 300 requests per 15 minutes
  */
-const apiLimiter = robustLimiter(300, 15 * 60 * 1000, 'Too many requests from this IP, please try again after 15 minutes.');
+const apiLimiter = robustLimiter(300, 15 * 60 * 1000, 'Too many requests from this IP, please try again after 15 minutes.', 'api');
 
 /**
  * Authentication rate limiter: 20 requests per 15 minutes
  */
-const authLimiter = robustLimiter(20, 15 * 60 * 1000, 'Too many login attempts, please try again after 15 minutes.');
+const authLimiter = robustLimiter(20, 15 * 60 * 1000, 'Too many login attempts, please try again after 15 minutes.', 'auth');
 
 module.exports = {
   apiLimiter,

@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize        = require('../config/database');
+const redis            = require('../config/redis');
 const bcrypt           = require('bcryptjs');
 const auditLogger      = require('../utils/auditLogger');
 const profileVersioning = require('../utils/profileVersioning');
@@ -148,33 +149,43 @@ exports.list = async (req, res, next) => {
       LIMIT :limit OFFSET :offset;
     `, { replacements });
 
-    const formatted = students.map(student => ({
-      id: student.id,
-      admission_no: student.admission_no,
-      first_name: student.first_name,
-      last_name: student.last_name,
-      date_of_birth: student.date_of_birth,
-      gender: student.gender,
-      status: student.status,
-      is_active: student.is_active,
-      is_deleted: student.is_deleted,
-      enrollment_id: student.enrollment_id || null,
-      roll_number: student.roll_number || null,
-      current_enrollment: student.enrollment_id
-        ? {
-            id: student.enrollment_id,
-            class_id: student.class_id,
-            section_id: student.section_id,
-            session_id: student.session_id,
-            class: student.class,
-            section: student.section,
-            session: student.session,
-            stream: student.stream,
-            roll_number: student.roll_number,
-            joined_date: student.joined_date,
-            status: student.enrollment_status,
-          }
-        : null,
+    const formatted = await Promise.all(students.map(async (student) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${schoolId}:student:${student.id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+
+      return {
+        id: student.id,
+        admission_no: student.admission_no,
+        first_name: student.first_name,
+        last_name: student.last_name,
+        date_of_birth: student.date_of_birth,
+        gender: student.gender,
+        status: student.status,
+        is_active: student.is_active,
+        is_deleted: student.is_deleted,
+        is_online,
+        enrollment_id: student.enrollment_id || null,
+        roll_number: student.roll_number || null,
+        current_enrollment: student.enrollment_id
+          ? {
+              id: student.enrollment_id,
+              class_id: student.class_id,
+              section_id: student.section_id,
+              session_id: student.session_id,
+              class: student.class,
+              section: student.section,
+              session: student.session,
+              stream: student.stream,
+              roll_number: student.roll_number,
+              joined_date: student.joined_date,
+              status: student.enrollment_status,
+            }
+          : null,
+      };
     }));
 
     res.ok({
@@ -830,7 +841,15 @@ exports.getById = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { id } });
 
-    res.ok({ ...student, current_enrollment: enrollment || null }, 'Student retrieved.');
+    // Check online status in Redis
+    let is_online = false;
+    if (redis.status === 'ready') {
+      const key = `online:${req.user.school_id}:student:${id}`;
+      const val = await redis.get(key);
+      is_online = val === '1';
+    }
+
+    res.ok({ ...student, is_online, current_enrollment: enrollment || null }, 'Student retrieved.');
   } catch (err) { next(err); }
 };
 

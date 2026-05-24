@@ -2,6 +2,7 @@
 
 const bcrypt = require('bcryptjs');
 const sequelize = require('../config/database');
+const redis = require('../config/redis');
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -1066,7 +1067,18 @@ exports.myClassOverview = async (req, res, next) => {
       },
     });
 
-    res.ok({ assignment, students }, `${students.length} student(s) found in class overview.`);
+    // Check online status in Redis
+    const studentsWithOnlineStatus = await Promise.all(students.map(async (student) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${req.user.school_id}:student:${student.student_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return { ...student, is_online };
+    }));
+
+    res.ok({ assignment, students: studentsWithOnlineStatus }, `${studentsWithOnlineStatus.length} student(s) found in class overview.`);
   } catch (err) { next(err); }
 };
 
@@ -2228,13 +2240,24 @@ exports.studentList = async (req, res, next) => {
       }
     });
 
-    res.ok({
-      students: rows.map((row) => ({
+    const formattedStudents = await Promise.all(rows.map(async (row) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${req.user.school_id}:student:${row.id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return {
         ...row,
+        is_online,
         fee_balance: classTeacherSections.has(`${row.class_id}:${row.section_id}`) ? row.fee_balance : null,
-      })),
+      };
+    }));
+
+    res.ok({
+      students: formattedStudents,
       available_subjects: [...subjectsMap.values()],
-    }, `${rows.length} student(s) loaded.`);
+    }, `${formattedStudents.length} student(s) loaded.`);
   } catch (err) { next(err); }
 };
 

@@ -2,6 +2,7 @@
 
 const bcrypt = require('bcryptjs');
 const sequelize = require('../config/database');
+const redis = require('../config/redis');
 const logger = require('../utils/logger');
 const { recomputeStudentAchievements } = require('../utils/achievementEngine');
 
@@ -297,7 +298,9 @@ async function getTodaySchedule(context) {
 
   const now = new Date();
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  return rows.map((row) => {
+  
+  // Check online status in Redis for each teacher
+  return Promise.all(rows.map(async (row) => {
     const [startHour, startMinute] = String(row.start_time).slice(0, 5).split(':').map(Number);
     const [endHour, endMinute] = String(row.end_time).slice(0, 5).split(':').map(Number);
     const start = startHour * 60 + startMinute;
@@ -314,8 +317,15 @@ async function getTodaySchedule(context) {
       countdown_minutes = start - currentMinutes;
     }
 
-    return { ...row, status, countdown_minutes };
-  });
+    let is_online = false;
+    if (redis.status === 'ready' && row.teacher_id) {
+      const key = `online:${context.student.school_id}:teacher:${row.teacher_id}`;
+      const val = await redis.get(key);
+      is_online = val === '1';
+    }
+
+    return { ...row, status, countdown_minutes, is_online };
+  }));
 }
 
 async function getLatestExamResult(context) {
@@ -1412,11 +1422,18 @@ exports.homeworkList = async (req, res, next) => {
       },
     });
 
-    const homework = rows.map((row) => {
+    const homework = await Promise.all(rows.map(async (row) => {
       const hasRealSubmission = row.submission_status && row.submission_status !== 'pending';
       let student_status = hasRealSubmission ? row.submission_status : 'pending';
       if (!hasRealSubmission && String(row.due_date) < todayDate()) student_status = 'overdue';
       if (!hasRealSubmission && String(row.due_date) === todayDate()) student_status = 'due_today';
+
+      let is_online = false;
+      if (redis.status === 'ready' && row.teacher_id) {
+        const key = `online:${req.user.school_id}:teacher:${row.teacher_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
 
       return {
         ...row,
@@ -1427,10 +1444,13 @@ exports.homeworkList = async (req, res, next) => {
         submission_status: hasRealSubmission ? row.submission_status : null,
         is_late: hasRealSubmission ? row.is_late : false,
         student_status,
+        is_online,
       };
-    }).filter((row) => !statusFilter || statusFilter === 'all' || row.student_status === statusFilter);
+    }));
+    
+    const filteredHomework = homework.filter((row) => !statusFilter || statusFilter === 'all' || row.student_status === statusFilter);
 
-    res.ok({ homework }, `${homework.length} homework item(s) found.`);
+    res.ok({ homework: filteredHomework }, `${filteredHomework.length} homework item(s) found.`);
   } catch (err) { next(err); }
 };
 
@@ -1586,6 +1606,7 @@ exports.noticeList = async (req, res, next) => {
         n.publish_date,
         n.expiry_date,
         n.target_scope,
+        n.teacher_id,
         COALESCE(NULLIF(TRIM(CONCAT(poster.first_name, ' ', poster.last_name)), ''), admin.name, 'School') AS posted_by,
         COALESCE(n.created_by_role, 'teacher') AS posted_by_role,
         COALESCE(NULLIF(TRIM(CONCAT(poster.first_name, ' ', poster.last_name)), ''), admin.name, 'School') AS teacher_name,
@@ -1628,7 +1649,17 @@ exports.noticeList = async (req, res, next) => {
         category,
       },
     });
-    res.ok({ notices: rows, unread_count: rows.filter((row) => !row.is_read).length }, `${rows.length} notice(s) found.`);
+    const notices = await Promise.all(rows.map(async (row) => {
+      let is_online = false;
+      if (redis.status === 'ready' && row.teacher_role === 'teacher' && row.teacher_id) {
+        const key = `online:${req.user.school_id}:teacher:${row.teacher_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return { ...row, is_online };
+    }));
+
+    res.ok({ notices, unread_count: notices.filter((row) => !row.is_read).length }, `${notices.length} notice(s) found.`);
   } catch (err) { next(err); }
 };
 
@@ -1912,6 +1943,7 @@ exports.materials = async (req, res, next) => {
         sm.file_size,
         sm.created_at,
         sub.name AS subject_name,
+        teacher.id AS teacher_id,
         CONCAT(teacher.first_name, ' ', teacher.last_name) AS teacher_name,
         COALESCE(MAX(mv.viewed_at), NULL) AS last_viewed_at
       FROM study_materials sm
@@ -1924,7 +1956,7 @@ exports.materials = async (req, res, next) => {
         AND sm.class_id = :classId
         AND sm.is_active = true
         AND (:subjectId::int IS NULL OR sm.subject_id = :subjectId)
-      GROUP BY sm.id, sub.name, teacher.name
+      GROUP BY sm.id, sub.name, teacher.id, teacher.first_name, teacher.last_name
       ORDER BY sm.created_at DESC, sm.id DESC;
     `, {
       replacements: {
@@ -1934,7 +1966,18 @@ exports.materials = async (req, res, next) => {
         subjectId,
       },
     });
-    res.ok({ materials: rows }, `${rows.length} study material(s) found.`);
+
+    const materials = await Promise.all(rows.map(async (row) => {
+      let is_online = false;
+      if (redis.status === 'ready' && row.teacher_id) {
+        const key = `online:${req.user.school_id}:teacher:${row.teacher_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return { ...row, is_online };
+    }));
+
+    res.ok({ materials }, `${materials.length} study material(s) found.`);
   } catch (err) { next(err); }
 };
 

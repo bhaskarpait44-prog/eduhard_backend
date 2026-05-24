@@ -3,6 +3,7 @@ const bcrypt    = require('bcryptjs');
 const crypto    = require('crypto');
 const { Op }   = require('sequelize');
 const sequelize = require('../config/database');
+const redis = require('../config/redis');
 const { clearPermissionCache } = require('../middlewares/checkPermission');
 const profileVersioning = require('../utils/profileVersioning');
 const { normalizeUserRole } = require('../utils/roles');
@@ -205,11 +206,23 @@ exports.list = async (req, res, next) => {
       GROUP BY is_active;
     `, { replacements });
 
-    return res.ok({
-      users: users.map((user) => ({
+    // Fetch online status from Redis
+    const usersWithOnlineStatus = await Promise.all(users.map(async (user) => {
+      let is_online = false;
+      if (redis.status === 'ready') {
+        const key = `online:${schoolId}:${user.role}:${user.source_id}`;
+        const val = await redis.get(key);
+        is_online = val === '1';
+      }
+      return {
         ...user,
         role: normalizeUserRole(user.role),
-      })),
+        is_online,
+      };
+    }));
+
+    return res.ok({
+      users: usersWithOnlineStatus,
       pagination: {
         page: parseInt(page), perPage: parseInt(perPage),
         total: parseInt(cnt),
@@ -453,12 +466,22 @@ exports.getById = async (req, res, next) => {
       ORDER BY p.category, p.name;
     `, { replacements: { userId: id } });
 
+    // Check online status in Redis
+    let is_online = false;
+    if (redis.status === 'ready') {
+      const role = isTeacher ? 'teacher' : user.role;
+      const key = `online:${req.user.school_id}:${role}:${id}`;
+      const val = await redis.get(key);
+      is_online = val === '1';
+    }
+
     return res.ok({
       ...user,
       id: uid,
       role: isTeacher ? 'teacher' : normalizeUserRole(user.role),
       permission_names: userPerms.map(p => p.name),
       permissions: userPerms,
+      is_online,
     });
   } catch (err) { next(err); }
 };
