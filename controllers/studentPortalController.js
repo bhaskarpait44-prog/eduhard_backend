@@ -98,6 +98,8 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
     SELECT
       s.id,
       s.school_id,
+      sch.name AS school_name,
+      sch.upi_id AS school_upi_id,
       s.admission_no,
       s.first_name,
       s.last_name,
@@ -132,6 +134,7 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
       sess.name AS session_name,
       class_teacher.name AS class_teacher_name
     FROM students s
+    JOIN schools sch ON sch.id = s.school_id
     LEFT JOIN student_profiles sp
       ON sp.student_id = s.id
      AND sp.is_current = true
@@ -188,6 +191,11 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
     classId: student.class_id ? Number(student.class_id) : null,
     sectionId: student.section_id ? Number(student.section_id) : null,
     sessionId: student.session_id ? Number(student.session_id) : null,
+    school: {
+      id: student.school_id,
+      name: student.school_name,
+      upi_id: student.school_upi_id
+    }
   };
 }
 
@@ -1172,7 +1180,12 @@ exports.fees = async (req, res, next) => {
       ORDER BY fi.due_date ASC, fi.id DESC;
     `, { replacements: { enrollmentId: context.enrollmentId } });
     const summary = await getFeeSummary(context);
-    res.ok({ invoices: rows, summary }, 'Fee data loaded.');
+    res.ok({ 
+      invoices: rows, 
+      summary, 
+      school_upi: context.school.upi_id,
+      school_name: context.school.name
+    }, 'Fee data loaded.');
   } catch (err) { next(err); }
 };
 

@@ -680,6 +680,7 @@ exports.collectFees = async (req, res, next) => {
         paymentMode: payment_mode,
         transactionRef: reference || null,
         receivedBy: req.user.id,
+        upiId: upi_id || null,
       });
 
       if (payment_mode === 'cheque') {
@@ -1545,11 +1546,12 @@ exports.bounceCheque = async (req, res, next) => {
 
 exports.getUpiRequests = async (req, res, next) => {
   try {
-    const { status = 'pending' } = req.query;
+    const { status = 'pending', page = 1, limit = 20 } = req.query;
     const schoolId = req.user.school_id;
+    const offset = (Number(page) - 1) * Number(limit);
 
     const [requests] = await sequelize.query(`
-      SELECT 
+      SELECT
         upr.*,
         s.first_name || ' ' || s.last_name AS student_name,
         s.admission_no,
@@ -1567,14 +1569,31 @@ exports.getUpiRequests = async (req, res, next) => {
       JOIN fee_structures fs ON fs.id = fi.fee_structure_id
       LEFT JOIN users u ON u.id = upr.confirmed_by
       WHERE s.school_id = :schoolId
-        AND (:status = 'all' OR upr.status = :status)
-      ORDER BY upr.created_at DESC;
+        ${status !== 'all' ? 'AND upr.status = :status' : ''}
+      ORDER BY upr.created_at DESC
+      LIMIT :limit OFFSET :offset;
+    `, { replacements: { schoolId, status, limit: Number(limit), offset } });
+
+    const [[{ total }]] = await sequelize.query(`
+      SELECT COUNT(*) AS total
+      FROM upi_payment_requests upr
+      JOIN enrollments e ON e.id = upr.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE s.school_id = :schoolId
+        ${status !== 'all' ? 'AND upr.status = :status' : ''};
     `, { replacements: { schoolId, status } });
 
-    res.ok({ requests });
+    res.ok({ 
+      requests, 
+      pagination: {
+        total: Number(total),
+        page: Number(page),
+        limit: Number(limit),
+        pages: Math.ceil(Number(total) / Number(limit))
+      }
+    });
   } catch (err) { next(err); }
 };
-
 exports.confirmUpiRequest = async (req, res, next) => {
   try {
     const { id } = req.params;

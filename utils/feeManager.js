@@ -400,7 +400,7 @@ async function carryForwardFees(studentId, fromSessionId, toSessionId) {
  * }}
  */
 async function applyPayment(invoiceId, paymentData) {
-  const { amount, paymentDate, paymentMode, transactionRef, receivedBy } = paymentData;
+  const { amount, paymentDate, paymentMode, transactionRef, receivedBy, upiId } = paymentData;
 
   if (!amount || amount <= 0) {
     throw new Error('Payment amount must be greater than 0.');
@@ -451,9 +451,9 @@ async function applyPayment(invoiceId, paymentData) {
     // ── Step 1: Insert payment record ────────────────────────────────────
     const insertResult = await sequelize.query(`
       INSERT INTO fee_payments
-        (invoice_id, amount, payment_date, payment_mode, transaction_ref, received_by, created_at)
+        (invoice_id, amount, payment_date, payment_mode, transaction_ref, upi_id, received_by, created_at)
       VALUES
-        (:invoiceId, :amount, :paymentDate, :paymentMode, :transactionRef, :receivedBy, NOW())
+        (:invoiceId, :amount, :paymentDate, :paymentMode, :transactionRef, :upiId, :receivedBy, NOW())
       RETURNING id;
     `, {
       replacements: {
@@ -462,6 +462,7 @@ async function applyPayment(invoiceId, paymentData) {
         paymentDate,
         paymentMode,
         transactionRef : transactionRef || null,
+        upiId          : upiId || null,
         receivedBy     : receivedBy    || null,
       },
       transaction: t,
