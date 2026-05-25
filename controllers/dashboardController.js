@@ -90,6 +90,7 @@ exports.getAdminStats = async (req, res, next) => {
       },
       classAttendance: await sequelize.query(`
         SELECT 
+          c.id,
           c.name AS class_name,
           COUNT(e.id)::int AS total,
           COUNT(a.id)::int AS total_marked,

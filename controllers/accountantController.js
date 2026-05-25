@@ -1543,6 +1543,101 @@ exports.bounceCheque = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.getUpiRequests = async (req, res, next) => {
+  try {
+    const { status = 'pending' } = req.query;
+    const schoolId = req.user.school_id;
+
+    const [requests] = await sequelize.query(`
+      SELECT 
+        upr.*,
+        s.first_name || ' ' || s.last_name AS student_name,
+        s.admission_no,
+        c.name AS class_name,
+        sec.name AS section_name,
+        fs.name AS fee_name,
+        fi.due_date,
+        u.name AS confirmed_by_name
+      FROM upi_payment_requests upr
+      JOIN enrollments e ON e.id = upr.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      JOIN fee_invoices fi ON fi.id = upr.invoice_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      LEFT JOIN users u ON u.id = upr.confirmed_by
+      WHERE s.school_id = :schoolId
+        AND (:status = 'all' OR upr.status = :status)
+      ORDER BY upr.created_at DESC;
+    `, { replacements: { schoolId, status } });
+
+    res.ok({ requests });
+  } catch (err) { next(err); }
+};
+
+exports.confirmUpiRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { transaction_ref } = req.body;
+    const adminId = req.user.id;
+
+    await sequelize.transaction(async (t) => {
+      const [[request]] = await sequelize.query(`
+        SELECT * FROM upi_payment_requests WHERE id = :id FOR UPDATE;
+      `, { replacements: { id }, transaction: t });
+
+      if (!request) throw new Error('Request not found.');
+      if (request.status !== 'pending') throw new Error(`Request is already ${request.status}.`);
+
+      const feeManager = require('../utils/feeManager');
+      const paymentDate = new Date().toISOString().slice(0, 10);
+
+      // Call existing payment logic
+      await feeManager.applyPayment(request.invoice_id, {
+        amount: request.amount,
+        paymentDate,
+        paymentMode: 'online',
+        transactionRef: transaction_ref || request.upi_transaction_id,
+        receivedBy: adminId,
+      }, { transaction: t });
+
+      // Update request status
+      await sequelize.query(`
+        UPDATE upi_payment_requests
+        SET status = 'confirmed', confirmed_by = :adminId, confirmed_at = NOW(), updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id, adminId }, transaction: t });
+    });
+
+    res.ok({}, 'UPI payment confirmed successfully.');
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
+  } catch (err) { next(err); }
+};
+
+exports.rejectUpiRequest = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    if (!reason) return res.fail('Rejection reason is required.', [], 422);
+
+    const [[updated]] = await sequelize.query(`
+      UPDATE upi_payment_requests
+      SET status = 'rejected', rejected_reason = :reason, updated_at = NOW()
+      WHERE id = :id AND status = 'pending'
+      RETURNING id;
+    `, { replacements: { id, reason } });
+
+    if (!updated) return res.fail('Request not found or already processed.', [], 404);
+
+    res.ok({}, 'UPI payment request rejected.');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
+  } catch (err) { next(err); }
+};
+
 exports.getProfile = async (req, res, next) => {
   try {
     const [[profile]] = await sequelize.query(`

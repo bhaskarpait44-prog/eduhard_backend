@@ -23,6 +23,14 @@ router.get('/results/:examId', [param('examId').isInt()], validate, ctrl.resultB
 
 router.get('/fees', ctrl.fees);
 router.get('/fees/summary', ctrl.feeSummary);
+router.get('/fees/school-upi', ctrl.getSchoolUpi);
+router.get('/fees/upi-payment-requests', ctrl.getUpiPaymentRequests);
+router.post('/fees/upi-payment-request', [
+  body('invoice_id').isInt(),
+  body('amount').isNumeric(),
+  body('upi_transaction_id').isString().isLength({ min: 8 }),
+  body('student_note').optional({ nullable: true }).isString(),
+], validate, ctrl.createUpiPaymentRequest);
 router.get('/fees/payments', ctrl.feePayments);
 router.get('/fees/receipts/:paymentId', [param('paymentId').isInt()], validate, ctrl.feeReceipt);
 router.get('/fees/:invoiceId', [param('invoiceId').isInt()], validate, ctrl.feeInvoiceDetail);

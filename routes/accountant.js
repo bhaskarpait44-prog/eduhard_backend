@@ -88,7 +88,11 @@ router.get('/refunds/report', requirePermission('fees.refund'), ctrl.getRefundRe
 router.get('/cheques', requirePermission('fees.collect'), ctrl.getCheques);
 router.get('/cheques/pending', requirePermission('fees.collect'), ctrl.getPendingCheques);
 router.post('/cheques/:id/clear', requirePermission('fees.collect'), ctrl.clearCheque);
-router.post('/cheques/:id/bounce', requirePermission('fees.collect'), ctrl.bounceCheque);
+router.get('/cheques/:id/bounce', requirePermission('fees.collect'), ctrl.bounceCheque);
+
+router.get('/upi-requests', requirePermission('fees.view'), ctrl.getUpiRequests);
+router.post('/upi-requests/:id/confirm', requirePermission('fees.collect'), ctrl.confirmUpiRequest);
+router.post('/upi-requests/:id/reject', requirePermission('fees.collect'), ctrl.rejectUpiRequest);
 
 router.get('/profile', requirePermission('fees.view'), ctrl.getProfile);
 router.get('/profile/activity', requirePermission('fees.view'), ctrl.getProfileActivity);

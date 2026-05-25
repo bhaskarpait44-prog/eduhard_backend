@@ -1145,14 +1145,110 @@ exports.fees = async (req, res, next) => {
         fi.paid_date,
         fi.status,
         fi.carry_from_invoice_id,
-        ROUND(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid, 2) AS balance_remaining
-      FROM fee_invoices fi
-      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+        ROUND(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid, 2) AS balance_remaining,
+        (
+          SELECT status
+          FROM upi_payment_requests
+          WHERE invoice_id = fi.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) AS upi_latest_status,
+        (
+          SELECT rejected_reason
+          FROM upi_payment_requests
+          WHERE invoice_id = fi.id AND status = 'rejected'
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) AS upi_rejected_reason,
+        (
+          SELECT created_at
+          FROM upi_payment_requests
+          WHERE invoice_id = fi.id
+          ORDER BY created_at DESC
+          LIMIT 1
+        ) AS upi_submitted_at
+        FROM fee_invoices fi      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
       WHERE fi.enrollment_id = :enrollmentId
       ORDER BY fi.due_date ASC, fi.id DESC;
     `, { replacements: { enrollmentId: context.enrollmentId } });
     const summary = await getFeeSummary(context);
     res.ok({ invoices: rows, summary }, 'Fee data loaded.');
+  } catch (err) { next(err); }
+};
+
+exports.getSchoolUpi = async (req, res, next) => {
+  try {
+    const [[school]] = await sequelize.query(`
+      SELECT upi_id, name AS school_name
+      FROM schools
+      WHERE id = :schoolId
+      LIMIT 1;
+    `, { replacements: { schoolId: req.user.school_id } });
+
+    if (!school) return res.fail('School not found.', [], 404);
+    res.ok(school);
+  } catch (err) { next(err); }
+};
+
+exports.createUpiPaymentRequest = async (req, res, next) => {
+  try {
+    const context = await getStudentContext(req);
+    const { invoice_id, amount, upi_transaction_id, student_note } = req.body;
+
+    if (!invoice_id || !amount || !upi_transaction_id) {
+      return res.fail('invoice_id, amount, and upi_transaction_id are required.', [], 422);
+    }
+
+    // Ensure invoice belongs to student
+    const owned = await ensureOwnedInvoice(req, context, invoice_id);
+    if (!owned) return res.fail('Invoice not found or access denied.', [], 403);
+
+    // Check for duplicate pending request
+    const [[existing]] = await sequelize.query(`
+      SELECT id FROM upi_payment_requests
+      WHERE invoice_id = :invoiceId AND status = 'pending'
+      LIMIT 1;
+    `, { replacements: { invoiceId: invoice_id } });
+
+    if (existing) {
+      return res.fail('A pending UPI payment request already exists for this invoice.', [], 409);
+    }
+
+    const [[request]] = await sequelize.query(`
+      INSERT INTO upi_payment_requests (
+        enrollment_id, invoice_id, amount, upi_transaction_id, student_note, status, created_at, updated_at
+      )
+      VALUES (
+        :enrollmentId, :invoiceId, :amount, :upiTxId, :note, 'pending', NOW(), NOW()
+      )
+      RETURNING id, status, created_at;
+    `, {
+      replacements: {
+        enrollmentId: context.enrollmentId,
+        invoiceId: invoice_id,
+        amount,
+        upiTxId: upi_transaction_id,
+        note: student_note || null,
+      },
+    });
+
+    res.ok(request, 'UPI payment request submitted successfully.', 201);
+  } catch (err) { next(err); }
+};
+
+exports.getUpiPaymentRequests = async (req, res, next) => {
+  try {
+    const context = await getStudentContext(req);
+    const [requests] = await sequelize.query(`
+      SELECT upr.*, fs.name AS fee_name, fi.due_date
+      FROM upi_payment_requests upr
+      JOIN fee_invoices fi ON fi.id = upr.invoice_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      WHERE upr.enrollment_id = :enrollmentId
+      ORDER BY upr.created_at DESC;
+    `, { replacements: { enrollmentId: context.enrollmentId } });
+
+    res.ok({ requests });
   } catch (err) { next(err); }
 };
 
