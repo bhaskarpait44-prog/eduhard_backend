@@ -13,26 +13,30 @@ exports.getDailyAttendance = async (req, res, next) => {
 
     const [staff] = await sequelize.query(`
       WITH staff_list AS (
-        SELECT id, name, email, role::text, employee_id, designation, department, school_id, is_active, is_deleted
+        SELECT id, name, email, role::text, employee_id, designation, department, school_id, is_active, is_deleted, 'user' as type
         FROM users
         WHERE role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant')
         UNION ALL
-        SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, employee_id, designation, department, school_id, is_active, is_deleted
+        SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, employee_id, designation, department, school_id, is_active, is_deleted, 'teacher' as type
         FROM teachers
       )
       SELECT
-        sl.id AS user_id,
+        sl.id AS staff_id,
         sl.name,
         sl.email,
         sl.role,
         sl.employee_id,
         sl.designation,
         sl.department,
+        sl.type,
         sa.id AS attendance_id,
         sa.status,
         sa.remarks
       FROM staff_list sl
-      LEFT JOIN staff_attendance sa ON sa.user_id = sl.id AND sa.date = :date
+      LEFT JOIN staff_attendance sa ON (
+        (sl.type = 'user' AND sa.user_id = sl.id) OR
+        (sl.type = 'teacher' AND sa.teacher_id = sl.id)
+      ) AND sa.date = :date
       WHERE sl.school_id = :schoolId
         AND sl.is_active = true
         AND sl.is_deleted = false
@@ -61,10 +65,12 @@ exports.markBulk = async (req, res, next) => {
     const updated = [];
 
     for (const rec of records) {
+      const idColumn = rec.type === 'teacher' ? 'teacher_id' : 'user_id';
+      
       const [[existing]] = await sequelize.query(`
         SELECT id FROM staff_attendance 
-        WHERE user_id = :userId AND date = :date AND school_id = :schoolId;
-      `, { replacements: { userId: rec.user_id, date, schoolId }, transaction });
+        WHERE ${idColumn} = :staffId AND date = :date AND school_id = :schoolId;
+      `, { replacements: { staffId: rec.staff_id, date, schoolId }, transaction });
 
       if (existing) {
         await sequelize.query(`
@@ -83,15 +89,15 @@ exports.markBulk = async (req, res, next) => {
           },
           transaction
         });
-        updated.push(rec.user_id);
+        updated.push(rec.staff_id);
       } else {
         await sequelize.query(`
-          INSERT INTO staff_attendance (school_id, user_id, date, status, remarks, created_by, created_at, updated_at)
-          VALUES (:schoolId, :userId, :date, :status, :remarks, :markerId, NOW(), NOW());
+          INSERT INTO staff_attendance (school_id, ${idColumn}, date, status, remarks, created_by, created_at, updated_at)
+          VALUES (:schoolId, :staffId, :date, :status, :remarks, :markerId, NOW(), NOW());
         `, {
           replacements: {
             schoolId,
-            userId: rec.user_id,
+            staffId: rec.staff_id,
             date,
             status: rec.status,
             remarks: rec.remarks || null,
@@ -99,7 +105,7 @@ exports.markBulk = async (req, res, next) => {
           },
           transaction
         });
-        inserted.push(rec.user_id);
+        inserted.push(rec.staff_id);
       }
     }
 
@@ -130,18 +136,19 @@ exports.getMonthlyRegister = async (req, res, next) => {
 
     const [rows] = await sequelize.query(`
       WITH staff_list AS (
-        SELECT id, name, role, employee_id, school_id, is_active, is_deleted
+        SELECT id, name, role::text, employee_id, school_id, is_active, is_deleted, 'user' as type
         FROM users
         WHERE role IN ('admin','staff','librarian','receptionist','accountant')
         UNION ALL
-        SELECT id, CONCAT(first_name,' ',last_name) AS name, 'teacher' AS role, employee_id, school_id, is_active, is_deleted
+        SELECT id, CONCAT(first_name,' ',last_name) AS name, 'teacher' AS role, employee_id, school_id, is_active, is_deleted, 'teacher' as type
         FROM teachers
       )
       SELECT
-        sl.id AS user_id,
+        sl.id AS staff_id,
         sl.name,
         sl.role,
         sl.employee_id,
+        sl.type,
         COALESCE(
           JSON_AGG(
             JSON_BUILD_OBJECT(
@@ -152,11 +159,14 @@ exports.getMonthlyRegister = async (req, res, next) => {
           '[]'::json
         ) AS records
       FROM staff_list sl
-      LEFT JOIN staff_attendance sa ON sa.user_id = sl.id AND sa.date BETWEEN :fromDate AND :toDate
+      LEFT JOIN staff_attendance sa ON (
+        (sl.type = 'user' AND sa.user_id = sl.id) OR
+        (sl.type = 'teacher' AND sa.teacher_id = sl.id)
+      ) AND sa.date BETWEEN :fromDate AND :toDate
       WHERE sl.school_id = :schoolId
         AND sl.is_active = true
         AND sl.is_deleted = false
-      GROUP BY sl.id, sl.name, sl.role, sl.employee_id
+      GROUP BY sl.id, sl.name, sl.role, sl.employee_id, sl.type
       ORDER BY sl.name ASC;
     `, { replacements: { schoolId, fromDate, toDate } });
 
@@ -172,29 +182,33 @@ exports.getMonthlyRegister = async (req, res, next) => {
 exports.getStaffSummary = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const userId = req.params.user_id;
-    const { from, to } = req.query;
+    const staffId = req.params.user_id; // Frontend might still send user_id as param
+    const { from, to, type } = req.query; // type is required now
+
+    if (!type) return res.fail('Staff type is required.');
+
+    const idColumn = type === 'teacher' ? 'teacher_id' : 'user_id';
 
     const [stats] = await sequelize.query(`
       SELECT
         status,
         COUNT(*)::int AS count
       FROM staff_attendance
-      WHERE user_id = :userId
+      WHERE ${idColumn} = :staffId
         AND school_id = :schoolId
         ${from && to ? 'AND date BETWEEN :from AND :to' : ''}
       GROUP BY status;
-    `, { replacements: { userId, schoolId, from, to } });
+    `, { replacements: { staffId, schoolId, from, to } });
 
     const [records] = await sequelize.query(`
       SELECT date, status, remarks, created_at
       FROM staff_attendance
-      WHERE user_id = :userId
+      WHERE ${idColumn} = :staffId
         AND school_id = :schoolId
         ${from && to ? 'AND date BETWEEN :from AND :to' : ''}
       ORDER BY date DESC
       LIMIT 100;
-    `, { replacements: { userId, schoolId, from, to } });
+    `, { replacements: { staffId, schoolId, from, to } });
 
     res.ok({
       stats,

@@ -155,8 +155,14 @@ Expense.belongsTo(User, { foreignKey: 'approved_by', as: 'approver' });
 User.hasOne(SalaryStructure, { foreignKey: 'user_id', as: 'salaryStructure' });
 SalaryStructure.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
+Teacher.hasOne(SalaryStructure, { foreignKey: 'teacher_id', as: 'salaryStructure' });
+SalaryStructure.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
+
 User.hasMany(Payroll, { foreignKey: 'user_id', as: 'payrolls' });
 Payroll.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Teacher.hasMany(Payroll, { foreignKey: 'teacher_id', as: 'payrolls' });
+Payroll.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 
 // Sessions
 Session.hasOne(SessionWorkingDay,  { foreignKey: 'session_id', as: 'workingDays' });

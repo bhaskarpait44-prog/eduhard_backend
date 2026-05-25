@@ -6,7 +6,8 @@ const sequelize = require('../config/database');
 const Payroll = sequelize.define('Payroll', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   school_id: { type: DataTypes.INTEGER, allowNull: false },
-  user_id: { type: DataTypes.INTEGER, allowNull: false },
+  user_id: { type: DataTypes.INTEGER, allowNull: true },
+  teacher_id: { type: DataTypes.INTEGER, allowNull: true },
   month: { type: DataTypes.INTEGER, allowNull: false },
   year: { type: DataTypes.INTEGER, allowNull: false },
   basic: { type: DataTypes.DECIMAL(10, 2), allowNull: false },

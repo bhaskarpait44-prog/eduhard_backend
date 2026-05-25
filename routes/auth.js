@@ -14,6 +14,8 @@ const { sendEmail } = require('../utils/mailer');
 const studentLoginValidation = require('../middlewares/studentLoginValidator');
 const redis = require('../config/redis');
 
+const { generateResetPasswordHtml } = require('../utils/emailTemplates');
+
 const RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 20;
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
@@ -72,13 +74,20 @@ router.post('/forgot-password',
         `, { replacements: { token, expires, id: user.id } });
       }
 
-      const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${token}&email=${email}`;
+      const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${token}&email=${email}`;
+      const appName = process.env.APP_NAME || 'EduHard';
+
+      const html = generateResetPasswordHtml({
+        name: user.name,
+        resetUrl,
+        appName,
+      });
 
       await sendEmail({
         to: user.email,
-        subject: 'Password Reset Request',
+        subject: `Reset Your Password | ${appName}`,
         text: `Hello ${user.name},\n\nYou requested a password reset. Please click the link below to reset your password:\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.\n`,
-        html: `<p>Hello ${user.name},</p><p>You requested a password reset. Please click the link below to reset your password:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you did not request this, please ignore this email.</p>`,
+        html,
       });
 
       return res.ok({}, 'If an account with that email exists, a password reset link has been sent.');
@@ -366,6 +375,46 @@ router.post('/login',
         },
         permissions,
       }, 'Login successful.');
+    } catch (err) { next(err); }
+  }
+);
+
+router.post('/change-password',
+  authenticate,
+  [
+    body('currentPassword').notEmpty(),
+    body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters long'),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { currentPassword, newPassword } = req.body;
+      const { id, role } = req.user;
+
+      let table = 'users';
+      if (role === 'teacher') table = 'teachers';
+      else if (role === 'student') table = 'students';
+
+      const query = role === 'parent' 
+        ? `SELECT parent_password_hash as password_hash FROM student_profiles WHERE id = :id LIMIT 1`
+        : `SELECT password_hash FROM ${table} WHERE id = :id LIMIT 1`;
+
+      const [[user]] = await sequelize.query(query, { replacements: { id } });
+
+      if (!user || !user.password_hash) return res.fail('User not found or password not set.', [], 404);
+
+      const valid = await bcrypt.compare(currentPassword, user.password_hash);
+      if (!valid) return res.fail('Incorrect current password.', [], 400);
+
+      const hash = await bcrypt.hash(newPassword, 12);
+
+      if (role === 'parent') {
+        await sequelize.query(`UPDATE student_profiles SET parent_password_hash = :hash WHERE id = :id`, { replacements: { hash, id } });
+      } else {
+        await sequelize.query(`UPDATE ${table} SET password_hash = :hash, force_password_change = false, updated_at = NOW() WHERE id = :id`, { replacements: { hash, id } });
+      }
+
+      res.ok({}, 'Password changed successfully.');
     } catch (err) { next(err); }
   }
 );

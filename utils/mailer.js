@@ -4,7 +4,7 @@ const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT,
+  port: parseInt(process.env.SMTP_PORT || '587', 10),
   secure: process.env.SMTP_SECURE === 'true', // true for 465, false for other ports
   auth: {
     user: process.env.SMTP_USER,
@@ -12,11 +12,22 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+console.log(`[Mailer] Initialized with host: ${process.env.SMTP_HOST}, port: ${process.env.SMTP_PORT}, user: ${process.env.SMTP_USER}`);
+
+// Verify connection configuration
+transporter.verify((error, success) => {
+  if (error) {
+    console.error('[Mailer] SMTP Connection Error:', error);
+  } else {
+    console.log('[Mailer] SMTP Server is ready to take messages');
+  }
+});
+
 /**
  * Send an email
- * @param {Object} options - { to, subject, text, html }
+ * @param {Object} options - { to, subject, text, html, attachments }
  */
-async function sendEmail({ to, subject, text, html }) {
+async function sendEmail({ to, subject, text, html, attachments }) {
   try {
     const info = await transporter.sendMail({
       from: `"${process.env.SMTP_FROM_NAME || 'EduCore'}" <${process.env.SMTP_FROM_EMAIL}>`,
@@ -24,6 +35,7 @@ async function sendEmail({ to, subject, text, html }) {
       subject,
       text,
       html,
+      attachments,
     });
     console.log('[Mailer] Email sent: %s', info.messageId);
     return info;

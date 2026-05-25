@@ -6,7 +6,8 @@ const sequelize = require('../config/database');
 const SalaryStructure = sequelize.define('SalaryStructure', {
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   school_id: { type: DataTypes.INTEGER, allowNull: false },
-  user_id: { type: DataTypes.INTEGER, allowNull: false, unique: true },
+  user_id: { type: DataTypes.INTEGER, allowNull: true },
+  teacher_id: { type: DataTypes.INTEGER, allowNull: true },
   basic: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
   hra: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
   da: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },

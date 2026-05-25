@@ -504,9 +504,9 @@ exports.update = async (req, res, next) => {
     const userRole = isTeacher ? 'teacher' : user.role;
     if (!canManage(req.user, userRole)) return res.fail('Cannot manage this user.', [], 403);
 
-    let allowed = ['name','phone','department','designation','joining_date','date_of_birth','gender','address','employee_id','highest_qualification','specialization','university_name','graduation_year','years_of_experience','internal_notes','force_password_change'];
+    let allowed = ['name','email','phone','department','designation','joining_date','date_of_birth','gender','address','employee_id','highest_qualification','specialization','university_name','graduation_year','years_of_experience','internal_notes','force_password_change'];
     if (isTeacher) {
-      allowed = ['first_name', 'last_name', 'phone','department','designation','joining_date','date_of_birth','gender','address','employee_id','highest_qualification','specialization','university_name','graduation_year','years_of_experience','force_password_change'];
+      allowed = ['first_name', 'last_name', 'email', 'phone','department','designation','joining_date','date_of_birth','gender','address','employee_id','highest_qualification','specialization','university_name','graduation_year','years_of_experience','force_password_change'];
       if (updateData.name) {
         const { firstName, lastName } = splitStudentName(updateData.name);
         updateData.first_name = firstName;
@@ -515,8 +515,28 @@ exports.update = async (req, res, next) => {
       }
     }
 
+    // Email uniqueness check if provided
+    if (updateData.email && String(updateData.email).toLowerCase() !== String(user.email).toLowerCase()) {
+      const normalizedEmail = String(updateData.email).trim().toLowerCase();
+      const [[exUser]] = await sequelize.query(
+        `SELECT id FROM users WHERE email = :email AND id != :currentId AND is_deleted = false LIMIT 1;`,
+        { replacements: { email: normalizedEmail, currentId: isTeacher ? -1 : id } }
+      );
+      const [[exTeacher]] = await sequelize.query(
+        `SELECT id FROM teachers WHERE email = :email AND id != :currentId AND is_deleted = false LIMIT 1;`,
+        { replacements: { email: normalizedEmail, currentId: isTeacher ? id : -1 } }
+      );
+      if (exUser || exTeacher) return res.fail('Email already in use by another account.', [], 409);
+      updateData.email = normalizedEmail;
+    }
+
     const sets = Object.keys(updateData).filter(k => allowed.includes(k) && updateData[k] !== undefined);
     if (!sets.length) return res.fail('No valid fields to update.', []);
+
+    // Sanitize: convert empty strings to null for optional fields
+    sets.forEach(k => {
+      if (updateData[k] === '') updateData[k] = null;
+    });
 
     const setClauses = sets.map(k => `${k} = :${k}`).join(', ');
     await sequelize.query(
