@@ -104,6 +104,7 @@ const robustLimiter = (max, windowMs, message, keyPrefix) => {
     standardHeaders: true,
     legacyHeaders: false,
     requestPropertyName: `rateLimit_${keyPrefix}`, // Fix ERR_ERL_DOUBLE_COUNT
+    validate: { singleCount: false }, // Allow multiple different limiters
     message: {
       success: false,
       message: message || 'Too many requests, please try again later.',

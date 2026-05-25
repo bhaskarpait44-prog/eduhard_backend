@@ -55,7 +55,7 @@ router.post('/payment',
     body('invoice_id').isInt(),
     body('amount').isDecimal({ gt: '0' }),
     body('payment_date').isDate(),
-    body('payment_mode').isIn(['cash', 'online', 'cheque', 'dd']),
+    body('payment_mode').isIn(['cash', 'online', 'upi', 'cheque', 'dd']),
   ],
   validate,
   ctrl.recordPayment

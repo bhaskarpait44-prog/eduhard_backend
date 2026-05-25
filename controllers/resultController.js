@@ -469,18 +469,18 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     const [[meta]] = await sequelize.query(`
       SELECT c.name AS class_name, sess.name AS session_name
       FROM classes c
-      JOIN sessions sess ON sess.id = :sessionId
-      WHERE c.id = :classId LIMIT 1;
-    `, { replacements: { classId, sessionId: session_id } });
+      JOIN sessions sess ON sess.id = :session_id
+      WHERE c.id = :class_id LIMIT 1;
+    `, { replacements: { class_id, session_id } });
 
     const [subjects] = await sequelize.query(`
       SELECT DISTINCT sub.id, sub.name, sub.code
       FROM subjects sub
       JOIN exam_subjects es ON es.subject_id = sub.id
       JOIN exams e ON e.id = es.exam_id
-      WHERE e.session_id = :sessionId AND e.class_id = :classId
+      WHERE e.session_id = :session_id AND e.class_id = :class_id
       ORDER BY sub.name;
-    `, { replacements: { sessionId: session_id, classId } });
+    `, { replacements: { session_id, class_id } });
 
     const [students] = await sequelize.query(`
       SELECT
@@ -494,17 +494,17 @@ exports.downloadClassResultSheet = async (req, res, next) => {
         sr.result
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
-      LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :sessionId
-      WHERE e.session_id = :sessionId AND e.class_id = :classId AND e.status = 'active'
+      LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
+      WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
       ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
-    `, { replacements: { sessionId: session_id, classId } });
+    `, { replacements: { session_id, class_id } });
 
     const [marks] = await sequelize.query(`
       SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent
       FROM exam_results er
       JOIN exams e ON e.id = er.exam_id
-      WHERE e.session_id = :sessionId AND e.class_id = :classId;
-    `, { replacements: { sessionId: session_id, classId } });
+      WHERE e.session_id = :session_id AND e.class_id = :class_id;
+    `, { replacements: { session_id, class_id } });
 
     const markMap = {};
     marks.forEach(m => {

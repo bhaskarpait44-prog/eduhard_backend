@@ -18,8 +18,8 @@ router.get('/attendance/export', ctrl.attendanceExport);
 
 router.get('/results', ctrl.results);
 router.get('/results/export/:examId', [param('examId').isInt()], validate, ctrl.resultsExport);
-router.get('/results/:examId', [param('examId').isInt()], validate, ctrl.resultByExam);
 router.get('/results/report-card/:examId', [param('examId').isInt()], validate, ctrl.reportCard);
+router.get('/results/:examId', [param('examId').isInt()], validate, ctrl.resultByExam);
 
 router.get('/fees', ctrl.fees);
 router.get('/fees/summary', ctrl.feeSummary);

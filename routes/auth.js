@@ -16,7 +16,7 @@ const redis = require('../config/redis');
 
 const RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 20;
-const LOCKOUT_DURATION = 5 * 60 * 1000; // 5 minutes
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
 
 const { authenticate } = require('../middlewares/auth');
 

@@ -20,7 +20,7 @@ exports.getExamAnalytics = async (req, res, next) => {
       JOIN classes c ON c.id = e.class_id
       WHERE e.id = :id
       LIMIT 1;
-    `, { replacements: { id } });
+    `, { replacements: { id: Number(id) } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
 
@@ -28,18 +28,19 @@ exports.getExamAnalytics = async (req, res, next) => {
     const subjectStats = await sequelize.query(`
       SELECT 
         s.name AS subject_name,
+        es.combined_total_marks,
         COUNT(er.id) AS total_entries,
         SUM(CASE WHEN er.is_pass = true THEN 1 ELSE 0 END) AS pass_count,
         SUM(CASE WHEN er.is_pass = false AND er.is_absent = false THEN 1 ELSE 0 END) AS fail_count,
         SUM(CASE WHEN er.is_absent = true THEN 1 ELSE 0 END) AS absent_count,
-        COALESCE(ROUND(AVG(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 2), 0) AS average_marks,
-        COALESCE(MAX(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 0) AS highest_marks,
-        COALESCE(MIN(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 0) AS lowest_marks
+        COALESCE(ROUND((AVG(CASE WHEN er.is_absent = false THEN er.marks_obtained END) / NULLIF(es.combined_total_marks, 0)) * 100, 2), 0) AS average_marks,
+        COALESCE(ROUND((MAX(CASE WHEN er.is_absent = false THEN er.marks_obtained END) / NULLIF(es.combined_total_marks, 0)) * 100, 2), 0) AS highest_marks,
+        COALESCE(ROUND((MIN(CASE WHEN er.is_absent = false THEN er.marks_obtained END) / NULLIF(es.combined_total_marks, 0)) * 100, 2), 0) AS lowest_marks
       FROM exam_subjects es
       JOIN subjects s ON s.id = es.subject_id
       LEFT JOIN exam_results er ON er.exam_id = es.exam_id AND er.subject_id = es.subject_id
       WHERE es.exam_id = :id
-      GROUP BY s.id, s.name, s.order_number
+      GROUP BY s.id, s.name, s.order_number, es.combined_total_marks
       ORDER BY s.order_number;
     `, { replacements: { id: Number(id) }, type: sequelize.QueryTypes.SELECT });
 
@@ -51,7 +52,18 @@ exports.getExamAnalytics = async (req, res, next) => {
       FROM exam_results
       WHERE exam_id = :id AND is_absent = false
       GROUP BY grade
-      ORDER BY grade;
+      ORDER BY 
+        CASE grade
+          WHEN 'A+' THEN 1
+          WHEN 'A'  THEN 2
+          WHEN 'B+' THEN 3
+          WHEN 'B'  THEN 4
+          WHEN 'C+' THEN 5
+          WHEN 'C'  THEN 6
+          WHEN 'D'  THEN 7
+          WHEN 'F'  THEN 8
+          ELSE 9
+        END;
     `, { replacements: { id: Number(id) }, type: sequelize.QueryTypes.SELECT });
 
     // 3. Top Performers (Overall in this exam)

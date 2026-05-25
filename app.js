@@ -64,7 +64,7 @@ app.use('/uploads', express.static('uploads'));
 
 app.use('/api', apiLimiter);
 
-app.get('/api/health', (req, res) =>
+app.get('/api/status', (req, res) =>
   res.ok({ status: 'ok', timestamp: new Date() })
 );
 

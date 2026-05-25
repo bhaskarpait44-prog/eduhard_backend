@@ -609,29 +609,43 @@ async function ensureOwnedHomework(req, context, homeworkId) {
 }
 
 async function ensureOwnedNotice(req, context, noticeId) {
-  const [[owned]] = await sequelize.query(`
-    SELECT id
-    FROM teacher_notices
-    WHERE id = :noticeId
-      AND is_active = true
+  const [[ownedTeacher]] = await sequelize.query(`
+    SELECT id FROM teacher_notices
+    WHERE id = :noticeId AND is_active = true
       AND (
         target_scope = 'all_students'
         OR (target_scope = 'specific_student' AND target_student_id = :studentId)
-        OR (target_scope = 'my_class_only' AND class_id = :classId AND section_id = :sectionId)
+        OR (target_scope IN ('my_class_only', 'whole_class') AND class_id = :classId AND section_id = :sectionId)
         OR (target_scope = 'specific_section' AND class_id = :classId AND (section_id IS NULL OR section_id = :sectionId))
       )
     LIMIT 1;
   `, {
-    replacements: {
-      noticeId,
-      studentId: context.studentId,
-      classId: context.classId,
-      sectionId: context.sectionId,
-    },
+    replacements: { noticeId, studentId: context.studentId, classId: context.classId, sectionId: context.sectionId },
   });
-  if (owned) return true;
+  if (ownedTeacher) return true;
 
-  const [[exists]] = await sequelize.query(`SELECT id FROM teacher_notices WHERE id = :noticeId LIMIT 1;`, { replacements: { noticeId } });
+  const [[ownedUnified]] = await sequelize.query(`
+    SELECT id FROM notices
+    WHERE id = :noticeId AND is_deleted = false
+      AND (
+        audience = 'school_wide'
+        OR (audience = 'student' AND target_student_id = :studentId)
+        OR (audience = 'class' AND target_class_id = :classId)
+        OR (audience = 'section' AND target_class_id = :classId AND (target_section_id IS NULL OR target_section_id = :sectionId))
+      )
+    LIMIT 1;
+  `, {
+    replacements: { noticeId, studentId: context.studentId, classId: context.classId, sectionId: context.sectionId },
+  });
+  if (ownedUnified) return true;
+
+  const [[exists]] = await sequelize.query(`
+    SELECT id FROM teacher_notices WHERE id = :noticeId
+    UNION
+    SELECT id FROM notices WHERE id = :noticeId
+    LIMIT 1;
+  `, { replacements: { noticeId } });
+
   if (exists) {
     recordForbiddenAttempt(req, context.studentId, 'notice_access', { noticeId });
     const error = new Error('You are not allowed to access this notice.');
@@ -1693,10 +1707,10 @@ exports.noticePin = async (req, res, next) => {
     if (!owned) return res.fail('Notice not found.', [], 404);
 
     await sequelize.query(`
-      INSERT INTO notice_pins (notice_id, student_id, pinned_at, created_at, updated_at)
-      VALUES (:noticeId, :studentId, NOW(), NOW(), NOW())
+      INSERT INTO notice_pins (notice_id, student_id, pinned_at)
+      VALUES (:noticeId, :studentId, NOW())
       ON CONFLICT (notice_id, student_id)
-      DO UPDATE SET pinned_at = NOW(), updated_at = NOW();
+      DO UPDATE SET pinned_at = NOW();
     `, {
       replacements: {
         noticeId,

@@ -657,9 +657,10 @@ exports.getReport = async (req, res, next) => {
         COUNT(CASE WHEN fi.status = 'pending' THEN 1 END) AS pending_count
       FROM fee_invoices fi
       JOIN enrollments e ON e.id = fi.enrollment_id
-      WHERE e.session_id = :sessionId AND e.status = 'active'
+      JOIN students s ON s.id = e.student_id
+      WHERE e.session_id = :sessionId AND e.status = 'active' AND s.school_id = :schoolId
       ${class_id ? 'AND e.class_id = :classId' : ''}
-    `, { replacements: { sessionId: session_id, classId: class_id } });
+    `, { replacements: { sessionId: session_id, schoolId: req.user.school_id, classId: class_id } });
 
     // Get student-wise data
     const [students] = await sequelize.query(`

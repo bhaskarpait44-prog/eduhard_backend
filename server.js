@@ -96,11 +96,24 @@ async function boot() {
     }
 
     app.listen(PORT, '0.0.0.0', () => {
-      const LOCAL_IP = '10.75.163.32';
+      const os = require('os');
+      const networkInterfaces = os.networkInterfaces();
+      let localIp = 'localhost';
+      
+      for (const interfaceName in networkInterfaces) {
+        for (const iface of networkInterfaces[interfaceName]) {
+          if (iface.family === 'IPv4' && !iface.internal) {
+            localIp = iface.address;
+            break;
+          }
+        }
+        if (localIp !== 'localhost') break;
+      }
+
       logger.info(`Server running on port ${PORT}`);
       logger.info(`Local access: http://localhost:${PORT}`);
-      logger.info(`Mobile access: http://${LOCAL_IP}:${PORT}`);
-      logger.info(`Health check: http://localhost:${PORT}/health`);
+      logger.info(`Mobile access: http://${localIp}:${PORT}`);
+      logger.info(`Health check: http://localhost:${PORT}/status`);
     });
   } catch (error) {
     logger.error('Failed to connect to database:', error.message);
