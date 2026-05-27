@@ -604,6 +604,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       doc.text(`Page ${i + 1} of ${range.count} | Generated on ${new Date().toLocaleString()}`, 30, 550, { align: 'center', width: doc.page.width - 60, lineBreak: false });
     }
 
+    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };

@@ -781,6 +781,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
       doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100, lineBreak: false });
     }
 
+    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };
@@ -977,6 +978,7 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, 790, { lineBreak: false });
     doc.text(`Page 1 of 1`, 450, 790, { align: 'right', width: 100, lineBreak: false });
 
+    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };

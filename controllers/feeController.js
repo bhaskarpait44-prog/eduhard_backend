@@ -471,6 +471,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
       doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100, lineBreak: false });
     }
 
+    doc.flushPages();
     doc.end();
   } catch (err) {
     console.error('[PDF Error]', err);
@@ -1170,6 +1171,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
       );
     }
 
+    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };
