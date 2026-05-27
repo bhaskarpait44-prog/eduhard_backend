@@ -47,6 +47,7 @@ const Feedback             = require('./Feedback');
 const LibraryBook          = require('./LibraryBook');
 const LibraryIssue         = require('./LibraryIssue');
 const LibrarySetting       = require('./LibrarySetting');
+const LibraryReservation   = require('./LibraryReservation');
 const Notice               = require('./Notice');
 const Certificate          = require('./Certificate');
 
@@ -85,17 +86,28 @@ School.hasMany(LibraryIssue, { foreignKey: 'school_id', as: 'libraryIssues' });
 LibraryIssue.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 School.hasOne(LibrarySetting, { foreignKey: 'school_id', as: 'librarySetting' });
 LibrarySetting.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+School.hasMany(LibraryReservation, { foreignKey: 'school_id', as: 'libraryReservations' });
+LibraryReservation.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 
 // Library
 LibraryBook.hasMany(LibraryIssue, { foreignKey: 'book_id', as: 'issues' });
 LibraryIssue.belongsTo(LibraryBook, { foreignKey: 'book_id', as: 'book' });
 
+LibraryBook.hasMany(LibraryReservation, { foreignKey: 'book_id', as: 'reservations' });
+LibraryReservation.belongsTo(LibraryBook, { foreignKey: 'book_id', as: 'book' });
+
 LibraryIssue.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
 LibraryIssue.belongsTo(Student, { foreignKey: 'borrower_id', as: 'studentBorrower', constraints: false });
 LibraryIssue.belongsTo(User, { foreignKey: 'borrower_id', as: 'staffBorrower', constraints: false });
 
+LibraryReservation.belongsTo(Student, { foreignKey: 'borrower_id', as: 'studentBorrower', constraints: false });
+LibraryReservation.belongsTo(User, { foreignKey: 'borrower_id', as: 'staffBorrower', constraints: false });
+
 Student.hasMany(LibraryIssue, { foreignKey: 'borrower_id', as: 'libraryIssues', constraints: false, scope: { borrower_type: 'student' } });
 User.hasMany(LibraryIssue, { foreignKey: 'borrower_id', as: 'libraryIssues', constraints: false, scope: { borrower_type: 'staff' } });
+
+Student.hasMany(LibraryReservation, { foreignKey: 'borrower_id', as: 'libraryReservations', constraints: false, scope: { borrower_type: 'student' } });
+User.hasMany(LibraryReservation, { foreignKey: 'borrower_id', as: 'libraryReservations', constraints: false, scope: { borrower_type: 'staff' } });
 
 Student.hasMany(StudentResult, { foreignKey: 'student_id', as: 'results' }); // Assuming there might be direct link, but results are usually via enrollments
 
@@ -335,6 +347,7 @@ const db = {
   LibraryBook,
   LibraryIssue,
   LibrarySetting,
+  LibraryReservation,
   Certificate,
 };
 

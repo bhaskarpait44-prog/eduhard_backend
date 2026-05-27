@@ -18,6 +18,7 @@ const getSettings = async (schoolId) => {
 };
 
 exports.issueBook = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
     const schoolId = req.user.school_id;
     const { book_id, borrower_type, borrower_id, due_date } = req.body;
@@ -27,18 +28,25 @@ exports.issueBook = async (req, res, next) => {
     // 1. Check book availability
     const [[book]] = await sequelize.query(`
       SELECT * FROM library_books WHERE id = :book_id AND school_id = :schoolId AND is_deleted = false
-    `, { replacements: { book_id, schoolId } });
+    `, { replacements: { book_id, schoolId }, transaction: t });
 
-    if (!book) return res.fail('Book not found.', [], 404);
-    if (book.available_copies <= 0) return res.fail('No copies available for this book.', [], 400);
+    if (!book) {
+      await t.rollback();
+      return res.fail('Book not found.', [], 404);
+    }
+    if (book.available_copies <= 0) {
+      await t.rollback();
+      return res.fail('No copies available for this book.', [], 400);
+    }
 
     // 2. Check borrower limits
     const [[{ activeIssuesCount }]] = await sequelize.query(`
       SELECT COUNT(*)::int AS "activeIssuesCount" FROM library_issues 
       WHERE school_id = :schoolId AND borrower_type = :borrower_type AND borrower_id = :borrower_id AND status != 'returned'
-    `, { replacements: { schoolId, borrower_type, borrower_id } });
+    `, { replacements: { schoolId, borrower_type, borrower_id }, transaction: t });
 
     if (activeIssuesCount >= settings.max_books_per_borrower) {
+      await t.rollback();
       return res.fail(`Borrower has already reached the limit of ${settings.max_books_per_borrower} books.`, [], 400);
     }
 
@@ -46,9 +54,10 @@ exports.issueBook = async (req, res, next) => {
     const [[{ overdueCount }]] = await sequelize.query(`
       SELECT COUNT(*)::int AS "overdueCount" FROM library_issues 
       WHERE school_id = :schoolId AND borrower_type = :borrower_type AND borrower_id = :borrower_id AND status = 'overdue'
-    `, { replacements: { schoolId, borrower_type, borrower_id } });
+    `, { replacements: { schoolId, borrower_type, borrower_id }, transaction: t });
 
     if (overdueCount > 0) {
+      await t.rollback();
       return res.fail('Borrower has overdue books. Cannot issue new books until they are returned.', [], 400);
     }
 
@@ -64,21 +73,37 @@ exports.issueBook = async (req, res, next) => {
         :schoolId, :book_id, :borrower_type, :borrower_id, 
         :issueDate, :finalDueDate, 'issued', :issuedBy, NOW(), NOW()
       ) RETURNING *
-    `, { replacements: { 
-      schoolId, book_id, borrower_type, borrower_id, 
-      issueDate, finalDueDate, issuedBy: req.user.id 
-    } });
+    `, { 
+      replacements: { 
+        schoolId, book_id, borrower_type, borrower_id, 
+        issueDate, finalDueDate, issuedBy: req.user.id 
+      },
+      transaction: t
+    });
 
     await sequelize.query(`
       UPDATE library_books SET available_copies = available_copies - 1, updated_at = NOW()
       WHERE id = :book_id
-    `, { replacements: { book_id } });
+    `, { replacements: { book_id }, transaction: t });
 
+    // Handle Reservations: If this borrower had a reservation, mark it as completed
+    await sequelize.query(`
+      UPDATE library_reservations SET
+        status = 'completed',
+        updated_at = NOW()
+      WHERE book_id = :book_id AND borrower_id = :borrower_id AND borrower_type = :borrower_type AND status IN ('pending', 'ready')
+    `, { replacements: { book_id, borrower_id, borrower_type }, transaction: t });
+
+    await t.commit();
     res.ok(issue[0], 'Book issued successfully.', 201);
-  } catch (err) { next(err); }
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 exports.returnBook = async (req, res, next) => {
+  const t = await sequelize.transaction();
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -86,9 +111,12 @@ exports.returnBook = async (req, res, next) => {
 
     const [[issue]] = await sequelize.query(`
       SELECT * FROM library_issues WHERE id = :id AND school_id = :schoolId AND status != 'returned'
-    `, { replacements: { id, schoolId } });
+    `, { replacements: { id, schoolId }, transaction: t });
 
-    if (!issue) return res.fail('Active issue record not found.', [], 404);
+    if (!issue) {
+      await t.rollback();
+      return res.fail('Active issue record not found.', [], 404);
+    }
 
     const finalReturnDate = return_date || new Date().toISOString().split('T')[0];
     const dueDate = new Date(issue.due_date);
@@ -112,19 +140,54 @@ exports.returnBook = async (req, res, next) => {
         updated_at = NOW()
       WHERE id = :id
       RETURNING *
-    `, { replacements: { 
-      id, finalReturnDate, fineAmount, 
-      fineStatus: fineAmount > 0 ? (fine_status || 'pending') : 'none',
-      fineRemarks 
-    } });
+    `, { 
+      replacements: { 
+        id, finalReturnDate, fineAmount, 
+        fineStatus: fineAmount > 0 ? (fine_status || 'pending') : 'none',
+        fineRemarks 
+      },
+      transaction: t
+    });
 
     await sequelize.query(`
       UPDATE library_books SET available_copies = available_copies + 1, updated_at = NOW()
       WHERE id = :bookId
-    `, { replacements: { bookId: issue.book_id } });
+    `, { replacements: { bookId: issue.book_id }, transaction: t });
 
-    res.ok(updatedIssue[0], 'Book returned successfully.');
-  } catch (err) { next(err); }
+    // Handle Reservations: Check if anyone is waiting for this book
+    const [[nextReservation]] = await sequelize.query(`
+      SELECT id FROM library_reservations
+      WHERE book_id = :bookId AND school_id = :schoolId AND status = 'pending'
+      ORDER BY reservation_date ASC
+      LIMIT 1
+    `, { replacements: { bookId: issue.book_id, schoolId }, transaction: t });
+
+    if (nextReservation) {
+      const expiresAt = new Date();
+      expiresAt.setDate(expiresAt.getDate() + 2); // 2 days to pick up
+
+      await sequelize.query(`
+        UPDATE library_reservations SET
+          status = 'ready',
+          expires_at = :expiresAt,
+          updated_at = NOW()
+        WHERE id = :reservationId
+      `, { 
+        replacements: { 
+          reservationId: nextReservation.id,
+          expiresAt
+        },
+        transaction: t
+      });
+      // In a real app, send a push notification here
+    }
+
+    await t.commit();
+    res.ok(updatedIssue[0], 'Book returned successfully.' + (nextReservation ? ' Next reservation marked as ready.' : ''));
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };
 
 exports.getIssues = async (req, res, next) => {
@@ -203,8 +266,7 @@ exports.getMyIssues = async (req, res, next) => {
     if (role === 'student') {
       const [[student]] = await sequelize.query(`
         SELECT s.id FROM students s
-        JOIN users u ON u.id = :userId
-        WHERE s.school_id = :schoolId
+        WHERE s.user_id = :userId AND s.school_id = :schoolId
       `, { replacements: { userId, schoolId } });
       
       if (!student) return res.fail('Student record not found', [], 404);

@@ -466,9 +466,9 @@ exports.downloadStructurePdf = async (req, res, next) => {
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
       doc.text(
         'Note: This fee structure is subject to change. Contact administration for queries.',
-        startX, 790, { align: 'left', width: 400 }
+        startX, 790, { align: 'left', width: 400, lineBreak: false }
       );
-      doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100 });
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100, lineBreak: false });
     }
 
     doc.end();
@@ -1166,7 +1166,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
       doc.fillColor('#94a3b8').fontSize(8).font('Helvetica');
       doc.text(
         `Page ${i + 1} of ${range.count} | Generated on ${new Date().toLocaleString()}`,
-        40, 780, { align: 'center', width: 515 }
+        40, 780, { align: 'center', width: 515, lineBreak: false }
       );
     }
 

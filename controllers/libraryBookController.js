@@ -86,6 +86,16 @@ exports.createBook = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const { title, author, publisher, isbn, category, total_copies, shelf_location, publication_year, description } = req.body;
 
+    if (isbn) {
+      const [[existing]] = await sequelize.query(`
+        SELECT id FROM library_books WHERE school_id = :schoolId AND isbn = :isbn AND is_deleted = false LIMIT 1
+      `, { replacements: { schoolId, isbn } });
+
+      if (existing) {
+        return res.fail(`A book with ISBN ${isbn} already exists in this school catalog.`, [], 409);
+      }
+    }
+
     const [book] = await sequelize.query(`
       INSERT INTO library_books (
         school_id, title, author, publisher, isbn, category, 
@@ -118,6 +128,16 @@ exports.updateBook = async (req, res, next) => {
 
     if (books.length === 0) return res.fail('Book not found', [], 404);
     const book = books[0];
+
+    if (isbn && isbn !== book.isbn) {
+      const [[existing]] = await sequelize.query(`
+        SELECT id FROM library_books WHERE school_id = :schoolId AND isbn = :isbn AND is_deleted = false AND id != :id LIMIT 1
+      `, { replacements: { schoolId, isbn, id } });
+
+      if (existing) {
+        return res.fail(`Another book with ISBN ${isbn} already exists in this school catalog.`, [], 409);
+      }
+    }
 
     const diff = (total_copies || 0) - book.total_copies;
     const newAvailable = book.available_copies + diff;
@@ -161,4 +181,97 @@ exports.deleteBook = async (req, res, next) => {
 
     res.ok(null, 'Book deleted from catalog.');
   } catch (err) { next(err); }
+};
+
+exports.previewImportBooks = async (req, res, next) => {
+  try {
+    const { rows } = req.body;
+    const schoolId = req.user.school_id;
+    const results = [];
+    const summary = { total: rows.length, valid: 0, invalid: 0 };
+
+    // Get existing ISBNs to check for duplicates in the file vs database
+    const [existingBooks] = await sequelize.query(`
+      SELECT isbn FROM library_books WHERE school_id = :schoolId AND is_deleted = false AND isbn IS NOT NULL
+    `, { replacements: { schoolId } });
+    const existingIsbns = new Set(existingBooks.map(b => b.isbn));
+    const isbnsInFile = new Set();
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const errors = [];
+      const data = {
+        title: row.title?.trim(),
+        author: row.author?.trim(),
+        publisher: row.publisher?.trim(),
+        isbn: row.isbn?.trim() || null,
+        category: row.category?.trim(),
+        total_copies: parseInt(row.total_copies) || 1,
+        shelf_location: row.shelf_location?.trim(),
+        publication_year: row.publication_year?.trim(),
+        description: row.description?.trim()
+      };
+
+      if (!data.title) errors.push('Title is required');
+      if (!data.author) errors.push('Author is required');
+      
+      if (data.isbn) {
+        if (existingIsbns.has(data.isbn)) {
+          errors.push(`ISBN ${data.isbn} already exists in database`);
+        }
+        if (isbnsInFile.has(data.isbn)) {
+          errors.push(`Duplicate ISBN ${data.isbn} in file`);
+        }
+        isbnsInFile.add(data.isbn);
+      }
+
+      const is_valid = errors.length === 0;
+      if (is_valid) summary.valid++;
+      else summary.invalid++;
+
+      results.push({
+        row_number: i + 1,
+        data,
+        is_valid,
+        errors
+      });
+    }
+
+    res.ok({ results, summary });
+  } catch (err) { next(err); }
+};
+
+exports.confirmImportBooks = async (req, res, next) => {
+  const t = await sequelize.transaction();
+  try {
+    const { rows } = req.body;
+    const schoolId = req.user.school_id;
+    let successCount = 0;
+
+    for (const row of rows) {
+      await sequelize.query(`
+        INSERT INTO library_books (
+          school_id, title, author, publisher, isbn, category, 
+          total_copies, available_copies, shelf_location, 
+          publication_year, description, created_at, updated_at
+        ) VALUES (
+          :schoolId, :title, :author, :publisher, :isbn, :category, 
+          :total_copies, :total_copies, :shelf_location, 
+          :publication_year, :description, NOW(), NOW()
+        )
+      `, { 
+        replacements: { 
+          schoolId, ...row
+        },
+        transaction: t
+      });
+      successCount++;
+    }
+
+    await t.commit();
+    res.ok({ successCount }, `${successCount} books imported successfully.`);
+  } catch (err) {
+    await t.rollback();
+    next(err);
+  }
 };

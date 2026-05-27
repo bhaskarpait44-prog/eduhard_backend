@@ -7,6 +7,7 @@ const { authenticate, requireRole } = require('../middlewares/auth');
 const bookController = require('../controllers/libraryBookController');
 const issueController = require('../controllers/libraryIssueController');
 const fineController = require('../controllers/libraryFineController');
+const reservationController = require('../controllers/libraryReservationController');
 const dashboardController = require('../controllers/libraryDashboardController');
 const settingsController = require('../controllers/librarySettingsController');
 
@@ -24,6 +25,8 @@ router.put('/settings', requireRole('admin', 'librarian'), settingsController.up
 router.get('/books', bookController.getBooks);
 router.get('/books/:id', bookController.getBook);
 router.post('/books', requireRole('admin', 'librarian'), bookController.createBook);
+router.post('/books/import/preview', requireRole('admin', 'librarian'), bookController.previewImportBooks);
+router.post('/books/import/confirm', requireRole('admin', 'librarian'), bookController.confirmImportBooks);
 router.put('/books/:id', requireRole('admin', 'librarian'), bookController.updateBook);
 router.delete('/books/:id', requireRole('admin', 'librarian'), bookController.deleteBook);
 
@@ -31,8 +34,14 @@ router.delete('/books/:id', requireRole('admin', 'librarian'), bookController.de
 router.get('/issues', issueController.getIssues);
 router.get('/issues/my', issueController.getMyIssues);
 router.post('/issues', requireRole('admin', 'librarian'), issueController.issueBook);
-router.patch('/issues/:id/return', requireRole('admin', 'librarian'), issueController.returnBook);
 router.patch('/issues/mark-overdue', requireRole('admin', 'librarian'), issueController.markOverdue);
+router.patch('/issues/:id/return', requireRole('admin', 'librarian'), issueController.returnBook);
+
+// Reservations
+router.get('/reservations', reservationController.getReservations);
+router.get('/reservations/my', reservationController.getMyReservations);
+router.post('/reservations', reservationController.createReservation);
+router.patch('/reservations/:id/cancel', reservationController.cancelReservation);
 
 // Fines
 router.get('/fines', fineController.getFines);

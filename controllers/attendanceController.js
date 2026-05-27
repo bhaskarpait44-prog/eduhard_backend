@@ -777,8 +777,8 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, 820);
-      doc.text(`Page ${i + 1} of ${range.count}`, 450, 820, { align: 'right', width: 100 });
+      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, 790, { lineBreak: false });
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100, lineBreak: false });
     }
 
     doc.end();
@@ -974,8 +974,8 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     // Legend
     doc.switchToPage(doc.bufferedPageRange().count - 1);
     doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-    doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, 820);
-    doc.text(`Page 1 of 1`, 450, 820, { align: 'right', width: 100 });
+    doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, 790, { lineBreak: false });
+    doc.text(`Page 1 of 1`, 450, 790, { align: 'right', width: 100, lineBreak: false });
 
     doc.end();
   } catch (err) { next(err); }

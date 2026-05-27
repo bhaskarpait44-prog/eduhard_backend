@@ -15,7 +15,7 @@ exports.getDashboardStats = async (req, res, next) => {
         (SELECT COALESCE(SUM(available_copies), 0)::int FROM library_books WHERE school_id = :schoolId AND is_deleted = false) AS total_available_copies,
         (SELECT COUNT(*)::int FROM library_issues WHERE school_id = :schoolId AND status != 'returned') AS total_currently_issued,
         (SELECT COUNT(*)::int FROM library_issues WHERE school_id = :schoolId AND status = 'overdue') AS total_overdue,
-        (SELECT COALESCE(SUM(fine_amount), 0)::float FROM library_issues WHERE school_id = :schoolId AND fine_status = 'paid' AND updated_at >= :startOfMonth) AS total_fine_this_month
+        (SELECT COALESCE(SUM(fine_amount), 0)::float FROM library_issues WHERE school_id = :schoolId AND fine_status = 'paid' AND return_date >= :startOfMonth) AS total_fine_this_month
     `, { replacements: { schoolId, startOfMonth } });
 
     const [recentIssues] = await sequelize.query(`

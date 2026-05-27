@@ -601,7 +601,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#94a3b8').fontSize(8);
-      doc.text(`Page ${i + 1} of ${range.count} | Generated on ${new Date().toLocaleString()}`, 30, 560, { align: 'center', width: doc.page.width - 60 });
+      doc.text(`Page ${i + 1} of ${range.count} | Generated on ${new Date().toLocaleString()}`, 30, 550, { align: 'center', width: doc.page.width - 60, lineBreak: false });
     }
 
     doc.end();
