@@ -190,7 +190,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
         AND c.school_id = :schoolId
         AND fs.is_active = true
         ${classQuery}
-      ORDER BY c.name ASC, fs.frequency DESC, fs.name ASC
+      ORDER BY LENGTH(c.name), c.name ASC, fs.frequency DESC, fs.name ASC
     `, { replacements });
 
     if (!structures || structures.length === 0) {
@@ -313,7 +313,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
       const oneTimeFees = components.filter(c => c.frequency === 'one_time');
 
       // Class Title
-      if (doc.y > 650) { doc.addPage(); drawHeader(); doc.y = 140; }
+      if (doc.y > 620) { doc.addPage(); drawHeader(); doc.y = 140; }
       doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(11).text(className.toUpperCase(), 40, doc.y);
       doc.strokeColor('#1e40af').lineWidth(1).moveTo(40, doc.y + 13).lineTo(150, doc.y + 13).stroke();
       doc.moveDown(1.5);
@@ -345,6 +345,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
           let m = 1;
           if (c.frequency === 'monthly') m = 12;
           else if (c.frequency === 'quarterly') m = 4;
+          else if (c.frequency === 'half_yearly') m = 2;
           else if (c.frequency === 'annual') m = 1; // FIX: "annual" per migration
           classTotalAnnual += (parseFloat(c.amount) * m);
         }
@@ -361,7 +362,7 @@ exports.downloadStructurePdf = async (req, res, next) => {
 
       // One-Time Fees Table
       if (oneTimeFees.length > 0) {
-        if (doc.y > 650) { doc.addPage(); drawHeader(); doc.y = 140; }
+        if (doc.y > 620) { doc.addPage(); drawHeader(); doc.y = 140; }
         doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(10).text('One-Time Fees', 40, doc.y);
         doc.moveDown(0.5);
         drawTableHeaders();
@@ -452,11 +453,10 @@ exports.downloadStructurePdf = async (req, res, next) => {
       const finalY = doc.y;
       doc.fillColor('#1e40af').rect(startX, finalY, 515, 25).fill();
       doc.fillColor('white').font('Helvetica-Bold').fontSize(10);
-      doc.text('TOTAL SYSTEM FEES', startX + 5, finalY + 8);
-      let fx = startX + summaryCols[0];
-      doc.text(formatINR(grandTotalRecurring), fx + 5, finalY + 8, { width: summaryCols[1] - 10, align: 'right' }); fx += summaryCols[1];
-      doc.text(formatINR(grandTotalOneTime), fx + 5, finalY + 8, { width: summaryCols[2] - 10, align: 'right' }); fx += summaryCols[2];
-      doc.text(formatINR(grandTotalRecurring + grandTotalOneTime), fx + 5, finalY + 8, { width: summaryCols[3] - 10, align: 'right' });
+      doc.text('TOTAL SYSTEM FEES', startX + 5, finalY + 8, { width: summaryCols[0] - 10 });
+      doc.text(formatINR(grandTotalRecurring), startX + summaryCols[0] + 5, finalY + 8, { width: summaryCols[1] - 10, align: 'right' });
+      doc.text(formatINR(grandTotalOneTime), startX + summaryCols[0] + summaryCols[1] + 5, finalY + 8, { width: summaryCols[2] - 10, align: 'right' });
+      doc.text(formatINR(grandTotalRecurring + grandTotalOneTime), startX + summaryCols[0] + summaryCols[1] + summaryCols[2] + 5, finalY + 8, { width: summaryCols[3] - 10, align: 'right' });
     }
 
     // 5. Global Footer
@@ -466,9 +466,9 @@ exports.downloadStructurePdf = async (req, res, next) => {
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
       doc.text(
         'Note: This fee structure is subject to change. Contact administration for queries.',
-        startX, 805, { align: 'left', width: 400 }
+        startX, 790, { align: 'left', width: 400 }
       );
-      doc.text(`Page ${i + 1} of ${range.count}`, 450, 805, { align: 'right', width: 100 });
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100 });
     }
 
     doc.end();
@@ -931,7 +931,9 @@ exports.getReceipts = async (req, res, next) => {
     `;
 
     const [[metaRow]] = await sequelize.query(`
-      SELECT COUNT(fp.id)::int AS total
+      SELECT 
+        COUNT(fp.id)::int AS total,
+        COALESCE(SUM(fp.amount), 0) AS total_amount
       FROM fee_payments fp
       JOIN fee_invoices fi ON fi.id = fp.invoice_id
       JOIN enrollments e ON e.id = fi.enrollment_id
@@ -974,6 +976,7 @@ exports.getReceipts = async (req, res, next) => {
         page: pageNum,
         perPage: limitNum,
         total: metaRow.total,
+        totalAmount: metaRow.total_amount,
         totalPages: Math.max(Math.ceil(metaRow.total / limitNum), 1),
       },
     }, 'Receipts loaded.');

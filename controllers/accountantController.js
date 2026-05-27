@@ -569,7 +569,7 @@ exports.searchStudents = async (req, res, next) => {
         )
       GROUP BY s.id, e.id, e.roll_number, c.name, sec.name
       ORDER BY pending_amount DESC, s.first_name
-      LIMIT 12;
+      LIMIT 10;
     `, {
       replacements: {
         sessionId: session.id,
@@ -797,7 +797,11 @@ exports.getStudents = async (req, res, next) => {
       class_id,
       status = '',
       sort = 'name',
+      page = 1,
+      limit = 10,
     } = req.query;
+
+    const offset = (Number(page) - 1) * Number(limit);
 
     const sortSql = {
       name: 'student_name ASC',
@@ -805,6 +809,16 @@ exports.getStudents = async (req, res, next) => {
       class: 'class_name ASC, student_name ASC',
       payment: 'last_payment_date DESC NULLS LAST',
     }[sort] || 'student_name ASC';
+
+    const replacements = {
+      sessionId: session.id,
+      schoolId: req.user.school_id,
+      classId: class_id || null,
+      search: `%${search}%`,
+      status,
+      limit: Number(limit),
+      offset: Number(offset),
+    };
 
     const [students] = await sequelize.query(`
       SELECT
@@ -853,18 +867,49 @@ exports.getStudents = async (req, res, next) => {
           :status = 'pending' AND COUNT(*) FILTER (WHERE fi.status IN ('pending', 'partial')) > 0
         )
       )
-      ORDER BY ${sortSql};
-    `, {
-      replacements: {
-        sessionId: session.id,
-        schoolId: req.user.school_id,
-        classId: class_id || null,
-        search: `%${search}%`,
-        status,
-      },
-    });
+      ORDER BY ${sortSql}
+      LIMIT :limit OFFSET :offset;
+    `, { replacements });
 
-    res.ok({ students, session }, 'Student fee list loaded.');
+    const [[{ total }]] = await sequelize.query(`
+      SELECT COUNT(DISTINCT s.id)::int AS total
+      FROM students s
+      JOIN enrollments e ON e.student_id = s.id AND e.session_id = :sessionId
+      LEFT JOIN fee_invoices fi ON fi.enrollment_id = e.id
+      WHERE s.school_id = :schoolId
+        AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
+        AND (
+          :search = '%%'
+          OR s.admission_no ILIKE :search
+          OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
+        )
+      ${status ? `
+      AND s.id IN (
+        SELECT s2.id
+        FROM students s2
+        JOIN enrollments e2 ON e2.student_id = s2.id AND e2.session_id = :sessionId
+        LEFT JOIN fee_invoices fi2 ON fi2.enrollment_id = e2.id
+        GROUP BY s2.id
+        HAVING (
+          (:status = 'fully_paid' AND COALESCE(SUM(fi2.amount_due + fi2.late_fee_amount - fi2.concession_amount - fi2.amount_paid), 0) <= 0)
+          OR (:status = 'waived' AND COUNT(*) FILTER (WHERE fi2.status = 'waived') > 0)
+          OR (:status = 'partial' AND COUNT(*) FILTER (WHERE fi2.status = 'partial') > 0)
+          OR (:status = 'overdue' AND COUNT(*) FILTER (WHERE fi2.status IN ('pending', 'partial') AND fi2.due_date < CURRENT_DATE) > 0)
+          OR (:status = 'pending' AND COUNT(*) FILTER (WHERE fi2.status IN ('pending', 'partial')) > 0)
+        )
+      )` : ''};
+    `, { replacements });
+
+    res.ok({ 
+      students, 
+      session,
+      pagination: {
+        total,
+        page: Number(page),
+        limit: Number(limit),
+        pages: Math.ceil(total / Number(limit))
+      }
+    }, 'Student fee list loaded.');
   } catch (err) { next(err); }
 };
 
@@ -1615,7 +1660,7 @@ exports.confirmUpiRequest = async (req, res, next) => {
       await feeManager.applyPayment(request.invoice_id, {
         amount: request.amount,
         paymentDate,
-        paymentMode: 'online',
+        paymentMode: 'upi',
         transactionRef: transaction_ref || request.upi_transaction_id,
         receivedBy: adminId,
       }, { transaction: t });
@@ -1629,6 +1674,32 @@ exports.confirmUpiRequest = async (req, res, next) => {
     });
 
     res.ok({}, 'UPI payment confirmed successfully.');
+
+    // Notify student
+    try {
+      const [[studentInfo]] = await sequelize.query(`
+        SELECT e.student_id, fs.name AS fee_name
+        FROM upi_payment_requests upr
+        JOIN enrollments e ON e.id = upr.enrollment_id
+        JOIN fee_invoices fi ON fi.id = upr.invoice_id
+        JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+        WHERE upr.id = :id
+        LIMIT 1;
+      `, { replacements: { id } });
+
+      if (studentInfo) {
+        await sendNotification({
+          studentId: studentInfo.student_id,
+          title: 'Payment Confirmed',
+          content: `Your UPI payment for ${studentInfo.fee_name} has been confirmed. Thank you!`,
+          type: 'fee_payment',
+          data: { requestId: id }
+        });
+      }
+    } catch (notifyErr) {
+      console.error('[UPI-Notify-Student-Error]', notifyErr);
+    }
+
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/accountant*');
     invalidateCache(req.user.school_id, '/api/student*');
@@ -1652,6 +1723,32 @@ exports.rejectUpiRequest = async (req, res, next) => {
     if (!updated) return res.fail('Request not found or already processed.', [], 404);
 
     res.ok({}, 'UPI payment request rejected.');
+
+    // Notify student
+    try {
+      const [[studentInfo]] = await sequelize.query(`
+        SELECT e.student_id, fs.name AS fee_name
+        FROM upi_payment_requests upr
+        JOIN enrollments e ON e.id = upr.enrollment_id
+        JOIN fee_invoices fi ON fi.id = upr.invoice_id
+        JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+        WHERE upr.id = :id
+        LIMIT 1;
+      `, { replacements: { id } });
+
+      if (studentInfo) {
+        await sendNotification({
+          studentId: studentInfo.student_id,
+          title: 'Payment Request Rejected',
+          content: `Your UPI payment for ${studentInfo.fee_name} was rejected. Reason: ${reason}`,
+          type: 'fee_payment',
+          data: { requestId: id }
+        });
+      }
+    } catch (notifyErr) {
+      console.error('[UPI-Reject-Notify-Student-Error]', notifyErr);
+    }
+
     invalidateCache(req.user.school_id, '/api/accountant*');
     invalidateCache(req.user.school_id, '/api/student*');
   } catch (err) { next(err); }

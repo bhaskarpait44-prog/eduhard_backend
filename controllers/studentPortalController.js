@@ -5,6 +5,7 @@ const sequelize = require('../config/database');
 const redis = require('../config/redis');
 const logger = require('../utils/logger');
 const { recomputeStudentAchievements } = require('../utils/achievementEngine');
+const { sendNotification } = require('../utils/notification');
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const forbiddenTracker = new Map();
@@ -95,12 +96,11 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
   assertNoStudentIdOverride(req, studentId);
 
   const [[student]] = await sequelize.query(`
-    SELECT
-      s.id,
-      s.school_id,
-      sch.name AS school_name,
-      sch.upi_id AS school_upi_id,
-      s.admission_no,
+  SELECT
+    s.id,
+    s.school_id,
+    COALESCE(sch.upi_name, sch.name) AS school_name,
+    sch.upi_id AS school_upi_id,      s.admission_no,
       s.first_name,
       s.last_name,
       s.date_of_birth,
@@ -1192,7 +1192,7 @@ exports.fees = async (req, res, next) => {
 exports.getSchoolUpi = async (req, res, next) => {
   try {
     const [[school]] = await sequelize.query(`
-      SELECT upi_id, name AS school_name
+      SELECT upi_id, COALESCE(upi_name, name) AS school_name, upi_enabled
       FROM schools
       WHERE id = :schoolId
       LIMIT 1;
@@ -1208,8 +1208,17 @@ exports.createUpiPaymentRequest = async (req, res, next) => {
     const context = await getStudentContext(req);
     const { invoice_id, amount, upi_transaction_id, student_note } = req.body;
 
-    if (!invoice_id || !amount || !upi_transaction_id) {
-      return res.fail('invoice_id, amount, and upi_transaction_id are required.', [], 422);
+    // Check if UPI payments are enabled for this school
+    const [[schoolStatus]] = await sequelize.query(`
+      SELECT upi_enabled FROM schools WHERE id = :schoolId LIMIT 1;
+    `, { replacements: { schoolId: req.user.school_id } });
+
+    if (schoolStatus && !schoolStatus.upi_enabled) {
+      return res.fail('UPI payments are currently disabled for maintenance. Please try again later.', [], 503);
+    }
+
+    if (!invoice_id || !amount) {
+      return res.fail('invoice_id and amount are required.', [], 422);
     }
 
     // Ensure invoice belongs to student
@@ -1225,6 +1234,19 @@ exports.createUpiPaymentRequest = async (req, res, next) => {
 
     if (existing) {
       return res.fail('A pending UPI payment request already exists for this invoice.', [], 409);
+    }
+
+    // Check for duplicate transaction ID (if provided and not placeholder)
+    if (upi_transaction_id && upi_transaction_id !== 'PAYMENT_PENDING') {
+      const [[txExists]] = await sequelize.query(`
+        SELECT id FROM upi_payment_requests
+        WHERE upi_transaction_id = :upiTxId AND status IN ('pending', 'confirmed')
+        LIMIT 1;
+      `, { replacements: { upiTxId: upi_transaction_id } });
+
+      if (txExists) {
+        return res.fail('This UPI Transaction ID has already been submitted and is currently being processed or has been confirmed.', [], 409);
+      }
     }
 
     const [[request]] = await sequelize.query(`
@@ -1246,6 +1268,26 @@ exports.createUpiPaymentRequest = async (req, res, next) => {
     });
 
     res.ok(request, 'UPI payment request submitted successfully.', 201);
+
+    // Notify admins and accountants
+    try {
+      const studentName = getStudentName(context.student);
+      const [admins] = await sequelize.query(`
+        SELECT id FROM users 
+        WHERE school_id = :schoolId AND role IN ('admin', 'accountant') AND is_active = true;
+      `, { replacements: { schoolId: req.user.school_id } });
+
+      const notificationPromises = admins.map(admin => sendNotification({
+        userId: admin.id,
+        title: 'New UPI Payment Request',
+        content: `${studentName} has submitted a UPI payment request of ₹${amount}.`,
+        type: 'fee_payment',
+        data: { requestId: request.id, invoiceId: invoice_id }
+      }));
+      await Promise.all(notificationPromises);
+    } catch (notifyErr) {
+      logger.error('[UPI-Notification-Error] Failed to notify staff:', notifyErr);
+    }
   } catch (err) { next(err); }
 };
 
