@@ -5,6 +5,36 @@ const { requireRole } = require('../middlewares/auth');
 const { requirePermission } = require('../middlewares/checkPermission');
 const ctrl = require('../controllers/teacherController');
 const chatCtrl = require('../controllers/chatController');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+// Multer setup for homework/materials
+const homeworkDir = 'uploads/homework';
+const materialsDir = 'uploads/materials';
+[homeworkDir, materialsDir].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    if (req.path.includes('homework')) cb(null, homeworkDir);
+    else cb(null, materialsDir);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'application/pdf') cb(null, true);
+    else cb(new Error('Only PDF files are allowed!'), false);
+  }
+});
 
 router.use(requireRole('teacher'));
 
@@ -50,13 +80,17 @@ router.get('/timetable/current-period', requirePermission('classes.view'), ctrl.
 router.get('/exam-timetable', requirePermission('classes.view'), ctrl.examTimetable);
 
 router.get('/homework', requirePermission('classes.view'), ctrl.homeworkList);
-router.post('/homework', requirePermission('classes.view'), ctrl.createHomework);
-router.patch('/homework/:id', requirePermission('classes.view'), ctrl.updateHomework);
+router.post('/homework', requirePermission('classes.view'), upload.single('attachment'), ctrl.createHomework);
+router.patch('/homework/:id', requirePermission('classes.view'), upload.single('attachment'), ctrl.updateHomework);
 router.delete('/homework/:id', requirePermission('classes.view'), ctrl.deleteHomework);
 router.get('/homework/:id/submissions', requirePermission('classes.view'), ctrl.homeworkSubmissions);
 router.post('/homework/:id/submit', requirePermission('classes.view'), ctrl.submitHomeworkForStudent);
 router.post('/homework/:id/grade', requirePermission('classes.view'), ctrl.gradeHomework);
 router.post('/homework/:id/remind', requirePermission('classes.view'), ctrl.remindHomework);
+
+router.get('/study-materials', requirePermission('classes.view'), ctrl.studyMaterialList);
+router.post('/study-materials', requirePermission('classes.view'), upload.single('file'), ctrl.createStudyMaterial);
+router.delete('/study-materials/:id', requirePermission('classes.view'), ctrl.deleteStudyMaterial);
 
 router.get('/chat/contacts', requirePermission('classes.view'), chatCtrl.teacherContacts);
 router.get('/chat/conversations', requirePermission('classes.view'), chatCtrl.teacherConversations);

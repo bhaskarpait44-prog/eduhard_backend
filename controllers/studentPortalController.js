@@ -1280,7 +1280,7 @@ exports.createUpiPaymentRequest = async (req, res, next) => {
       const notificationPromises = admins.map(admin => sendNotification({
         userId: admin.id,
         title: 'New UPI Payment Request',
-        content: `${studentName} has submitted a UPI payment request of ₹${amount}.`,
+        content: `${studentName} has submitted a UPI payment request of Rs.${amount}.`,
         type: 'fee_payment',
         data: { requestId: request.id, invoiceId: invoice_id }
       }));
@@ -2226,31 +2226,35 @@ exports.attendanceExport = async (req, res, next) => {
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${context.student.first_name}.pdf"`);
     doc.pipe(res);
 
-    // Header
-    doc.rect(0, 0, 595, 100).fill('#7C3AED');
-    doc.fillColor('white').font('Helvetica-Bold').fontSize(20).text(school.name.toUpperCase(), 40, 25);
-    doc.font('Helvetica').fontSize(10).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 50);
-    doc.font('Helvetica-Bold').fontSize(14).text('STUDENT ATTENDANCE REPORT', 40, 70);
-    doc.fontSize(8).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 155 });
+    const pageWidth = doc.page.width;
+    const margin = 40;
+    const contentWidth = pageWidth - (margin * 2);
 
-    doc.y = 120;
+    // Header (Not full-bleed)
+    doc.rect(margin, 20, contentWidth, 80).fill('#7C3AED');
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), margin + 15, 35);
+    doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, margin + 15, 54);
+    doc.font('Helvetica-Bold').fontSize(12).text('STUDENT ATTENDANCE REPORT', margin + 15, 72);
+    doc.fontSize(7).text(`Generated: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
+
+    doc.y = 110;
 
     // Student Details
-    doc.fillColor('#F8FAFC').rect(40, 110, 515, 80).fill().stroke('#E2E8F0');
-    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, 125);
-    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no}`, 60, 145);
-    doc.text(`Class: ${context.student.class_name} (${context.student.section_name}) | Roll: ${context.student.roll_number || 'N/A'}`, 60, 160);
-    doc.text(`Period: ${from} to ${to}`, 60, 175);
+    doc.fillColor('#F8FAFC').rect(40, doc.y, contentWidth, 80).fill().stroke('#E2E8F0');
+    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, doc.y + 15);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no}`, 60, doc.y + 35);
+    doc.text(`Class: ${context.student.class_name} (${context.student.section_name}) | Roll: ${context.student.roll_number || 'N/A'}`, 60, doc.y + 50);
+    doc.text(`Period: ${from} to ${to}`, 60, doc.y + 65);
 
     // Stats
     const summary = await getAttendanceSummary(context.enrollmentId);
     const pct = parseFloat(summary.percentage || 0);
     
-    doc.fillColor('#7C3AED').rect(400, 120, 140, 60).fill();
-    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${pct.toFixed(1)}%`, 400, 135, { width: 140, align: 'center' });
-    doc.fontSize(9).text('Overall Attendance', 400, 155, { width: 140, align: 'center' });
+    doc.fillColor('#7C3AED').rect(400, doc.y + 10, 140, 60).fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${pct.toFixed(1)}%`, 400, doc.y + 25, { width: 140, align: 'center' });
+    doc.fontSize(9).text('Overall Attendance', 400, doc.y + 45, { width: 140, align: 'center' });
 
-    doc.y = 210;
+    doc.y += 90;
     doc.fillColor('#7C3AED').font('Helvetica-Bold').fontSize(12).text('Attendance History', 40, doc.y);
     doc.moveDown(0.5);
 
@@ -2271,10 +2275,9 @@ exports.attendanceExport = async (req, res, next) => {
     records.forEach((record, index) => {
       if (doc.y > 750) {
         doc.addPage();
-        // Re-draw mini header on new page
-        doc.rect(0, 0, 595, 40).fill('#7C3AED');
-        doc.fillColor('white').font('Helvetica-Bold').fontSize(12).text('Attendance History (Continued)', 40, 15);
-        doc.y = 60;
+        doc.rect(margin, 20, contentWidth, 30).fill('#7C3AED');
+        doc.fillColor('white').font('Helvetica-Bold').fontSize(10).text('Attendance History (Continued)', margin + 15, 30);
+        doc.y = 70;
       }
 
       const rowY = doc.y;
@@ -2376,31 +2379,35 @@ exports.resultsExport = async (req, res, next) => {
     res.setHeader('Content-Disposition', `attachment; filename="Result_${exam.name}_${context.student.first_name}.pdf"`);
     doc.pipe(res);
 
-    // Header
-    doc.rect(0, 0, 595, 100).fill('#1E40AF');
-    doc.fillColor('white').font('Helvetica-Bold').fontSize(20).text(school.name.toUpperCase(), 40, 25);
-    doc.font('Helvetica').fontSize(10).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 50);
-    doc.font('Helvetica-Bold').fontSize(14).text('EXAMINATION REPORT CARD', 40, 70);
-    doc.fontSize(8).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 155 });
+    const pageWidth = doc.page.width;
+    const margin = 40;
+    const contentWidth = pageWidth - (margin * 2);
 
-    doc.y = 120;
+    // Header (Not full-bleed)
+    doc.rect(margin, 20, contentWidth, 80).fill('#1E40AF');
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), margin + 15, 35);
+    doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, margin + 15, 54);
+    doc.font('Helvetica-Bold').fontSize(12).text('EXAMINATION REPORT CARD', margin + 15, 72);
+    doc.fontSize(7).text(`Generated: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
+
+    doc.y = 110;
 
     // Student & Exam Details
-    doc.fillColor('#F8FAFC').rect(40, 110, 515, 80).fill().stroke('#E2E8F0');
-    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, 125);
-    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no} | Roll: ${context.student.roll_number || 'N/A'}`, 60, 145);
-    doc.text(`Class: ${context.student.class_name} (${context.student.section_name})`, 60, 160);
-    doc.font('Helvetica-Bold').text(`Exam: ${exam.name} (${exam.exam_type})`, 60, 175);
+    doc.fillColor('#F8FAFC').rect(40, doc.y, contentWidth, 80).fill().stroke('#E2E8F0');
+    doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, doc.y + 15);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no} | Roll: ${context.student.roll_number || 'N/A'}`, 60, doc.y + 35);
+    doc.text(`Class: ${context.student.class_name} (${context.student.section_name})`, 60, doc.y + 50);
+    doc.font('Helvetica-Bold').text(`Exam: ${exam.name} (${exam.exam_type})`, 60, doc.y + 65);
 
     const totalObtained = rows.reduce((sum, row) => sum + Number(row.marks_obtained || 0), 0);
     const totalMax = rows.reduce((sum, row) => sum + Number(row.total_marks || 0), 0);
     const percentage = totalMax > 0 ? ((totalObtained / totalMax) * 100).toFixed(1) : '0.0';
 
-    doc.fillColor('#1E40AF').rect(400, 120, 140, 60).fill();
-    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${percentage}%`, 400, 135, { width: 140, align: 'center' });
-    doc.fontSize(9).text('Final Percentage', 400, 155, { width: 140, align: 'center' });
+    doc.fillColor('#1E40AF').rect(400, doc.y + 10, 140, 60).fill();
+    doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(`${percentage}%`, 400, doc.y + 25, { width: 140, align: 'center' });
+    doc.fontSize(9).text('Final Percentage', 400, doc.y + 45, { width: 140, align: 'center' });
 
-    doc.y = 210;
+    doc.y += 90;
     doc.fillColor('#1E40AF').font('Helvetica-Bold').fontSize(12).text('Subject Wise Marks', 40, doc.y);
     doc.moveDown(0.5);
 
@@ -2442,6 +2449,12 @@ exports.resultsExport = async (req, res, next) => {
     doc.strokeColor('#E2E8F0').lineWidth(1).moveTo(40, doc.y).lineTo(555, doc.y).stroke();
     doc.moveDown(0.5);
     doc.font('Helvetica-Bold').fontSize(11).text(`Grand Total: ${totalObtained} / ${totalMax}`, 40, doc.y, { align: 'right', width: 515 });
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fillColor('#94A3B8').fontSize(8).font('Helvetica').text(`Page ${i + 1} of ${range.count}`, 40, 800, { align: 'center', width: 515 });
+    }
 
     doc.end();
   } catch (err) { next(err); }

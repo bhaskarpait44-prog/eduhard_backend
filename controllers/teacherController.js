@@ -2745,8 +2745,13 @@ exports.homeworkList = async (req, res, next) => {
 
 exports.createHomework = async (req, res, next) => {
   try {
-    const { class_id, section_id, subject_id, title, description, due_date, submission_type, max_marks = null, attachment_path = null } = req.body;
+    const { class_id, section_id, subject_id, title, description, due_date, submission_type, max_marks = null } = req.body;
+    let { attachment_path = null } = req.body;
     validateHomeworkPayload(req.body);
+
+    if (req.file) {
+      attachment_path = req.file.path.replace(/\\/g, '/');
+    }
 
     const { session, scope } = await getTeacherContext(req);
     assertAccess(scope, Number(class_id), Number(section_id), Number(subject_id));
@@ -2797,6 +2802,10 @@ exports.updateHomework = async (req, res, next) => {
     const { id } = req.params;
     const homework = await getOwnedHomeworkForTeacher(id, req.user.id);
     if (!homework) return res.fail('Homework not found.', [], 404);
+
+    if (req.file) {
+      req.body.attachment_path = req.file.path.replace(/\\/g, '/');
+    }
 
     const allowed = ['title', 'description', 'due_date', 'submission_type', 'max_marks', 'attachment_path', 'status'];
     const updates = Object.keys(req.body).filter((key) => allowed.includes(key));
@@ -3660,5 +3669,121 @@ exports.createCorrectionRequest = async (req, res, next) => {
     }, req);
 
     res.ok({ request: requestRow }, 'Correction request submitted.', 201);
+  } catch (err) { next(err); }
+};
+
+exports.studyMaterialList = async (req, res, next) => {
+  try {
+    const { session } = await getTeacherContext(req);
+    const { class_id, subject_id } = req.query;
+
+    const [materials] = await sequelize.query(`
+      SELECT
+        sm.*,
+        c.name AS class_name,
+        sub.name AS subject_name,
+        (SELECT COUNT(*) FROM material_views mv WHERE mv.material_id = sm.id) AS view_count
+      FROM study_materials sm
+      JOIN classes c ON c.id = sm.class_id
+      JOIN subjects sub ON sub.id = sm.subject_id
+      WHERE sm.teacher_id = :teacherId
+        AND sm.session_id = :sessionId
+        AND (:classId::int IS NULL OR sm.class_id = :classId)
+        AND (:subjectId::int IS NULL OR sm.subject_id = :subjectId)
+      ORDER BY sm.created_at DESC;
+    `, {
+      replacements: {
+        teacherId: req.user.id,
+        sessionId: session?.id || 0,
+        classId: class_id || null,
+        subjectId: subject_id || null,
+      },
+    });
+
+    res.ok({ materials }, `${materials.length} study material(s) found.`);
+  } catch (err) { next(err); }
+};
+
+exports.createStudyMaterial = async (req, res, next) => {
+  try {
+    const { class_id, subject_id, title, description = null } = req.body;
+    requireFields(req.body, ['class_id', 'subject_id', 'title']);
+
+    if (!req.file) {
+      return res.fail('Study material file (PDF) is required.', [], 422);
+    }
+
+    const { session, scope } = await getTeacherContext(req);
+    assertAccess(scope, Number(class_id), null, Number(subject_id));
+
+    const filePath = req.file.path.replace(/\\/g, '/');
+    const fileType = req.file.mimetype;
+    const fileSize = req.file.size;
+
+    const [[material]] = await sequelize.query(`
+      INSERT INTO study_materials (
+        class_id, subject_id, teacher_id, session_id, title, description,
+        file_path, file_type, file_size, is_active, created_at, updated_at
+      )
+      VALUES (
+        :classId, :subjectId, :teacherId, :sessionId, :title, :description,
+        :filePath, :fileType, :fileSize, true, NOW(), NOW()
+      )
+      RETURNING *;
+    `, {
+      replacements: {
+        classId: class_id,
+        subjectId: subject_id,
+        teacherId: req.user.id,
+        sessionId: session?.id || 0,
+        title,
+        description,
+        filePath,
+        fileType,
+        fileSize,
+      },
+    });
+
+    const { audit } = require('./teacherController'); // Self-reference might be tricky, but audit is in scope
+    await audit('study_materials', material.id, {
+      field: 'created',
+      oldValue: null,
+      newValue: title,
+      reason: 'Teacher uploaded study material',
+    }, req);
+
+    res.ok({ material }, 'Study material uploaded successfully.', 201);
+  } catch (err) { next(err); }
+};
+
+exports.deleteStudyMaterial = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const [[material]] = await sequelize.query(`
+      SELECT id, title, file_path FROM study_materials
+      WHERE id = :id AND teacher_id = :teacherId
+      LIMIT 1;
+    `, { replacements: { id, teacherId: req.user.id } });
+
+    if (!material) return res.fail('Study material not found.', [], 404);
+
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`DELETE FROM material_views WHERE material_id = :id;`, { replacements: { id }, transaction: t });
+      await sequelize.query(`DELETE FROM study_materials WHERE id = :id;`, { replacements: { id }, transaction: t });
+    });
+
+    // Optionally delete file from disk
+    const fullPath = path.join(__dirname, '..', material.file_path);
+    const fs = require('fs');
+    if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
+
+    await audit('study_materials', Number(id), {
+      field: 'deleted',
+      oldValue: material.title,
+      newValue: null,
+      reason: 'Teacher deleted study material',
+    }, req);
+
+    res.ok({ id: Number(id) }, 'Study material deleted successfully.');
   } catch (err) { next(err); }
 };

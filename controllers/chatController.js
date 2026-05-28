@@ -374,13 +374,13 @@ async function loadStudentConversations(studentId) {
       cc.subject_id,
       cc.is_class_teacher_chat,
       cc.last_message_at,
-      teacher.name AS teacher_name,
+      CONCAT(teacher.first_name, ' ', teacher.last_name) AS teacher_name,
       sub.name AS subject_name,
       msg.message_text AS last_message_text,
       msg.sender_role AS last_message_sender_role,
       msg.created_at AS last_message_created_at
     FROM chat_conversations cc
-    JOIN users teacher ON teacher.id = cc.teacher_id
+    JOIN teachers teacher ON teacher.id = cc.teacher_id
     LEFT JOIN subjects sub ON sub.id = cc.subject_id
     LEFT JOIN LATERAL (
       SELECT cm.message_text, cm.sender_role, cm.created_at
@@ -585,16 +585,16 @@ exports.studentContacts = async (req, res, next) => {
         ta.teacher_id,
         ta.subject_id,
         ta.is_class_teacher,
-        teacher.name AS teacher_name,
+        CONCAT(teacher.first_name, ' ', teacher.last_name) AS teacher_name,
         sub.name AS subject_name
       FROM teacher_assignments ta
-      JOIN users teacher ON teacher.id = ta.teacher_id
+      JOIN teachers teacher ON teacher.id = ta.teacher_id
       LEFT JOIN subjects sub ON sub.id = ta.subject_id
       WHERE ta.session_id = :sessionId
         AND ta.class_id = :classId
         AND ta.section_id = :sectionId
         AND ta.is_active = true
-      ORDER BY ta.is_class_teacher DESC, teacher.name ASC, sub.name ASC;
+      ORDER BY ta.is_class_teacher DESC, teacher.first_name ASC, sub.name ASC;
     `, {
       replacements: {
         sessionId: context.sessionId,

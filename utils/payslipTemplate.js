@@ -98,8 +98,7 @@ function generatePayslipHtml(data) {
           </div>
           <div class="net-salary">
             <label>Net Salary Disbursed</label>
-            <div class="amount">₹${net_salary}</div>
-          </div>
+            <div class="amount">Rs.${net_salary}</div>          </div>
         </div>
 
         <div class="disclaimer">

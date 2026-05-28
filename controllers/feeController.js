@@ -183,14 +183,14 @@ exports.downloadStructurePdf = async (req, res, next) => {
     }
 
     const [structures] = await sequelize.query(`
-      SELECT fs.*, c.name AS class_name
+      SELECT fs.*, c.name AS class_name, c.stream
       FROM fee_structures fs
       JOIN classes c ON c.id = fs.class_id
       WHERE fs.session_id = :sessionId
         AND c.school_id = :schoolId
         AND fs.is_active = true
         ${classQuery}
-      ORDER BY LENGTH(c.name), c.name ASC, fs.frequency DESC, fs.name ASC
+      ORDER BY c.order_number ASC, fs.frequency DESC, fs.name ASC
     `, { replacements });
 
     if (!structures || structures.length === 0) {
@@ -199,14 +199,15 @@ exports.downloadStructurePdf = async (req, res, next) => {
 
     // Group by class
     const classGroups = structures.reduce((acc, curr) => {
-      if (!acc[curr.class_name]) acc[curr.class_name] = [];
-      acc[curr.class_name].push(curr);
+      const key = curr.stream ? `${curr.class_name} (${curr.stream})` : curr.class_name;
+      if (!acc[key]) acc[key] = [];
+      acc[key].push(curr);
       return acc;
     }, {});
 
-    // Helper: formatINR with ₹
+    // Helper: formatINR with Rs.
     const formatINR = (amount) =>
-      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+      'Rs.' + Number(amount || 0).toLocaleString('en-IN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
@@ -239,24 +240,29 @@ exports.downloadStructurePdf = async (req, res, next) => {
 
     // Header Helper
     const drawHeader = () => {
-      doc.rect(0, 0, 595, 120).fill('#1e40af');
+      const pageWidth = doc.page.width;
+      const margin = 40;
+      const contentWidth = pageWidth - (margin * 2);
+
+      // Header Background (Not full bleed for better printing)
+      doc.rect(margin, 20, contentWidth, 100).fill('#1e40af');
       doc.fillColor('white');
-      
-      let textX = 40;
+
+      let textX = margin + 15;
       if (logoBuffer) {
         try {
-          doc.image(logoBuffer, 40, 30, { width: 60, height: 60 });
-          textX = 115;
+          doc.image(logoBuffer, margin + 10, 30, { width: 60, height: 60 });
+          textX = margin + 80;
         } catch (e) { /* skip logo if invalid */ }
       }
 
-      doc.font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), textX, 35);
-      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, textX, 58);
-      
-      doc.font('Helvetica-Bold').fontSize(14).text('ACADEMIC FEE STRUCTURE', 40, 85, { characterSpacing: 1 });
-      doc.fontSize(10).text(`Academic Year: ${session.name} | ${class_id ? `Class: ${structures[0].class_name}` : 'All Classes'}`, 40, 102);
-      
-      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleDateString()} | By: ${req.user.name}`, 400, 35, { align: 'right', width: 155 });
+      doc.font('Helvetica-Bold').fontSize(16).text(school.name.toUpperCase(), textX, 35);
+      doc.font('Helvetica').fontSize(8).text(`${school.address || ''} | Phone: ${school.phone || ''}`, textX, 54);
+
+      doc.font('Helvetica-Bold').fontSize(12).text('ACADEMIC FEE STRUCTURE', margin + 15, 85, { characterSpacing: 0.5 });
+      doc.fontSize(9).text(`Academic Year: ${session.name} | ${class_id ? `Class: ${structures[0].class_name}` : 'All Classes'}`, margin + 15, 102);
+
+      doc.fontSize(7).text(`Generated: ${new Date().toLocaleDateString()} | By: ${req.user.name}`, margin, 35, { align: 'right', width: contentWidth - 15 });
       doc.moveDown(2);
     };
 
@@ -269,15 +275,16 @@ exports.downloadStructurePdf = async (req, res, next) => {
     const headers = ['Fee Component', 'Frequency', 'Amount (INR)', 'Due Day', 'Remarks'];
 
     const drawTableHeaders = () => {
-      doc.fillColor('#dbeafe').rect(startX, doc.y, 515, 22).fill();
+      const headerY = doc.y;
+      doc.fillColor('#dbeafe').rect(startX, headerY, 515, 22).fill();
       doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
       let curX = startX;
       headers.forEach((h, i) => {
         const align = (i === 2 || i === 3) ? 'right' : 'left';
-        doc.text(h, curX + 5, doc.y + 7, { width: colWidths[i] - 10, align });
+        doc.text(h, curX + 5, headerY + 7, { width: colWidths[i] - 10, align });
         curX += colWidths[i];
       });
-      doc.y += 22;
+      doc.y = headerY + 22;
       doc.strokeColor('#e2e8f0').lineWidth(0.5).moveTo(startX, doc.y).lineTo(startX + 515, doc.y).stroke();
     };
 
@@ -623,7 +630,7 @@ exports.recordPayment = async (req, res, next) => {
       receivedBy     : req.user.id,
     });
 
-    res.ok(result, `Payment of ₹${result.amountApplied} applied. Status: ${result.newStatus}.`, 201);
+    res.ok(result, `Payment of Rs.${result.amountApplied} applied. Status: ${result.newStatus}.`, 201);
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
@@ -633,7 +640,7 @@ exports.carryForward = async (req, res, next) => {
   try {
     const { student_id, from_session_id, to_session_id } = req.body;
     const result = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id);
-    res.ok(result, `${result.invoicesCarried} invoice(s) carried forward. Total: ₹${result.totalAmountCarried}.`);
+    res.ok(result, `${result.invoicesCarried} invoice(s) carried forward. Total: Rs.${result.totalAmountCarried}.`);
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }

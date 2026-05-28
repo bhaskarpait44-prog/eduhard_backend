@@ -358,7 +358,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
 
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ 
-      margins: { top: 30, left: 30, right: 30, bottom: 10 }, 
+      margins: { top: 40, left: 40, right: 40, bottom: 20 }, 
       size: 'A4', 
       layout: 'landscape',
       bufferPages: true 
@@ -371,44 +371,43 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     const monthName = new Date(yearNum, monthNum - 1).toLocaleString('default', { month: 'long' });
 
     const drawHeader = () => {
-      doc.fillColor('#0f766e').fontSize(16).font('Helvetica-Bold').text(school.name.toUpperCase(), { align: 'center' });
+      doc.fillColor('#0f766e').fontSize(14).font('Helvetica-Bold').text(school.name.toUpperCase(), { align: 'center' });
       doc.fillColor('#64748b').fontSize(8).font('Helvetica').text(school.address, { align: 'center' });
-      doc.moveDown(0.5);
-      doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text(`MONTHLY ATTENDANCE REGISTER - ${monthName.toUpperCase()} ${yearNum}`, { align: 'center' });
-      doc.fontSize(10).text(`Class: ${meta.class_name} (${meta.section_name}) | Session: ${meta.session_name}`, { align: 'center' });
-      doc.moveDown(1);
+      doc.moveDown(0.4);
+      doc.fillColor('#1e293b').fontSize(11).font('Helvetica-Bold').text(`MONTHLY ATTENDANCE REGISTER - ${monthName.toUpperCase()} ${yearNum}`, { align: 'center' });
+      doc.fontSize(9).text(`Class: ${meta.class_name} (${meta.section_name}) | Session: ${meta.session_name}`, { align: 'center' });
+      doc.moveDown(0.8);
     };
 
     drawHeader();
 
-    const startX = 30;
-    const nameWidth = 140;
-    const rollWidth = 35;
-    const dayWidth = (doc.page.width - 60 - nameWidth - rollWidth - 40) / lastDay; // Extra 40 for totals
-    const rowHeight = 18;
+    const startX = 40;
+    const nameWidth = 130;
+    const rollWidth = 30;
+    const dayWidth = (doc.page.width - 80 - nameWidth - rollWidth - 40) / lastDay; // Extra 40 for totals
+    const rowHeight = 16;
 
     const drawGridHeader = (y) => {
-      doc.fillColor('#f8fafc').rect(startX, y, doc.page.width - 60, rowHeight).fill();
+      doc.fillColor('#f8fafc').rect(startX, y, doc.page.width - 80, rowHeight).fill();
       doc.fillColor('#475569').fontSize(7).font('Helvetica-Bold');
-      doc.text('ROLL', startX + 2, y + 5, { width: rollWidth });
-      doc.text('STUDENT NAME', startX + rollWidth + 5, y + 5, { width: nameWidth });
+      doc.text('ROLL', startX + 2, y + 4, { width: rollWidth });
+      doc.text('STUDENT NAME', startX + rollWidth + 5, y + 4, { width: nameWidth });
       
       for (let d = 1; d <= lastDay; d++) {
         const x = startX + rollWidth + nameWidth + (d - 1) * dayWidth;
-        doc.text(d.toString(), x, y + 5, { width: dayWidth, align: 'center' });
+        doc.text(d.toString(), x, y + 4, { width: dayWidth, align: 'center' });
       }
       
-      doc.text('P', startX + rollWidth + nameWidth + lastDay * dayWidth + 5, y + 5, { width: 15, align: 'center' });
-      doc.text('A', startX + rollWidth + nameWidth + lastDay * dayWidth + 20, y + 5, { width: 15, align: 'center' });
+      doc.text('P', startX + rollWidth + nameWidth + lastDay * dayWidth + 5, y + 4, { width: 15, align: 'center' });
+      doc.text('A', startX + rollWidth + nameWidth + lastDay * dayWidth + 20, y + 4, { width: 15, align: 'center' });
     };
 
     drawGridHeader(doc.y);
     doc.moveDown(0.1);
 
     students.forEach((student, index) => {
-      // Landscape A4 is 595.28 high. Margin 10 means bottom is 585.28. 
-      // Footer at 25 means text starts at 570.
-      if (doc.y > 540) {
+      // Landscape A4 is 595.28 high. Margin 20 means bottom is 575.28.
+      if (doc.y > 530) {
         doc.addPage();
         drawHeader();
         drawGridHeader(doc.y);
@@ -420,12 +419,12 @@ exports.downloadRegisterPdf = async (req, res, next) => {
       
       // Zebra striping
       if (index % 2 === 1) {
-        doc.fillColor('#f1f5f9').rect(startX, y, doc.page.width - 60, rowHeight).fill();
+        doc.fillColor('#f1f5f9').rect(startX, y, doc.page.width - 80, rowHeight).fill();
         doc.fillColor('#1e293b');
       }
 
-      doc.text(student.roll_number || '-', startX + 2, y + 5, { width: rollWidth });
-      doc.text(`${student.first_name} ${student.last_name}`, startX + rollWidth + 5, y + 5, { width: nameWidth, lineBreak: false });
+      doc.text(student.roll_number || '-', startX + 2, y + 4, { width: rollWidth });
+      doc.text(`${student.first_name} ${student.last_name}`, startX + rollWidth + 5, y + 4, { width: nameWidth, lineBreak: false });
 
       let pCount = 0;
       let aCount = 0;
@@ -643,9 +642,9 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
 
     if (!meta) return res.fail('Class, section, or session metadata not found.');
 
-    // Helper: formatINR with ₹ (Shared PDF Rule)
+    // Helper: formatINR with Rs. (Shared PDF Rule)
     const formatINR = (amount) =>
-      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+      'Rs.' + Number(amount || 0).toLocaleString('en-IN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
@@ -692,13 +691,21 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     doc.pipe(res);
 
     const drawHeader = () => {
-      doc.rect(0, 0, 595, 100).fill('#1e40af');
-      doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 20);
-      doc.font('Helvetica').fontSize(9).text(`${school.address || ''} | Phone: ${school.phone || ''}`, 40, 42);
-      doc.font('Helvetica-Bold').fontSize(14).text('ATTENDANCE SUMMARY REPORT', 40, 62);
-      doc.font('Helvetica').fontSize(10).text(`From: ${new Date(from_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}  To: ${new Date(to_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, 40, 78);
-      doc.text(`Class: ${meta.class_name} | Section: ${meta.section_name} | Session: ${meta.session_name}`, 250, 78);
-      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleString()} | By: ${req.user.name}`, 400, 20, { align: 'right', width: 155 });
+      const pageWidth = doc.page.width;
+      const margin = 40;
+      const contentWidth = pageWidth - (margin * 2);
+      
+      // Header Background (Not full bleed for better printing)
+      doc.rect(margin, 20, contentWidth, 80).fill('#1e40af');
+      
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(16).text(school.name.toUpperCase(), margin + 15, 35);
+      doc.font('Helvetica').fontSize(8).text(`${school.address || ''} | Phone: ${school.phone || ''}`, margin + 15, 54);
+      doc.font('Helvetica-Bold').fontSize(12).text('ATTENDANCE SUMMARY REPORT', margin + 15, 72);
+      
+      doc.font('Helvetica').fontSize(9).text(`From: ${new Date(from_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}  To: ${new Date(to_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, margin + 15, 87);
+      doc.text(`Class: ${meta.class_name} | Section: ${meta.section_name}`, margin + 250, 87);
+      
+      doc.fontSize(7).text(`Generated on: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
     };
 
     drawHeader();
@@ -822,9 +829,9 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
 
     if (!student) return res.fail('Student enrollment record not found.');
 
-    // Helper: formatINR with ₹ (Shared PDF Rule)
+    // Helper: formatINR with Rs. (Shared PDF Rule)
     const formatINR = (amount) =>
-      '₹' + Number(amount || 0).toLocaleString('en-IN', {
+      'Rs.' + Number(amount || 0).toLocaleString('en-IN', {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
@@ -849,10 +856,16 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     doc.pipe(res);
 
     const drawHeader = () => {
-      doc.rect(0, 0, 595, 100).fill('#1e40af');
-      doc.fillColor('white').font('Helvetica-Bold').fontSize(18).text(school.name.toUpperCase(), 40, 20);
-      doc.font('Helvetica-Bold').fontSize(14).text('STUDENT ATTENDANCE RECORD', 40, 62);
-      doc.fontSize(8).text(`Generated on: ${new Date().toLocaleString()}`, 400, 20, { align: 'right', width: 155 });
+      const pageWidth = doc.page.width;
+      const margin = 40;
+      const contentWidth = pageWidth - (margin * 2);
+      
+      // Header Background (Not full bleed for better printing)
+      doc.rect(margin, 20, contentWidth, 80).fill('#1e40af');
+      
+      doc.fillColor('white').font('Helvetica-Bold').fontSize(16).text(school.name.toUpperCase(), margin + 15, 35);
+      doc.font('Helvetica-Bold').fontSize(12).text('STUDENT ATTENDANCE RECORD', margin + 15, 62);
+      doc.fontSize(7).text(`Generated on: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
     };
 
     drawHeader();

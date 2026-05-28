@@ -15,7 +15,11 @@ const StaffAttendance = sequelize.define('StaffAttendance', {
   },
   user_id: {
     type: DataTypes.INTEGER,
-    allowNull: false,
+    allowNull: true,
+  },
+  teacher_id: {
+    type: DataTypes.INTEGER,
+    allowNull: true,
   },
   date: {
     type: DataTypes.DATEONLY,

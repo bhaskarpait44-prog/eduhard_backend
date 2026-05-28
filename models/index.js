@@ -50,6 +50,7 @@ const LibrarySetting       = require('./LibrarySetting');
 const LibraryReservation   = require('./LibraryReservation');
 const Notice               = require('./Notice');
 const Certificate          = require('./Certificate');
+const PushToken            = require('./PushToken');
 
 
 // ── Associations ────────────────────────────────────────────────────────────
@@ -109,8 +110,6 @@ User.hasMany(LibraryIssue, { foreignKey: 'borrower_id', as: 'libraryIssues', con
 Student.hasMany(LibraryReservation, { foreignKey: 'borrower_id', as: 'libraryReservations', constraints: false, scope: { borrower_type: 'student' } });
 User.hasMany(LibraryReservation, { foreignKey: 'borrower_id', as: 'libraryReservations', constraints: false, scope: { borrower_type: 'staff' } });
 
-Student.hasMany(StudentResult, { foreignKey: 'student_id', as: 'results' }); // Assuming there might be direct link, but results are usually via enrollments
-
 Student.hasOne(StudentHealthProfile, { foreignKey: 'student_id', as: 'healthProfile' });
 StudentHealthProfile.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
@@ -159,6 +158,9 @@ Feedback.belongsTo(User, { foreignKey: 'replied_by', as: 'replier' });
 User.hasMany(StaffAttendance, { foreignKey: 'user_id', as: 'attendanceRecords' });
 StaffAttendance.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
 
+Teacher.hasMany(StaffAttendance, { foreignKey: 'teacher_id', as: 'attendanceRecords' });
+StaffAttendance.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
+
 StaffAttendance.belongsTo(User, { foreignKey: 'created_by', as: 'marker' });
 
 Expense.belongsTo(User, { foreignKey: 'submitted_by', as: 'submitter' });
@@ -189,6 +191,9 @@ Enrollment.belongsTo(Session, { foreignKey: 'session_id', as: 'session' });
 Session.hasMany(FeeStructure, { foreignKey: 'session_id', as: 'feeStructures' });
 FeeStructure.belongsTo(Session, { foreignKey: 'session_id', as: 'session' });
 
+Session.hasMany(StudyMaterial, { foreignKey: 'session_id', as: 'studyMaterials' });
+StudyMaterial.belongsTo(Session, { foreignKey: 'session_id', as: 'session' });
+
 // Classes & Sections
 Class.hasMany(Section, { foreignKey: 'class_id', as: 'sections' });
 Section.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
@@ -201,6 +206,9 @@ Exam.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
 
 Class.hasMany(Enrollment, { foreignKey: 'class_id', as: 'enrollments' });
 Enrollment.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
+
+Class.hasMany(StudyMaterial, { foreignKey: 'class_id', as: 'studyMaterials' });
+StudyMaterial.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
 
 Section.hasMany(Enrollment, { foreignKey: 'section_id', as: 'enrollments' });
 Enrollment.belongsTo(Section, { foreignKey: 'section_id', as: 'section' });
@@ -228,6 +236,9 @@ ExamResult.belongsTo(Subject, { foreignKey: 'subject_id', as: 'subject' });
 Subject.hasMany(MarkHistory, { foreignKey: 'subject_id', as: 'markHistories' });
 MarkHistory.belongsTo(Subject, { foreignKey: 'subject_id', as: 'subject' });
 
+Subject.hasMany(StudyMaterial, { foreignKey: 'subject_id', as: 'studyMaterials' });
+StudyMaterial.belongsTo(Subject, { foreignKey: 'subject_id', as: 'subject' });
+
 // Students & Enrollments
 Student.hasMany(Enrollment, { foreignKey: 'student_id', as: 'enrollments' });
 Enrollment.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
@@ -253,6 +264,9 @@ ExamResult.belongsTo(Enrollment, { foreignKey: 'enrollment_id', as: 'enrollment'
 Enrollment.hasMany(MarkHistory, { foreignKey: 'enrollment_id', as: 'markHistories' });
 MarkHistory.belongsTo(Enrollment, { foreignKey: 'enrollment_id', as: 'enrollment' });
 
+Enrollment.hasOne(StudentResult, { foreignKey: 'enrollment_id', as: 'finalResult' });
+StudentResult.belongsTo(Enrollment, { foreignKey: 'enrollment_id', as: 'enrollment' });
+
 // Fees
 FeeStructure.hasMany(FeeInvoice, { foreignKey: 'fee_structure_id', as: 'invoices' });
 FeeInvoice.belongsTo(FeeStructure, { foreignKey: 'fee_structure_id', as: 'feeStructure' });
@@ -264,26 +278,50 @@ FeePayment.belongsTo(User, { foreignKey: 'received_by', as: 'receivedBy' });
 
 // Achievements & Documents
 Student.hasMany(StudentAchievement, { foreignKey: 'student_id', as: 'achievements' });
-StudentAchievement.belongsTo(Student, { foreignKey: 'student_id' });
+StudentAchievement.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
 Student.hasMany(StudentDocument, { foreignKey: 'student_id', as: 'documents' });
-StudentDocument.belongsTo(Student, { foreignKey: 'student_id' });
+StudentDocument.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 StudentDocument.belongsTo(User, { foreignKey: 'uploaded_by', as: 'uploader' });
 
-// Study Material
+// Study Material & Views
 StudyMaterial.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 Teacher.hasMany(StudyMaterial, { foreignKey: 'teacher_id', as: 'studyMaterials' });
+
+StudyMaterial.hasMany(MaterialView, { foreignKey: 'material_id', as: 'views' });
+MaterialView.belongsTo(StudyMaterial, { foreignKey: 'material_id', as: 'material' });
+
+Student.hasMany(MaterialView, { foreignKey: 'student_id', as: 'materialViews' });
+MaterialView.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
 // Notices
 School.hasMany(Notice, { foreignKey: 'school_id', as: 'notices' });
 Notice.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 
-Notice.belongsTo(User, { foreignKey: 'posted_by_user_id', as: 'poster' });
+Notice.belongsTo(User, { foreignKey: 'posted_by_user_id', as: 'posterUser', constraints: false });
+Notice.belongsTo(Teacher, { foreignKey: 'posted_by_user_id', as: 'posterTeacher', constraints: false });
+
 Notice.belongsTo(Class, { foreignKey: 'target_class_id', as: 'targetClass' });
 Notice.belongsTo(Section, { foreignKey: 'target_section_id', as: 'targetSection' });
 Notice.belongsTo(Student, { foreignKey: 'target_student_id', as: 'targetStudent' });
 Notice.belongsTo(Teacher, { foreignKey: 'target_teacher_id', as: 'targetTeacher' });
 Notice.belongsTo(Subject, { foreignKey: 'target_subject_id', as: 'targetSubject' });
+
+Notice.hasMany(NoticePin, { foreignKey: 'notice_id', as: 'pins' });
+NoticePin.belongsTo(Notice, { foreignKey: 'notice_id', as: 'notice' });
+
+Student.hasMany(NoticePin, { foreignKey: 'student_id', as: 'pinnedNotices' });
+NoticePin.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+
+// Push Tokens
+User.hasMany(PushToken, { foreignKey: 'user_id', as: 'pushTokens' });
+PushToken.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+
+Student.hasMany(PushToken, { foreignKey: 'student_id', as: 'pushTokens' });
+PushToken.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+
+Teacher.hasMany(PushToken, { foreignKey: 'teacher_id', as: 'pushTokens' });
+PushToken.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 
 // Certificates
 Certificate.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
@@ -292,8 +330,9 @@ Student.hasMany(Certificate, { foreignKey: 'student_id', as: 'certificates' });
 Certificate.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 Teacher.hasMany(Certificate, { foreignKey: 'teacher_id', as: 'certificates' });
 
-Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
-User.hasMany(Certificate, { foreignKey: 'issued_by', as: 'issuedCertificates' });
+Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuerUser', constraints: false });
+Certificate.belongsTo(Teacher, { foreignKey: 'issued_by', as: 'issuerTeacher', constraints: false });
+
 
 // AuditLog has no Sequelize association — queried by table_name + record_id directly
 
@@ -349,6 +388,7 @@ const db = {
   LibrarySetting,
   LibraryReservation,
   Certificate,
+  PushToken,
 };
 
 module.exports = db;
