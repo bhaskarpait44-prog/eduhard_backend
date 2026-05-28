@@ -357,7 +357,12 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     `, { replacements: { fromDate, toDate, sessionId: session_id, classId, sectionId } });
 
     const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+    const doc = new PDFDocument({ 
+      margins: { top: 30, left: 30, right: 30, bottom: 10 }, 
+      size: 'A4', 
+      layout: 'landscape',
+      bufferPages: true 
+    });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_Register_${meta.class_name}_${meta.section_name}_${month}_${year}.pdf"`);
@@ -401,7 +406,9 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     doc.moveDown(0.1);
 
     students.forEach((student, index) => {
-      if (doc.y > 520) {
+      // Landscape A4 is 595.28 high. Margin 10 means bottom is 585.28. 
+      // Footer at 25 means text starts at 570.
+      if (doc.y > 540) {
         doc.addPage();
         drawHeader();
         drawGridHeader(doc.y);
@@ -463,7 +470,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
-      doc.text(`Page ${i + 1} of ${range.count}`, 30, 560, { align: 'right', width: doc.page.width - 60 });
+      doc.text(`Page ${i + 1} of ${range.count}`, 30, doc.page.height - 25, { align: 'right', width: doc.page.width - 60 });
     }
 
     doc.end();
@@ -677,6 +684,8 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
 
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+    // Override bottom margin specifically for the footer safety
+    doc.page.margins.bottom = 10;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_Report_${meta.class_name}_${meta.section_name}_${from_date}.pdf"`);
@@ -740,7 +749,9 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
 
     rows.forEach((row, i) => {
       const rowHeight = 22;
-      if (doc.y + rowHeight > 750) {
+      // Portrait A4 is 841.89 high. Margin 10 means bottom is 831.89.
+      // Footer at 25 means text starts at 816.
+      if (doc.y + rowHeight > 780) {
         doc.addPage();
         drawHeader();
         doc.y = 110;
@@ -777,11 +788,10 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, 790, { lineBreak: false });
-      doc.text(`Page ${i + 1} of ${range.count}`, 450, 790, { align: 'right', width: 100, lineBreak: false });
+      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, doc.page.height - 25, { lineBreak: false });
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, doc.page.height - 25, { align: 'right', width: 100, lineBreak: false });
     }
 
-    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };
@@ -831,6 +841,8 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
 
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
+    // Override bottom margin specifically for the footer safety
+    doc.page.margins.bottom = 10;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_${student.first_name}.pdf"`);
@@ -973,12 +985,14 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     }
 
     // Legend
-    doc.switchToPage(doc.bufferedPageRange().count - 1);
-    doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-    doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, 790, { lineBreak: false });
-    doc.text(`Page 1 of 1`, 450, 790, { align: 'right', width: 100, lineBreak: false });
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fillColor('#64748b').fontSize(8).font('Helvetica');
+      doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, doc.page.height - 25, { lineBreak: false });
+      doc.text(`Page ${i + 1} of ${range.count}`, 450, doc.page.height - 25, { align: 'right', width: 100, lineBreak: false });
+    }
 
-    doc.flushPages();
     doc.end();
   } catch (err) { next(err); }
 };

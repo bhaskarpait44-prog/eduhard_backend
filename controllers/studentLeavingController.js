@@ -1,7 +1,27 @@
 'use strict';
 
+const PDFDocument = require('pdfkit');
 const sequelize = require('../config/database');
-const { renderPdf } = require('../utils/puppeteerPdf');
+
+async function currentSessionId(schoolId) {
+  const [[session]] = await sequelize.query(`
+    SELECT id, name
+    FROM sessions
+    WHERE school_id = :schoolId AND is_current = true
+    ORDER BY id DESC
+    LIMIT 1;
+  `, { replacements: { schoolId } });
+
+  return session || null;
+}
+
+function safeFileName(value, fallback = 'students-list') {
+  return String(value || fallback)
+    .replace(/[^a-z0-9-_]+/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase() || fallback;
+}
 
 exports.downloadLeftStudentsPdf = async (req, res, next) => {
   try {
@@ -26,22 +46,15 @@ exports.downloadLeftStudentsPdf = async (req, res, next) => {
     };
 
     const [[school]] = await sequelize.query(`
-      SELECT name, branch_name, address, phone, email FROM schools WHERE id = :schoolId LIMIT 1
+      SELECT name FROM schools WHERE id = :schoolId LIMIT 1
     `, { replacements: { schoolId } });
-
-    if (!school) {
-      console.warn(`[PDF Export] School with ID ${schoolId} not found. Using default values.`);
-    }
-
-    const schoolData = school || { name: 'Institution', branch_name: '', address: '', phone: '', email: '' };
 
     const [students] = await sequelize.query(`
       SELECT DISTINCT ON (s.id)
-        s.id, s.admission_no, s.first_name, s.last_name, sp.photo_path AS photo_url, 
+        s.admission_no, s.first_name, s.last_name, 
         s.left_date, s.leaving_reason, s.leaving_remarks,
         c.name AS class_name, sec.name AS section_name, sess.name AS session_name
       FROM students s
-      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       LEFT JOIN enrollments e ON e.student_id = s.id AND e.leaving_type = 'left'
       LEFT JOIN classes c ON c.id = e.class_id
       LEFT JOIN sections sec ON sec.id = e.section_id
@@ -58,224 +71,116 @@ exports.downloadLeftStudentsPdf = async (req, res, next) => {
       ORDER BY s.id, e.left_date DESC
     `, { replacements });
 
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --primary:    #1e40af;
-      --primary-lt: #dbeafe;
-      --danger:     #dc2626;
-      --danger-lt:  #fee2e2;
-      --text:       #0f172a;
-      --muted:      #64748b;
-      --border:     #e2e8f0;
-      --surface:    #f8fafc;
-      --white:      #ffffff;
-    }
-    * { box-sizing: border-box; }
-    body {
-      font-family: 'Inter', sans-serif;
-      margin: 0;
-      padding: 0;
-      color: var(--text);
-      background: var(--white);
-      -webkit-print-color-adjust: exact;
-    }
-    .header {
-      background: var(--primary);
-      padding: 32px 40px;
-      color: var(--white);
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-    }
-    .header-left h1 { margin: 0; font-size: 22px; font-weight: 700; }
-    .header-left p { margin: 4px 0 0; font-size: 10px; opacity: 0.9; }
-    .header-right { text-align: right; }
-    .header-right h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
-    .header-right p { margin: 4px 0 0; font-size: 10px; opacity: 0.9; }
-
-    .filter-bar {
-      background: var(--danger-lt);
-      padding: 10px 40px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .chip {
-      background: var(--white);
-      border: 1px solid #fca5a5;
-      color: var(--danger);
-      border-radius: 20px;
-      padding: 3px 10px;
-      font-size: 11px;
-      font-weight: 500;
-    }
-
-    .stats-row {
-      display: flex;
-      border-bottom: 1px solid var(--border);
-    }
-    .stat-box {
-      flex: 1;
-      padding: 16px 40px;
-      border-right: 1px solid var(--border);
-    }
-    .stat-box:last-child { border-right: none; }
-    .stat-value { font-size: 28px; font-weight: 700; color: var(--primary); display: block; }
-    .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; margin-top: 4px; display: block; }
-
-    .table-container { padding: 30px 40px; }
-    table { width: 100%; border-collapse: collapse; }
-    thead { background: var(--primary); }
-    th {
-      color: var(--white);
-      font-size: 10px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      padding: 12px 10px;
-      text-align: left;
-    }
-    td {
-      padding: 11px 10px;
-      font-size: 11px;
-      border-bottom: 1px solid var(--border);
-    }
-    tr:nth-child(even) { background: var(--surface); }
-    tr { page-break-inside: avoid; }
-
-    .student-info { display: flex; align-items: center; gap: 10px; }
-    .photo { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
-    .initials {
-      width: 32px; height: 32px; border-radius: 50%;
-      background: var(--primary-lt); color: var(--primary);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 600;
-    }
-    .left-date { font-weight: 700; color: var(--danger); }
-    .reason-badge {
-      background: var(--danger-lt); color: #991b1b;
-      padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 500;
-      display: inline-block;
-    }
-    .row-num { color: #94a3b8; font-size: 10px; }
-
-    .footer {
-      position: fixed; bottom: 20px; left: 0; right: 0;
-      padding: 0 40px;
-      display: flex; justify-content: space-between;
-      font-size: 9px; color: var(--muted);
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="header-left">
-      <h1>${schoolData.name}</h1>
-      <p>${schoolData.branch_name || ''} | ${schoolData.address || ''}</p>
-      <p>Tel: ${schoolData.phone || ''} | ${schoolData.email || ''}</p>
-    </div>
-    <div class="header-right">
-      <h2>STUDENT LEAVERS LIST</h2>
-      <p>Generated: ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</p>
-      <p>By: ${req.user.name}</p>
-    </div>
-  </div>
-
-  <div class="filter-bar">
-    ${session_id ? `<div class="chip">Session: ${students[0]?.session_name || 'Selected'}</div>` : ''}
-    ${class_id ? `<div class="chip">Class: ${students[0]?.class_name || 'Selected'}</div>` : ''}
-    ${leaving_reason ? `<div class="chip">Reason: ${leaving_reason}</div>` : ''}
-    ${from_date || to_date ? `<div class="chip">Date: ${from_date || '...'} to ${to_date || '...'}</div>` : ''}
-    <div class="chip">Total Records: ${students.length}</div>
-  </div>
-
-  <div class="stats-row">
-    <div class="stat-box">
-      <span class="stat-value">${students.length}</span>
-      <span class="stat-label">Total Leavers</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${new Set(students.map(s => s.session_name)).size}</span>
-      <span class="stat-label">Sessions</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${students.filter(s => s.leaving_reason === 'Completed Studies').length}</span>
-      <span class="stat-label">Completed</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${from_date && to_date ? 'Custom' : 'All Time'}</span>
-      <span class="stat-label">Date Range</span>
-    </div>
-  </div>
-
-  <div class="table-container">
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 4%">#</th>
-          <th style="width: 11%">Admission No</th>
-          <th style="width: 22%">Student Name</th>
-          <th style="width: 10%">Class</th>
-          <th style="width: 9%">Section</th>
-          <th style="width: 12%">Left Date</th>
-          <th style="width: 17%">Reason</th>
-          <th style="width: 15%">Remarks</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${students.map((s, i) => `
-          <tr>
-            <td class="row-num">${i + 1}</td>
-            <td>${s.admission_no}</td>
-            <td>
-              <div class="student-info">
-                ${s.photo_url 
-                  ? `<img src="${s.photo_url}" class="photo" onerror="this.style.display='none'">` 
-                  : `<div class="initials">${s.first_name[0]}${s.last_name[0]}</div>`
-                }
-                <span>${s.first_name} ${s.last_name}</span>
-              </div>
-            </td>
-            <td>${s.class_name}</td>
-            <td>${s.section_name}</td>
-            <td class="left-date">${s.left_date ? new Date(s.left_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}</td>
-            <td><span class="reason-badge">${s.leaving_reason || '—'}</span></td>
-            <td style="color: #64748b; font-size: 10px;">${s.leaving_remarks || '—'}</td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  </div>
-
-  <div class="footer">
-    <span>${schoolData.name}</span>
-    <span>Confidential — For Administrative Use Only</span>
-    <span>Generated by EduCore</span>
-  </div>
-</body>
-</html>
-    `;
-
-    const pdfBuffer = await renderPdf(html);
+    const filename = safeFileName(`leavers-list-${new Date().getTime()}`) + '.pdf';
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="leavers_list.pdf"');
-    res.end(pdfBuffer);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, left: 40, right: 40, bottom: 10 },
+      bufferPages: true,
+    });
+
+    doc.pipe(res);
+
+    // Header
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(16)
+      .fillColor('#1e293b')
+      .text(school?.name || 'School', { align: 'center' });
+
+    doc
+      .fontSize(12)
+      .fillColor('#334155')
+      .text('Left Students List (Alumni & Leavers)', { align: 'center' });
+
+    doc.moveDown(0.5);
+    
+    let filterText = `Generated on ${new Date().toLocaleDateString()}`;
+    if (from_date || to_date) filterText += ` | Range: ${from_date || '...'} to ${to_date || '...'}`;
+    doc
+      .font('Helvetica')
+      .fontSize(9)
+      .fillColor('#64748b')
+      .text(filterText, { align: 'center' });
+
+    doc.moveDown(1.5);
+
+    // Table Header
+    const tableTop = doc.y;
+    const colIdx = 40;
+    const colAdm = 70;
+    const colName = 150;
+    const colClass = 320;
+    const colDate = 420;
+    const colReason = 500;
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#1e293b');
+    doc.text('#', colIdx, tableTop);
+    doc.text('Adm No.', colAdm, tableTop);
+    doc.text('Student Name', colName, tableTop);
+    doc.text('Class (Last)', colClass, tableTop);
+    doc.text('Left Date', colDate, tableTop);
+    doc.text('Reason', colReason, tableTop);
+
+    doc.moveTo(40, tableTop + 15).lineTo(555, tableTop + 15).lineWidth(1).strokeColor('#cbd5e1').stroke();
+
+    let currentY = tableTop + 25;
+
+    students.forEach((s, i) => {
+      if (currentY > 750) {
+        doc.addPage();
+        currentY = 50;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#1e293b');
+        doc.text('#', colIdx, currentY);
+        doc.text('Adm No.', colAdm, currentY);
+        doc.text('Student Name', colName, currentY);
+        doc.text('Class (Last)', colClass, currentY);
+        doc.text('Left Date', colDate, currentY);
+        doc.text('Reason', colReason, currentY);
+        doc.moveTo(40, currentY + 15).lineTo(555, currentY + 15).stroke();
+        currentY += 25;
+      }
+
+      doc.font('Helvetica').fontSize(9).fillColor('#334155');
+      const fullName = `${s.first_name} ${s.last_name || ''}`.trim();
+      const classText = s.class_name ? `${s.class_name}${s.section_name ? ` (${s.section_name})` : ''}` : '--';
+      const leftDate = s.left_date ? new Date(s.left_date).toLocaleDateString() : '--';
+      const reason = s.leaving_reason || '--';
+
+      doc.text(i + 1, colIdx, currentY);
+      doc.text(s.admission_no || '--', colAdm, currentY);
+      doc.text(fullName, colName, currentY, { width: 160, lineBreak: false });
+      doc.text(classText, colClass, currentY, { width: 90, lineBreak: false });
+      doc.text(leftDate, colDate, currentY);
+      doc.text(reason, colReason, currentY, { width: 60 });
+
+      doc.moveTo(40, currentY + 15).lineTo(555, currentY + 15).lineWidth(0.5).strokeColor('#f1f5f9').stroke();
+      currentY += 22;
+    });
+
+    if (!students.length) {
+      doc.moveDown(2).font('Helvetica-Oblique').text('No records found.', { align: 'center' });
+    }
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fontSize(8).fillColor('#94a3b8').text(
+        `Generated by EduCore • Page ${i + 1} of ${range.count}`,
+        40, doc.page.height - 25, { align: 'center', width: doc.page.width - 80 }
+      );
+    }
+
+    doc.end();
   } catch (err) { next(err); }
 };
 
 exports.downloadGraduatedStudentsPdf = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const { 
-      search = '', 
-      class_id = '', 
-      session_id = '' 
-    } = req.query;
+    const { search = '', class_id = '', session_id = '' } = req.query;
 
     const replacements = { 
       schoolId, 
@@ -285,22 +190,15 @@ exports.downloadGraduatedStudentsPdf = async (req, res, next) => {
     };
 
     const [[school]] = await sequelize.query(`
-      SELECT name, branch_name, address, phone, email FROM schools WHERE id = :schoolId LIMIT 1
+      SELECT name FROM schools WHERE id = :schoolId LIMIT 1
     `, { replacements: { schoolId } });
-
-    if (!school) {
-      console.warn(`[PDF Export] School with ID ${schoolId} not found. Using default values.`);
-    }
-
-    const schoolData = school || { name: 'Institution', branch_name: '', address: '', phone: '', email: '' };
 
     const [students] = await sequelize.query(`
       SELECT DISTINCT ON (s.id)
-        s.id, s.admission_no, s.first_name, s.last_name, sp.photo_path AS photo_url,
+        s.admission_no, s.first_name, s.last_name,
         c.name AS class_name, sec.name AS section_name, sess.name AS session_name,
         sr.percentage, sr.grade
       FROM students s
-      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       JOIN enrollments e ON e.student_id = s.id AND e.leaving_type = 'graduated'
       LEFT JOIN classes c ON c.id = e.class_id
       LEFT JOIN sections sec ON sec.id = e.section_id
@@ -315,197 +213,96 @@ exports.downloadGraduatedStudentsPdf = async (req, res, next) => {
       ORDER BY s.id, e.left_date DESC
     `, { replacements });
 
-    const getGradeClass = (grade) => {
-      const g = (grade || '').toUpperCase();
-      if (['A+', 'A'].includes(g)) return 'grade-a';
-      if (['B+', 'B'].includes(g)) return 'grade-b';
-      if (['C+', 'C'].includes(g)) return 'grade-c';
-      return 'grade-d';
-    };
-
-    const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --primary:    #15803d;
-      --primary-lt: #dcfce7;
-      --accent:     #166534;
-      --accent-lt:  #f0fdf4;
-      --text:       #0f172a;
-      --muted:      #64748b;
-      --border:     #e2e8f0;
-      --surface:    #f8fafc;
-      --white:      #ffffff;
-    }
-    * { box-sizing: border-box; }
-    body {
-      font-family: 'Inter', sans-serif;
-      margin: 0; padding: 0;
-      color: var(--text); background: var(--white);
-      -webkit-print-color-adjust: exact;
-    }
-    .header {
-      background: var(--primary); padding: 32px 40px;
-      color: var(--white); display: flex; justify-content: space-between; align-items: flex-start;
-    }
-    .header-left h1 { margin: 0; font-size: 22px; font-weight: 700; }
-    .header-left p { margin: 4px 0 0; font-size: 10px; opacity: 0.9; }
-    .header-right { text-align: right; }
-    .header-right h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; }
-    .header-right p { margin: 4px 0 0; font-size: 10px; opacity: 0.9; }
-
-    .filter-bar {
-      background: var(--accent-lt); padding: 10px 40px;
-      display: flex; flex-wrap: wrap; gap: 8px;
-    }
-    .chip {
-      background: var(--white); border: 1px solid #86efac;
-      color: var(--primary); border-radius: 20px;
-      padding: 3px 10px; font-size: 11px; font-weight: 500;
-    }
-
-    .stats-row { display: flex; border-bottom: 1px solid var(--border); }
-    .stat-box { flex: 1; padding: 16px 40px; border-right: 1px solid var(--border); }
-    .stat-box:last-child { border-right: none; }
-    .stat-value { font-size: 28px; font-weight: 700; color: var(--primary); display: block; }
-    .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; font-weight: 600; margin-top: 4px; display: block; }
-
-    .table-container { padding: 30px 40px; }
-    table { width: 100%; border-collapse: collapse; }
-    thead { background: var(--primary); }
-    th {
-      color: var(--white); font-size: 10px; font-weight: 600;
-      text-transform: uppercase; letter-spacing: 0.05em;
-      padding: 12px 10px; text-align: left;
-    }
-    td { padding: 11px 10px; font-size: 11px; border-bottom: 1px solid var(--border); }
-    tr:nth-child(even) { background: var(--surface); }
-    tr { page-break-inside: avoid; }
-
-    .student-info { display: flex; align-items: center; gap: 10px; }
-    .photo { width: 32px; height: 32px; border-radius: 50%; object-fit: cover; }
-    .initials {
-      width: 32px; height: 32px; border-radius: 50%;
-      background: var(--primary-lt); color: var(--primary);
-      display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 600;
-    }
-
-    .grade-badge {
-      padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 600; display: inline-block;
-    }
-    .grade-a { background: #dcfce7; color: #166534; }
-    .grade-b { background: #dbeafe; color: #1e40af; }
-    .grade-c { background: #fef9c3; color: #854d0e; }
-    .grade-d { background: #fee2e2; color: #991b1b; }
-
-    .progress-outer { width: 100%; background: #e2e8f0; height: 6px; border-radius: 3px; margin-top: 4px; overflow: hidden; }
-    .progress-inner { height: 100%; background: var(--primary); border-radius: 3px; }
-    .percentage-text { font-weight: 700; font-size: 11px; }
-
-    .row-num { color: #94a3b8; font-size: 10px; }
-    .footer {
-      position: fixed; bottom: 20px; left: 0; right: 0;
-      padding: 0 40px; display: flex; justify-content: space-between;
-      font-size: 9px; color: var(--muted);
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div class="header-left">
-      <h1>${schoolData.name}</h1>
-      <p>${schoolData.branch_name || ''} | ${schoolData.address || ''}</p>
-      <p>Tel: ${schoolData.phone || ''} | ${schoolData.email || ''}</p>
-    </div>
-    <div class="header-right">
-      <h2>GRADUATED STUDENTS LIST</h2>
-      <p>Generated: ${new Date().toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}</p>
-      <p>By: ${req.user.name}</p>
-    </div>
-  </div>
-
-  <div class="filter-bar">
-    ${session_id ? `<div class="chip">Session: ${students[0]?.session_name || 'Selected'}</div>` : ''}
-    ${class_id ? `<div class="chip">Class: ${students[0]?.class_name || 'Selected'}</div>` : ''}
-    <div class="chip">Total Records: ${students.length}</div>
-  </div>
-
-  <div class="stats-row">
-    <div class="stat-box">
-      <span class="stat-value">${students.length}</span>
-      <span class="stat-label">Total Graduates</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${new Set(students.map(s => s.session_name)).size}</span>
-      <span class="stat-label">Sessions</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${students.length > 0 ? (students.reduce((acc, s) => acc + parseFloat(s.percentage || 0), 0) / students.length).toFixed(1) + '%' : '0%'}</span>
-      <span class="stat-label">Avg. Percentage</span>
-    </div>
-    <div class="stat-box">
-      <span class="stat-value">${students.length > 0 ? [...students].sort((a,b) => parseFloat(b.percentage || 0) - parseFloat(a.percentage || 0))[0].grade : '—'}</span>
-      <span class="stat-label">Top Grade</span>
-    </div>
-  </div>
-
-  <div class="table-container">
-    <table>
-      <thead>
-        <tr>
-          <th style="width: 5%">#</th>
-          <th style="width: 15%">Admission No</th>
-          <th style="width: 25%">Student Name</th>
-          <th style="width: 15%">Class (Section)</th>
-          <th style="width: 15%">Session</th>
-          <th style="width: 15%">Score %</th>
-          <th style="width: 10%">Grade</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${students.map((s, i) => `
-          <tr>
-            <td class="row-num">${i + 1}</td>
-            <td>${s.admission_no}</td>
-            <td>
-              <div class="student-info">
-                ${s.photo_url 
-                  ? `<img src="${s.photo_url}" class="photo" onerror="this.style.display='none'">` 
-                  : `<div class="initials">${s.first_name[0]}${s.last_name[0]}</div>`
-                }
-                <span>${s.first_name} ${s.last_name}</span>
-              </div>
-            </td>
-            <td>${s.class_name} (${s.section_name})</td>
-            <td>${s.session_name}</td>
-            <td>
-              <span class="percentage-text">${s.percentage || '0'}%</span>
-              <div class="progress-outer"><div class="progress-inner" style="width: ${s.percentage || 0}%"></div></div>
-            </td>
-            <td><span class="grade-badge ${getGradeClass(s.grade)}">${s.grade || '—'}</span></td>
-          </tr>
-        `).join('')}
-      </tbody>
-    </table>
-  </div>
-
-  <div class="footer">
-    <span>${schoolData.name}</span>
-    <span>Confidential — For Administrative Use Only</span>
-    <span>Generated by EduCore</span>
-  </div>
-</body>
-</html>
-    `;
-
-    const pdfBuffer = await renderPdf(html);
+    const filename = safeFileName(`graduated-list-${new Date().getTime()}`) + '.pdf';
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', 'attachment; filename="graduated_list.pdf"');
-    res.end(pdfBuffer);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, left: 40, right: 40, bottom: 10 },
+      bufferPages: true,
+    });
+
+    doc.pipe(res);
+
+    // Header
+    doc.font('Helvetica-Bold').fontSize(16).fillColor('#15803d').text(school?.name || 'School', { align: 'center' });
+    doc.fontSize(12).fillColor('#166534').text('Graduated Students List', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.font('Helvetica').fontSize(9).fillColor('#64748b').text(`Generated on ${new Date().toLocaleDateString()}`, { align: 'center' });
+    doc.moveDown(1.5);
+
+    // Table Header
+    const tableTop = doc.y;
+    const colIdx = 40;
+    const colAdm = 70;
+    const colName = 150;
+    const colClass = 320;
+    const colSess = 420;
+    const colScore = 490;
+    const colGrade = 540;
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor('#1e293b');
+    doc.text('#', colIdx, tableTop);
+    doc.text('Adm No.', colAdm, tableTop);
+    doc.text('Student Name', colName, tableTop);
+    doc.text('Graduated From', colClass, tableTop);
+    doc.text('Session', colSess, tableTop);
+    doc.text('%', colScore, tableTop);
+    doc.text('Grd', colGrade, tableTop);
+
+    doc.moveTo(40, tableTop + 15).lineTo(555, tableTop + 15).lineWidth(1).strokeColor('#86efac').stroke();
+
+    let currentY = tableTop + 25;
+
+    students.forEach((s, i) => {
+      if (currentY > 750) {
+        doc.addPage();
+        currentY = 50;
+        doc.font('Helvetica-Bold').fontSize(9).fillColor('#1e293b');
+        doc.text('#', colIdx, currentY);
+        doc.text('Adm No.', colAdm, currentY);
+        doc.text('Student Name', colName, currentY);
+        doc.text('Graduated From', colClass, currentY);
+        doc.text('Session', colSess, currentY);
+        doc.text('%', colScore, currentY);
+        doc.text('Grd', colGrade, currentY);
+        doc.moveTo(40, currentY + 15).lineTo(555, currentY + 15).stroke();
+        currentY += 25;
+      }
+
+      doc.font('Helvetica').fontSize(9).fillColor('#334155');
+      const fullName = `${s.first_name} ${s.last_name || ''}`.trim();
+      const classText = s.class_name ? `${s.class_name}${s.section_name ? ` (${s.section_name})` : ''}` : '--';
+      const score = s.percentage ? `${s.percentage}%` : '--';
+      const grade = s.grade || '--';
+
+      doc.text(i + 1, colIdx, currentY);
+      doc.text(s.admission_no || '--', colAdm, currentY);
+      doc.text(fullName, colName, currentY, { width: 160, lineBreak: false });
+      doc.text(classText, colClass, currentY, { width: 90, lineBreak: false });
+      doc.text(s.session_name || '--', colSess, currentY);
+      doc.text(score, colScore, currentY);
+      doc.text(grade, colGrade, currentY);
+
+      doc.moveTo(40, currentY + 15).lineTo(555, currentY + 15).lineWidth(0.5).strokeColor('#f0fdf4').stroke();
+      currentY += 22;
+    });
+
+    if (!students.length) {
+      doc.moveDown(2).font('Helvetica-Oblique').text('No records found.', { align: 'center' });
+    }
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc.fontSize(8).fillColor('#94a3b8').text(
+        `Generated by EduCore • Page ${i + 1} of ${range.count}`,
+        40, doc.page.height - 25, { align: 'center', width: doc.page.width - 80 }
+      );
+    }
+
+    doc.end();
   } catch (err) { next(err); }
 };
 

@@ -367,3 +367,140 @@ exports.reorder = async (req, res, next) => {
     return res.ok(reordered, 'Subjects reordered successfully.');
   } catch (err) { next(err); }
 };
+
+exports.downloadPdf = async (req, res, next) => {
+  try {
+    const classId = Number(req.params.classId);
+    const schoolId = req.user.school_id;
+
+    const cls = await Class.findOne({
+      where: { id: classId, school_id: schoolId, is_deleted: false },
+    });
+    if (!cls) return res.fail('Class not found.', [], 404);
+
+    const subjects = await Subject.findAll({
+      where: { class_id: classId, is_deleted: false },
+      order: [['order_number', 'ASC'], ['id', 'ASC']],
+    });
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+
+    const filename = `${cls.name.replace(/[^a-z0-9-_]+/gi, '-')}-subjects.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, left: 50, right: 50, bottom: 50 },
+      bufferPages: true,
+    });
+
+    doc.pipe(res);
+
+    // Header
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(18)
+      .fillColor('#1e293b')
+      .text(school?.name || 'School', { align: 'center' });
+
+    doc
+      .fontSize(14)
+      .fillColor('#334155')
+      .text(`Subject List - Class: ${cls.name}`, { align: 'center' });
+
+    doc.moveDown(1.5);
+
+    // Table Header
+    const tableTop = doc.y;
+    const colName = 50;
+    const colCode = 200;
+    const colType = 280;
+    const colCategory = 360;
+    const colMarks = 440;
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b');
+
+    doc.text('Subject Name', colName, tableTop);
+    doc.text('Code', colCode, tableTop);
+    doc.text('Type', colType, tableTop);
+    doc.text('Category', colCategory, tableTop);
+    doc.text('Marks (Total/Pass)', colMarks, tableTop);
+
+    doc
+      .moveTo(50, tableTop + 15)
+      .lineTo(545, tableTop + 15)
+      .lineWidth(1)
+      .strokeColor('#cbd5e1')
+      .stroke();
+
+    let currentY = tableTop + 25;
+
+    subjects.forEach((sub) => {
+      if (currentY > 750) {
+        doc.addPage();
+        currentY = 50;
+        doc.font('Helvetica-Bold').fontSize(10).fillColor('#1e293b');
+        doc.text('Subject Name', colName, currentY);
+        doc.text('Code', colCode, currentY);
+        doc.text('Type', colType, currentY);
+        doc.text('Category', colCategory, currentY);
+        doc.text('Marks (Total/Pass)', colMarks, currentY);
+        doc.moveTo(50, currentY + 15).lineTo(545, currentY + 15).stroke();
+        currentY += 25;
+      }
+
+      doc.font('Helvetica').fontSize(9).fillColor('#334155');
+
+      const name = sub.name || '--';
+      const code = sub.code || '--';
+      const type = sub.subject_type ? sub.subject_type.charAt(0).toUpperCase() + sub.subject_type.slice(1) : '--';
+      const category = sub.is_core ? 'Core' : 'Optional';
+      const marks = `${sub.combined_total_marks || 0} / ${sub.combined_passing_marks || 0}`;
+
+      doc.text(name, colName, currentY, { width: 140 });
+      doc.text(code, colCode, currentY);
+      doc.text(type, colType, currentY);
+      doc.text(category, colCategory, currentY);
+      doc.text(marks, colMarks, currentY);
+
+      doc
+        .moveTo(50, currentY + 15)
+        .lineTo(545, currentY + 15)
+        .lineWidth(0.5)
+        .strokeColor('#f1f5f9')
+        .stroke();
+
+      currentY += 22;
+    });
+
+    if (!subjects.length) {
+      doc.moveDown(2).text('No subjects found for this class.', { align: 'center' });
+    }
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
+      doc.switchToPage(i);
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor('#94a3b8')
+        .text(
+          `Generated on ${new Date().toLocaleDateString()} • Page ${i + 1} of ${range.count}`,
+          50,
+          doc.page.height - 25,
+          { align: 'center', width: doc.page.width - 100, lineBreak: false }
+        );
+    }
+
+    doc.end();
+  } catch (err) { next(err); }
+};

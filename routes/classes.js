@@ -19,6 +19,7 @@ router.get   ('/teachers',   requireAdmin, ctrl.getTeachers);
 router.post  ('/',           requireAdmin, createClassRules, validate, ctrl.create);
 router.get   ('/:id',        ctrl.getById);
 router.get   ('/:id/students/pdf', ctrl.studentsPdf);
+router.get   ('/:id/students/pdf/simple', ctrl.simpleStudentsPdf);
 router.patch ('/:id',        requireAdmin, updateClassRules, validate, ctrl.update);
 router.delete('/:id',        requireAdmin, ctrl.remove);
 router.patch ('/:id/toggle', requireAdmin, ctrl.toggleActive);
@@ -30,6 +31,7 @@ router.patch ('/:id/sections/:sectionId',         requireAdmin, updateSectionRul
 router.delete('/:id/sections/:sectionId',         requireAdmin, ctrl.deleteSection);
 
 // ── Subject CRUD ──────────────────────────────────────────────────────────
+router.get   ('/:classId/subjects/pdf',           subCtrl.downloadPdf);
 router.get   ('/:classId/subjects',               subCtrl.list);
 router.post  ('/:classId/subjects',               requireAdmin, createSubjectRules, validate, subCtrl.create);
 router.patch ('/:classId/subjects/reorder',       requireAdmin, reorderSubjectsRules, validate, subCtrl.reorder);

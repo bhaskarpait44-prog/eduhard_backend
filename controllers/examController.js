@@ -1006,3 +1006,205 @@ exports.remove = async (req, res, next) => {
     invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
+
+exports.downloadTimetablePdf = async (req, res, next) => {
+  try {
+    const examId = req.params.id;
+    const schoolId = req.user.school_id;
+
+    const [[exam]] = await sequelize.query(`
+      SELECT e.id, e.name, e.start_date, e.end_date, c.name AS class_name, s.name AS session_name
+      FROM exams e
+      JOIN classes c ON c.id = e.class_id
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :examId AND s.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { examId, schoolId } });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [subjects] = await sequelize.query(`
+      SELECT s.name, s.code, es.exam_date, es.start_time, es.end_time,
+             CONCAT(t.first_name, ' ', t.last_name) AS invigilator_name
+      FROM exam_subjects es
+      JOIN subjects s ON s.id = es.subject_id
+      LEFT JOIN teachers t ON t.id = es.invigilator_teacher_id
+      WHERE es.exam_id = :examId
+      ORDER BY es.exam_date ASC, es.start_time ASC, s.name ASC;
+    `, { replacements: { examId } });
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+
+    const filename = `${exam.name.replace(/\s+/g, '_')}_Timetable.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    doc.pipe(res);
+
+    // Header
+    doc.font('Helvetica-Bold').fontSize(18).text(school?.name || 'School Name', { align: 'center' });
+    doc.fontSize(14).text('EXAMINATION TIMETABLE', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`${exam.name} - ${exam.class_name}`, { align: 'center' });
+    doc.fontSize(10).font('Helvetica').text(`Session: ${exam.session_name}`, { align: 'center' });
+    doc.moveDown(1.5);
+
+    // Table Header
+    const tableTop = doc.y;
+    const colSubject = 50;
+    const colDate = 200;
+    const colTime = 300;
+    const colInvigilator = 420;
+
+    doc.font('Helvetica-Bold').fontSize(10);
+    doc.text('Subject', colSubject, tableTop);
+    doc.text('Date', colDate, tableTop);
+    doc.text('Time', colTime, tableTop);
+    doc.text('Invigilator', colInvigilator, tableTop);
+
+    doc.moveTo(50, tableTop + 15).lineTo(550, tableTop + 15).stroke();
+
+    let y = tableTop + 25;
+    doc.font('Helvetica').fontSize(9);
+
+    subjects.forEach((s) => {
+      // Page break check
+      if (y > 750) {
+        doc.addPage();
+        y = 50;
+        doc.font('Helvetica-Bold').fontSize(10);
+        doc.text('Subject', colSubject, y);
+        doc.text('Date', colDate, y);
+        doc.text('Time', colTime, y);
+        doc.text('Invigilator', colInvigilator, y);
+        doc.moveTo(50, y + 15).lineTo(550, y + 15).stroke();
+        y += 25;
+        doc.font('Helvetica').fontSize(9);
+      }
+
+      const dateStr = s.exam_date ? new Date(s.exam_date).toLocaleDateString() : 'TBA';
+      const timeStr = s.start_time && s.end_time ? `${s.start_time.slice(0, 5)} - ${s.end_time.slice(0, 5)}` : 'TBA';
+      
+      doc.text(s.name, colSubject, y, { width: 140 });
+      doc.text(dateStr, colDate, y);
+      doc.text(timeStr, colTime, y);
+      doc.text(s.invigilator_name || 'TBA', colInvigilator, y, { width: 130 });
+
+      y += 20;
+      doc.moveTo(50, y - 5).lineTo(550, y - 5).strokeColor('#eeeeee').stroke().strokeColor('black');
+    });
+
+    doc.end();
+
+  } catch (err) { next(err); }
+};
+
+exports.downloadClassTimetablePdf = async (req, res, next) => {
+  try {
+    const { class_id, session_id } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!class_id || !session_id) {
+      return res.fail('class_id and session_id are required.', [], 422);
+    }
+
+    const [[cls]] = await sequelize.query(`
+      SELECT name FROM classes WHERE id = :classId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { classId: class_id, schoolId } });
+
+    if (!cls) return res.fail('Class not found.', [], 404);
+
+    const [subjects] = await sequelize.query(`
+      SELECT e.name AS exam_name, s.name, s.code, es.exam_date, es.start_time, es.end_time,
+             CONCAT(t.first_name, ' ', t.last_name) AS invigilator_name
+      FROM exam_subjects es
+      JOIN exams e ON e.id = es.exam_id
+      JOIN subjects s ON s.id = es.subject_id
+      LEFT JOIN teachers t ON t.id = es.invigilator_teacher_id
+      WHERE e.class_id = :classId AND e.session_id = :sessionId
+      ORDER BY es.exam_date ASC, es.start_time ASC, e.name ASC, s.name ASC;
+    `, { replacements: { classId: class_id, sessionId: session_id } });
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+
+    const filename = `${cls.name.replace(/\s+/g, '_')}_Class_Exam_Timetable.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    doc.pipe(res);
+
+    // Header
+    doc.font('Helvetica-Bold').fontSize(18).text(school?.name || 'School Name', { align: 'center' });
+    doc.fontSize(14).text('CLASS EXAMINATION TIMETABLE', { align: 'center' });
+    doc.moveDown(0.5);
+    doc.fontSize(12).text(`Class: ${cls.name}`, { align: 'center' });
+    doc.moveDown(1.5);
+
+    // Table Header
+    const tableTop = doc.y;
+    const colExam = 50;
+    const colSubject = 150;
+    const colDate = 280;
+    const colTime = 360;
+    const colInvigilator = 450;
+
+    doc.font('Helvetica-Bold').fontSize(9);
+    doc.text('Exam', colExam, tableTop);
+    doc.text('Subject', colSubject, tableTop);
+    doc.text('Date', colDate, tableTop);
+    doc.text('Time', colTime, tableTop);
+    doc.text('Invigilator', colInvigilator, tableTop);
+
+    doc.moveTo(50, tableTop + 15).lineTo(550, tableTop + 15).stroke();
+
+    let y = tableTop + 25;
+    doc.font('Helvetica').fontSize(8);
+
+    subjects.forEach((s) => {
+      if (y > 750) {
+        doc.addPage();
+        y = 50;
+        doc.font('Helvetica-Bold').fontSize(9);
+        doc.text('Exam', colExam, y);
+        doc.text('Subject', colSubject, y);
+        doc.text('Date', colDate, y);
+        doc.text('Time', colTime, y);
+        doc.text('Invigilator', colInvigilator, y);
+        doc.moveTo(50, y + 15).lineTo(550, y + 15).stroke();
+        y += 25;
+        doc.font('Helvetica').fontSize(8);
+      }
+
+      const dateStr = s.exam_date ? new Date(s.exam_date).toLocaleDateString() : 'TBA';
+      const timeStr = s.start_time && s.end_time ? `${s.start_time.slice(0, 5)} - ${s.end_time.slice(0, 5)}` : 'TBA';
+      
+      doc.text(s.exam_name, colExam, y, { width: 90 });
+      doc.text(s.name, colSubject, y, { width: 120 });
+      doc.text(dateStr, colDate, y);
+      doc.text(timeStr, colTime, y);
+      doc.text(s.invigilator_name || 'TBA', colInvigilator, y, { width: 100 });
+
+      y += 20;
+      doc.moveTo(50, y - 5).lineTo(550, y - 5).strokeColor('#eeeeee').stroke().strokeColor('black');
+    });
+
+    if (subjects.length === 0) {
+      doc.text('No examination schedules found for this class.', 50, y);
+    }
+
+    doc.end();
+
+  } catch (err) { next(err); }
+};
