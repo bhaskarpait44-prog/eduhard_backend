@@ -3120,9 +3120,11 @@ exports.createNotice = async (req, res, next) => {
   try {
     const {
       title,
-      content,
+      content: rawContent,
+      body: bodyAlias,
       category = 'general',
-      target_scope,
+      target_scope: rawTargetScope,
+      audience: audienceAlias,
       class_id = null,
       section_id = null,
       subject_id = null,
@@ -3131,7 +3133,16 @@ exports.createNotice = async (req, res, next) => {
       publish_date = new Date(),
       expiry_date = null,
     } = req.body;
-    validateNoticePayload({ ...req.body, category, publish_date, expiry_date });
+    const content = rawContent || bodyAlias;
+    let target_scope = rawTargetScope || audienceAlias;
+
+    // Map mobile audiences to backend scopes
+    if (target_scope === 'class') target_scope = 'whole_class';
+    if (target_scope === 'section') target_scope = 'specific_section';
+    if (target_scope === 'subject_wise') target_scope = 'specific_subject';
+    if (target_scope === 'students' || target_scope === 'student') target_scope = 'specific_student';
+
+    validateNoticePayload({ ...req.body, content, target_scope, category, publish_date, expiry_date });
 
     const { scope } = await getTeacherContext(req);
     if (target_scope === 'my_class_only' || target_scope === 'whole_class') {
