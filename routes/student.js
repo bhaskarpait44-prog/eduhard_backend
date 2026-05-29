@@ -35,6 +35,42 @@ router.get('/fees/payments', ctrl.feePayments);
 router.get('/fees/receipts/:paymentId', [param('paymentId').isInt()], validate, ctrl.feeReceipt);
 router.get('/fees/:invoiceId', [param('invoiceId').isInt()], validate, ctrl.feeInvoiceDetail);
 
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
+const submissionsDir = 'uploads/submissions';
+if (!fs.existsSync(submissionsDir)) fs.mkdirSync(submissionsDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, submissionsDir),
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, 'submission-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    const allowedMimeTypes = [
+      'application/pdf', 'application/x-pdf',
+      'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-powerpoint', 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/vnd.ms-excel', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'image/jpeg', 'image/png', 'image/webp', 'text/plain', 'application/octet-stream'
+    ];
+    const allowedExtensions = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.jpg', '.jpeg', '.png', '.webp', '.txt'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowedMimeTypes.includes(file.mimetype) || allowedExtensions.includes(ext)) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type not allowed (${file.mimetype})!`), false);
+    }
+  }
+});
+
 router.get('/timetable', ctrl.timetable);
 router.get('/timetable/today', ctrl.timetableToday);
 router.get('/timetable/current-period', ctrl.timetableCurrentPeriod);
@@ -43,10 +79,9 @@ router.get('/timetable/exam-schedule', ctrl.timetableExamSchedule);
 router.get('/homework', ctrl.homeworkList);
 router.get('/homework/submissions', ctrl.homeworkSubmissions);
 router.get('/homework/:id', [param('id').isInt()], validate, ctrl.homeworkDetail);
-router.post('/homework/:id/submit', [
+router.post('/homework/:id/submit', upload.single('attachment'), [
   param('id').isInt(),
   body('submission_content').optional().isString(),
-  body('attachment_path').optional().isString(),
 ], validate, ctrl.homeworkSubmit);
 
 router.get('/chat/contacts', chatCtrl.studentContacts);

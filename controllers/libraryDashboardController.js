@@ -35,19 +35,37 @@ exports.getDashboardStats = async (req, res, next) => {
     `, { replacements: { schoolId } });
 
     const [topBooks] = await sequelize.query(`
-      SELECT lb.title, lb.author, COUNT(li.id)::int AS borrow_count
+      SELECT lb.title, lb.author, lb.cover_image_url, COUNT(li.id)::int AS borrow_count
       FROM library_issues li
       JOIN library_books lb ON lb.id = li.book_id
       WHERE li.school_id = :schoolId
-      GROUP BY lb.id, lb.title, lb.author
+      GROUP BY lb.id, lb.title, lb.author, lb.cover_image_url
       ORDER BY borrow_count DESC
       LIMIT 5
+    `, { replacements: { schoolId } });
+
+    const [categoryStats] = await sequelize.query(`
+      SELECT category, COUNT(*)::int AS count
+      FROM library_books
+      WHERE school_id = :schoolId AND is_deleted = false
+      GROUP BY category
+      ORDER BY count DESC
+    `, { replacements: { schoolId } });
+
+    const [monthlyTrends] = await sequelize.query(`
+      SELECT TO_CHAR(issue_date, 'Mon') AS month, COUNT(*)::int AS count
+      FROM library_issues
+      WHERE school_id = :schoolId AND issue_date >= NOW() - INTERVAL '6 months'
+      GROUP BY TO_CHAR(issue_date, 'Mon'), DATE_TRUNC('month', issue_date)
+      ORDER BY DATE_TRUNC('month', issue_date) ASC
     `, { replacements: { schoolId } });
 
     res.ok({
       stats,
       recentIssues,
-      topBooks
+      topBooks,
+      categoryStats,
+      monthlyTrends
     });
   } catch (err) { next(err); }
 };

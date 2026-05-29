@@ -1697,7 +1697,7 @@ exports.homeworkSubmit = async (req, res, next) => {
     }
 
     const submission_content = req.body.submission_content || null;
-    const attachment_path = req.body.attachment_path || null;
+    const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
     if (!submission_content && !attachment_path) {
       return res.fail('Provide submission content or an attachment to submit homework.', [], 422);
     }

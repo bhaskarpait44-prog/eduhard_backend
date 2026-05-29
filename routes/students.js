@@ -34,21 +34,21 @@ router.post('/',                  requireAdmin, [
   body('profile.email').isEmail().withMessage('A valid student email is required'),
 ], validate, ctrl.admit);
 
-router.get('/',                   requireRole('admin', 'teacher', 'receptionist'), cache(300), ctrl.list);
+router.get('/',                   requireRole('admin', 'teacher', 'receptionist', 'librarian', 'accountant'), cache(300), ctrl.list);
 
-router.get('/:id',                requireAdminOrTeacher, cache(600), [
+router.get('/:id',                requireRole('admin', 'teacher', 'receptionist', 'librarian'), cache(600), [
   param('id').isInt(),
 ], validate, ctrl.getById);
 
-router.get('/:id/id-card/data',   requireAdminOrTeacher, [
+router.get('/:id/id-card/data',   requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getIdCardData);
 
-router.get('/:id/tc/data',        requireAdminOrTeacher, [
+router.get('/:id/tc/data',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getTcData);
 
-router.get('/bulk/id-cards/data', requireAdminOrTeacher, ctrl.getBulkIdCardsData);
+router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
 
 router.patch('/:id/identity',     requireAdmin, [
   param('id').isInt(),
@@ -80,12 +80,12 @@ router.delete('/:id',             requireAdmin, [
   body('reason').optional({ nullable: true }).trim(),
 ], validate, ctrl.remove);
 
-router.get('/:id/history',        requireAdminOrTeacher, [
+router.get('/:id/history',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getHistory);
 
 // ── Documents ─────────────────────────────────────────────────────────────
-router.get('/:id/documents',      requireAdminOrTeacher, [
+router.get('/:id/documents',      requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getDocuments);
 

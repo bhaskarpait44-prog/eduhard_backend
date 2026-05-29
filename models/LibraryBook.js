@@ -20,6 +20,8 @@ LibraryBook.init({
   shelf_location: { type: DataTypes.STRING(100), allowNull: true },
   publication_year: { type: DataTypes.INTEGER, allowNull: true },
   description: { type: DataTypes.TEXT, allowNull: true },
+  digital_url: { type: DataTypes.STRING(500), allowNull: true },
+  cover_image_url: { type: DataTypes.STRING(500), allowNull: true },
   is_deleted: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false }
 }, {
   sequelize,

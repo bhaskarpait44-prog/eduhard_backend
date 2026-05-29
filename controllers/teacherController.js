@@ -1,6 +1,8 @@
 'use strict';
 
 const bcrypt = require('bcryptjs');
+const path = require('path');
+const fs = require('fs');
 const sequelize = require('../config/database');
 const redis = require('../config/redis');
 
@@ -3710,7 +3712,7 @@ exports.createStudyMaterial = async (req, res, next) => {
     requireFields(req.body, ['class_id', 'subject_id', 'title']);
 
     if (!req.file) {
-      return res.fail('Study material file (PDF) is required.', [], 422);
+      return res.fail('Study material file is required.', [], 422);
     }
 
     const { session, scope } = await getTeacherContext(req);
@@ -3744,7 +3746,6 @@ exports.createStudyMaterial = async (req, res, next) => {
       },
     });
 
-    const { audit } = require('./teacherController'); // Self-reference might be tricky, but audit is in scope
     await audit('study_materials', material.id, {
       field: 'created',
       oldValue: null,

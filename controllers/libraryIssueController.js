@@ -144,7 +144,7 @@ exports.returnBook = async (req, res, next) => {
       replacements: { 
         id, finalReturnDate, fineAmount, 
         fineStatus: fineAmount > 0 ? (fine_status || 'pending') : 'none',
-        fineRemarks 
+        fineRemarks: fine_remarks || null
       },
       transaction: t
     });

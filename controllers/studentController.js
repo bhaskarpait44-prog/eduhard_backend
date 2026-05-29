@@ -404,8 +404,9 @@ exports.getTcData = async (req, res, next) => {
     const [[data]] = await sequelize.query(`
       SELECT
         s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.status AS student_status,
+        s.left_date, s.leaving_reason, s.leaving_remarks,
         sp.father_name, sp.mother_name,
-        e.roll_number, e.joined_date, e.left_date, e.joining_type, e.leaving_type, e.status AS enrollment_status,
+        e.roll_number, e.joined_date, e.left_date AS enrollment_left_date, e.joining_type, e.leaving_type, e.status AS enrollment_status,
         c.name AS class_name,
         sec.name AS section_name,
         sess.name AS session_name,
@@ -428,7 +429,34 @@ exports.getTcData = async (req, res, next) => {
       return res.fail('Transfer Certificate is only available for students who have left or graduated.', [], 400);
     }
 
-    res.ok(data);
+    // Format for PDF compatibility
+    const formattedData = {
+      certificate_no: `TC-${data.admission_no}`,
+      issued_date: new Date().toISOString(),
+      status: 'active',
+      school: {
+        name: data.school_name,
+        logo_url: data.logo_url,
+        address: data.school_address,
+        phone: data.school_phone,
+        email: data.school_email,
+        principal_name: data.principal_name
+      },
+      recipient: {
+        name: `${data.first_name} ${data.last_name}`,
+        father_name: data.father_name || 'N/A',
+        admission_no: data.admission_no,
+        class_name: data.class_name
+      },
+      extra_data: {
+        leaving_date: data.left_date || data.enrollment_left_date || new Date().toISOString(),
+        reason: data.leaving_reason || data.leaving_type || 'Completion of Studies',
+        last_class: data.class_name,
+        conduct: 'Good'
+      }
+    };
+
+    res.ok(formattedData);
   } catch (err) { next(err); }
 };
 
@@ -806,17 +834,46 @@ exports.getById = async (req, res, next) => {
 
     const [[student]] = await sequelize.query(`
       SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender,
-             s.status, s.created_at,
+             s.status, s.created_at, s.family_id, s.transport_stop_id,
              sp.address, sp.city, sp.state, sp.pincode, sp.phone, sp.email,
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
              sp.parent_email,
-             sp.blood_group, sp.medical_notes, sp.photo_path
+             sp.blood_group, sp.medical_notes, sp.photo_path,
+             ts.name AS transport_stop, tr.name AS transport_route
       FROM students s
       LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      LEFT JOIN transport_stops ts ON ts.id = s.transport_stop_id
+      LEFT JOIN transport_routes tr ON tr.id = ts.route_id
       WHERE s.id = :id AND s.school_id = :schoolId AND s.is_deleted = false;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!student) return res.fail('Student not found.', [], 404);
+
+    // Fetch siblings if family_id exists
+    let siblings = [];
+    if (student.family_id) {
+      [siblings] = await sequelize.query(`
+        SELECT s.id, s.admission_no, s.first_name, s.last_name, 
+               c.name AS class_name, sec.name AS section_name
+        FROM students s
+        LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+        LEFT JOIN classes c ON c.id = e.class_id
+        LEFT JOIN sections sec ON sec.id = e.section_id
+        WHERE s.family_id = :familyId 
+          AND s.id <> :studentId
+          AND s.is_deleted = false
+        ORDER BY s.first_name ASC;
+      `, { replacements: { familyId: student.family_id, studentId: id } });
+    }
+
+    // Fetch active library issues
+    const [libraryIssues] = await sequelize.query(`
+      SELECT li.id, li.book_id, lb.title, lb.isbn, li.issue_date, li.due_date, li.return_date, li.status
+      FROM library_issues li
+      JOIN library_books lb ON lb.id = li.book_id
+      WHERE li.borrower_id = :id AND li.borrower_type = 'student' AND li.status = 'issued'
+      ORDER BY li.issue_date DESC;
+    `, { replacements: { id } });
 
     // Current enrollment
     const [[enrollment]] = await sequelize.query(`
@@ -849,7 +906,13 @@ exports.getById = async (req, res, next) => {
       is_online = val === '1';
     }
 
-    res.ok({ ...student, is_online, current_enrollment: enrollment || null }, 'Student retrieved.');
+    res.ok({ 
+      ...student, 
+      is_online, 
+      current_enrollment: enrollment || null,
+      siblings,
+      library_issues: libraryIssues
+    }, 'Student retrieved.');
   } catch (err) { next(err); }
 };
 

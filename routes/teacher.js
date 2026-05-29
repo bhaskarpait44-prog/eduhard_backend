@@ -31,8 +31,35 @@ const upload = multer({
   storage,
   limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/pdf') cb(null, true);
-    else cb(new Error('Only PDF files are allowed!'), false);
+    const allowedMimeTypes = [
+      'application/pdf',
+      'application/x-pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'image/jpeg',
+      'image/png',
+      'image/webp',
+      'text/plain',
+      'application/octet-stream' // Fallback for some clients
+    ];
+    
+    const allowedExtensions = [
+      '.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.jpg', '.jpeg', '.png', '.webp', '.txt'
+    ];
+    
+    const ext = path.extname(file.originalname).toLowerCase();
+    const isAllowedMime = allowedMimeTypes.includes(file.mimetype);
+    const isAllowedExt = allowedExtensions.includes(ext);
+
+    if (isAllowedMime || isAllowedExt) {
+      cb(null, true);
+    } else {
+      cb(new Error(`File type not allowed (${file.mimetype})! Supported: PDF, Images, Word, PPT, Excel, Text`), false);
+    }
   }
 });
 
