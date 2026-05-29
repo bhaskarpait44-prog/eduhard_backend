@@ -20,7 +20,7 @@ async function getTargetStudentIds(schoolId, audience, { target_class_id, target
   } else if (audience === 'section') {
     query = `SELECT student_id AS id FROM enrollments WHERE section_id = :sectionId AND status = 'active'`;
     replacements.sectionId = target_section_id;
-  } else if (audience === 'student') {
+  } else if (audience === 'student' || audience === 'students') {
     return [target_student_id];
   } else {
     return [];
@@ -136,7 +136,7 @@ exports.createNotice = async (req, res, next) => {
     if (audience === 'whole_class') audience = 'class';
     if (audience === 'specific_section') audience = 'section';
     if (audience === 'specific_subject') audience = 'subject_wise';
-    if (audience === 'specific_student') audience = 'student';
+    if (audience === 'specific_student' || audience === 'students') audience = 'student';
     if (audience === 'all_students' || audience === 'whole_school' || audience === 'all_classes' || audience === 'everyone') audience = 'school_wide';
     if (audience === 'all_parents') audience = 'parents';
     if (audience === 'all_accountants') audience = 'accountants';

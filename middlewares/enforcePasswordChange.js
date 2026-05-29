@@ -9,7 +9,7 @@ const enforcePasswordChange = (req, res, next) => {
   // or if the user doesn't have the flag
   if (req.user && req.user.role !== 'student' && req.user.force_password_change) {
     // Allow the password change request itself
-    const isChangePasswordRoute = req.path === '/auth/change-password' || 
+    const isChangePasswordRoute = req.originalUrl.includes('/auth/change-password') || 
                                  (req.method === 'PATCH' && req.path.includes('/profile')); // Adjust based on where they change password
     
     if (!isChangePasswordRoute) {

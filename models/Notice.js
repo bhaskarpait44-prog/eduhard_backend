@@ -11,7 +11,7 @@ const Notice = sequelize.define('Notice', {
   posted_by_role: { type: DataTypes.ENUM('admin', 'teacher', 'accountant', 'receptionist', 'librarian'), allowNull: false },
   audience: { 
     type: DataTypes.ENUM(
-      'school_wide', 'class', 'section', 'student', 
+      'school_wide', 'class', 'section', 'student', 'students',
       'teachers', 'parents', 'accountants', 'librarians', 'receptionists', 
       'specific_teacher', 'subject_wise'
     ), 

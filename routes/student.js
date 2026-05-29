@@ -1,10 +1,13 @@
 'use strict';
 
 const router = require('express').Router();
+const { requireRole } = require('../middlewares/auth');
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
 const ctrl = require('../controllers/studentPortalController');
 const chatCtrl = require('../controllers/chatController');
+
+router.use(requireRole('student'));
 
 router.get('/dashboard', ctrl.dashboard);
 router.get('/dashboard/today-schedule', ctrl.dashboardTodaySchedule);

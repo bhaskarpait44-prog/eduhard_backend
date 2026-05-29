@@ -85,7 +85,7 @@ router.post('/teacher', requireRole('teacher'), upload.single('attachment'), [
     }
     return true;
   }),
-  body('audience').isIn(['class', 'section', 'student', 'subject_wise']).withMessage('Invalid teacher audience'),
+  body('audience').isIn(['class', 'section', 'students', 'subject_wise']).withMessage('Invalid teacher audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
 
@@ -118,7 +118,7 @@ router.post('/accountant', requireRole('admin', 'accountant'), upload.single('at
     }
     return true;
   }),
-  body('audience').isIn(['school_wide', 'class', 'student', 'parents']).withMessage('Invalid accountant audience'),
+  body('audience').isIn(['school_wide', 'class', 'students', 'parents']).withMessage('Invalid accountant audience'),
   body('priority').optional().isIn(['normal', 'urgent', 'info']),
 ], validate, ctrl.createNotice);
 

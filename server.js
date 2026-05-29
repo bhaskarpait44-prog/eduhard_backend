@@ -62,11 +62,28 @@ async function boot() {
     await applyFix('ALTER TABLE notices ADD COLUMN IF NOT EXISTS attachment_path VARCHAR(500)', "Column: attachment_path");
     
     // Fix notice_reads for teachers
+    await applyFix(`
+      CREATE TABLE IF NOT EXISTS notice_reads (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+        student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `, "Table: notice_reads (ensure exists)");
     await applyFix('ALTER TABLE notice_reads ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES teachers(id) ON DELETE CASCADE', "Column: notice_reads.teacher_id");
     await applyFix('CREATE UNIQUE INDEX IF NOT EXISTS notice_reads_notice_teacher_unique ON notice_reads (notice_id, teacher_id)', "Index: notice_reads_notice_teacher_unique");
     
     // Fix teacher_notice_reads to allow teacher_id or user_id
     // We'll just add a teacher_id column to it as well if it doesn't exist
+    await applyFix(`
+      CREATE TABLE IF NOT EXISTS teacher_notice_reads (
+        id SERIAL PRIMARY KEY,
+        notice_id INTEGER NOT NULL REFERENCES teacher_notices(id) ON DELETE CASCADE,
+        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        read_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `, "Table: teacher_notice_reads (ensure exists)");
     await applyFix('ALTER TABLE teacher_notice_reads ADD COLUMN IF NOT EXISTS teacher_id INTEGER REFERENCES teachers(id) ON DELETE CASCADE', "Column: teacher_notice_reads.teacher_id");
     await applyFix('CREATE UNIQUE INDEX IF NOT EXISTS teacher_notice_reads_notice_teacher_unique ON teacher_notice_reads (notice_id, teacher_id)', "Index: teacher_notice_reads_notice_teacher_unique");
     

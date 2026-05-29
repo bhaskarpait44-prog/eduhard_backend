@@ -230,21 +230,21 @@ router.post('/student/login',
         WHERE id = :id;
       `, { replacements: { id: student.id } });
 
-      const token = jwt.sign(
-        { 
-          userId: student.id, 
-          studentId: student.id,
-          schoolId: student.school_id, 
-          role: 'student',
-          name: student.name,
-          email: student.email 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      const payload = { 
+        userId: student.id, 
+        studentId: student.id,
+        schoolId: student.school_id, 
+        role: 'student',
+        name: student.name,
+        email: student.email 
+      };
+
+      const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+      const refresh_token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
       res.ok({
         token,
+        refresh_token,
         user: {
           id: student.id,
           name: student.name,
@@ -351,20 +351,20 @@ router.post('/login',
         `, { replacements: { id: user.id } });
       }
 
-      const token = jwt.sign(
-        { 
-          userId: user.id, 
-          schoolId: user.school_id, 
-          role: normalizedRole,
-          name: user.name,
-          email: user.email 
-        },
-        JWT_SECRET,
-        { expiresIn: '24h' }
-      );
+      const payload = { 
+        userId: user.id, 
+        schoolId: user.school_id, 
+        role: normalizedRole,
+        name: user.name,
+        email: user.email 
+      };
+
+      const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+      const refresh_token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
       res.ok({
         token,
+        refresh_token,
         user: {
           id: user.id,
           name: user.name,
@@ -500,8 +500,9 @@ router.post('/refresh', async (req, res) => {
     };
 
     const token = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+    const newRefreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 
-    return res.ok({ token, refresh_token }, 'Token refreshed successfully.');
+    return res.ok({ token, refresh_token: newRefreshToken }, 'Token refreshed successfully.');
   } catch (err) {
     return res.fail('Invalid refresh token.', [], 401);
   }
