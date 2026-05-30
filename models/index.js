@@ -90,6 +90,13 @@ AcademicEvent.belongsTo(User, { foreignKey: 'updated_by', as: 'updater' });
 Class.hasMany(Section, { foreignKey: 'class_id', as: 'sections' });
 Section.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
 
+Section.belongsTo(Teacher, { foreignKey: 'class_teacher_id', as: 'classTeacher' });
+Teacher.hasMany(Section, { foreignKey: 'class_teacher_id', as: 'assignedSections' });
+
+// Subject
+Subject.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
+Class.hasMany(Subject, { foreignKey: 'class_id', as: 'subjects' });
+
 // Student & Enrollment
 Student.hasMany(Enrollment, { foreignKey: 'student_id', as: 'enrollments' });
 Enrollment.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
