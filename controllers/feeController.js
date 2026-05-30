@@ -95,9 +95,10 @@ async function syncStructureInvoicesForClass({ structure, transaction }) {
 }
 
 async function resolveSessionId(requestedSessionId, schoolId) {
+  let session = null;
   if (requestedSessionId) {
     const [[selectedSession]] = await sequelize.query(`
-      SELECT id
+      SELECT id, is_locked
       FROM sessions
       WHERE id = :sessionId AND school_id = :schoolId
       LIMIT 1;
@@ -107,18 +108,24 @@ async function resolveSessionId(requestedSessionId, schoolId) {
         schoolId,
       },
     });
-
-    if (selectedSession) return selectedSession.id;
+    session = selectedSession;
   }
 
-  const [[currentSession]] = await sequelize.query(`
-    SELECT id
-    FROM sessions
-    WHERE school_id = :schoolId AND is_current = true
-    LIMIT 1;
-  `, { replacements: { schoolId } });
+  if (!session) {
+    const [[currentSession]] = await sequelize.query(`
+      SELECT id, is_locked
+      FROM sessions
+      WHERE school_id = :schoolId AND is_current = true
+      LIMIT 1;
+    `, { replacements: { schoolId } });
+    session = currentSession;
+  }
 
-  return currentSession?.id || null;
+  if (session && session.is_locked) {
+    throw new Error('Session is locked. Cannot modify fee records.');
+  }
+
+  return session?.id || null;
 }
 
 

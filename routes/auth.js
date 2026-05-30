@@ -482,10 +482,21 @@ router.post('/refresh', async (req, res) => {
     // Bug 7: Hash the token before checking blacklist
     const tokenHash = crypto.createHash('sha256').update(refresh_token).digest('hex');
 
-    if (redis.status === 'ready') {
-      const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
-      if (isBlacklisted) {
-        return res.fail('Token has been revoked. Please log in again.', [], 401);
+    const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+    if (REDIS_ENABLED) {
+      if (redis.status === 'ready') {
+        const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
+        if (isBlacklisted) {
+          return res.fail('Token has been revoked. Please log in again.', [], 401);
+        }
+      } else {
+        console.error(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check failed on refresh!`);
+        return res.status(503).json({
+          success: false,
+          data: null,
+          message: 'Security verification service temporarily unavailable.',
+          errors: ['Redis unavailable'],
+        });
       }
     }
 

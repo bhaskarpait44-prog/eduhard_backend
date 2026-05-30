@@ -6,6 +6,22 @@ const examEngine = require('../utils/examEngine');
 const computeSubjectMarks = require('../utils/computeSubjectMarks');
 const { invalidateCache } = require('../middlewares/cache');
 
+async function assertSessionNotLocked(sessionId, schoolId, res) {
+  const [[session]] = await sequelize.query(`
+    SELECT is_locked, status FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+  `, { replacements: { sessionId, schoolId } });
+
+  if (!session) {
+    res.fail('Session not found.', [], 404);
+    return false;
+  }
+  if (session.is_locked || session.status === 'locked') {
+    res.fail('Session is locked. Cannot modify exam records.', [], 403);
+    return false;
+  }
+  return true;
+}
+
 const toNumberOrNull = (value) => {
   if (value === '' || value === null || value === undefined) return null;
   const parsed = Number(value);
@@ -333,10 +349,11 @@ exports.create = async (req, res, next) => {
     } = req.body;
 
     const [[session]] = await sequelize.query(`
-      SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+      SELECT id, is_locked FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
     `, { replacements: { schoolId: req.user.school_id } });
 
     if (!session) return res.fail('No active session. Activate a session first.');
+    if (session.is_locked) return res.fail('Current session is locked. Cannot create exams.', [], 403);
 
     if (new Date(end_date) < new Date(start_date)) {
       return res.fail('end_date must be on or after start_date.');
@@ -484,6 +501,7 @@ exports.update = async (req, res, next) => {
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+    if (!await assertSessionNotLocked(exam.session_id, req.user.school_id, res)) return;
     if (!['draft', 'published'].includes(status)) {
       return res.fail('status must be draft or published.', [], 422);
     }
@@ -538,7 +556,7 @@ exports.updateTimetable = async (req, res, next) => {
     }
 
     const [[exam]] = await sequelize.query(`
-      SELECT e.id, e.start_date, e.end_date
+      SELECT e.id, e.start_date, e.end_date, e.session_id
       FROM exams e
       JOIN sessions s ON s.id = e.session_id
       WHERE e.id = :examId
@@ -552,6 +570,7 @@ exports.updateTimetable = async (req, res, next) => {
     });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+    if (!await assertSessionNotLocked(exam.session_id, req.user.school_id, res)) return;
 
     const subjectIds = subjects.map((item) => Number(item.subject_id)).filter(Boolean);
     const uniqueSubjectIds = [...new Set(subjectIds)];
@@ -670,7 +689,7 @@ exports.reviewSubject = async (req, res, next) => {
 
     const [[row]] = await sequelize.query(`
       SELECT es.id, es.review_status, es.exam_id, es.subject_id, es.submitted_by, 
-             ex.name AS exam_name, sub.name AS subject_name
+             ex.name AS exam_name, sub.name AS subject_name, e.session_id
       FROM exam_subjects es
       JOIN exams e ON e.id = es.exam_id
       JOIN sessions s ON s.id = e.session_id
@@ -691,6 +710,7 @@ exports.reviewSubject = async (req, res, next) => {
     if (!row) {
       return res.fail('Exam subject not found.', [], 404);
     }
+    if (!await assertSessionNotLocked(row.session_id, req.user.school_id, res)) return;
 
     await sequelize.query(`
       UPDATE exam_subjects

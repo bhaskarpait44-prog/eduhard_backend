@@ -26,26 +26,43 @@ async function getCurrentSessionForSchool(schoolId) {
 }
 
 async function resolveSessionId({ requestedSessionId, schoolId }) {
+  let sessionId = null;
   if (requestedSessionId != null) {
     const [[session]] = await sequelize.query(`
-      SELECT id
+      SELECT id, is_locked
       FROM sessions
       WHERE id = :sessionId
         AND school_id = :schoolId
       LIMIT 1;
     `, { replacements: { sessionId: requestedSessionId, schoolId } });
-
-    return session?.id || null;
+    if (session) {
+      if (session.is_locked) throw new Error('Session is locked. Cannot mark attendance.');
+      sessionId = session.id;
+    }
+  } else {
+    const session = await getCurrentSessionForSchool(schoolId);
+    if (session) {
+      if (session.is_locked) throw new Error('Current session is locked. Cannot mark attendance.');
+      sessionId = session.id;
+    }
   }
 
-  const session = await getCurrentSessionForSchool(schoolId);
-  return session?.id || null;
+  return sessionId;
 }
 
 // ── POST /api/attendance/mark ─────────────────────────────────────────────────
 exports.markSingle = async (req, res, next) => {
   try {
-    const { enrollment_id, date, status, method } = req.body;
+    const { enrollment_id, date, status, method, session_id } = req.body;
+
+    const sessionId = await resolveSessionId({
+      requestedSessionId: session_id,
+      schoolId: req.user.school_id,
+    });
+
+    if (sessionId == null) {
+      return res.fail('No active session found. Cannot mark attendance.', [], 422);
+    }
 
     const [[existing]] = await sequelize.query(`
       SELECT id FROM attendance WHERE enrollment_id = :enrollment_id AND date = :date;
@@ -70,7 +87,16 @@ exports.markSingle = async (req, res, next) => {
 // ── POST /api/attendance/bulk ─────────────────────────────────────────────────
 exports.markBulk = async (req, res, next) => {
   try {
-    const { date, records } = req.body;
+    const { date, records, session_id } = req.body;
+
+    const sessionId = await resolveSessionId({
+      requestedSessionId: session_id,
+      schoolId: req.user.school_id,
+    });
+
+    if (sessionId == null) {
+      return res.fail('No active session found. Cannot mark attendance.', [], 422);
+    }
 
     const inserted = [];
     const updated  = [];

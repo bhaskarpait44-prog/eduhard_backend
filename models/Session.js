@@ -15,6 +15,7 @@ const Session = sequelize.define('Session', {
     defaultValue : 'upcoming',
   },
   is_current : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  is_locked  : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   created_by : { type: DataTypes.INTEGER, allowNull: true },
 }, {
   tableName  : 'sessions',

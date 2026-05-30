@@ -648,9 +648,13 @@ exports.confirmAdmission = async (req, res, next) => {
 
       // Find current active session
       const [[session]] = await sequelize.query(
-        `SELECT id FROM sessions WHERE school_id = :schoolId AND is_active = true LIMIT 1`,
+        `SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1`,
         { replacements: { schoolId } }
       );
+
+      if (!session) {
+        errorDetails.push({ row: 'GLOBAL', error: 'No active session found. Students admitted but NOT enrolled.' });
+      }
 
       // Cache classes and sections
       const [classes] = await sequelize.query(

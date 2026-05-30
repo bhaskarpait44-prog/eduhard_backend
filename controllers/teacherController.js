@@ -1160,6 +1160,9 @@ exports.attendanceStudents = async (req, res, next) => {
     requireFields(req.query, ['class_id', 'section_id']);
 
     const { session, scope } = await getTeacherContext(req);
+    if (!session) {
+      return res.fail('No active session found. Cannot proceed with attendance.', [], 422);
+    }
     await assertAttendanceAccess(req.user.id, Number(class_id), Number(section_id), date, scope);
     const access = getAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
 
@@ -1226,6 +1229,9 @@ exports.markAttendance = async (req, res, next) => {
     requireFields(req.body, ['class_id', 'section_id']);
 
     const { session, scope } = await getTeacherContext(req);
+    if (!session) {
+      return res.fail('No active session found. Cannot proceed with attendance.', [], 422);
+    }
     await assertAttendanceAccess(req.user.id, Number(class_id), Number(section_id), date, scope);
     const access = getAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
     const isPast = date < TODAY();

@@ -5,7 +5,7 @@ const { invalidateCache } = require('../middlewares/cache');
 
 async function getSessionMeta(sessionId, schoolId) {
   const [[session]] = await sequelize.query(`
-    SELECT id, name, start_date, end_date
+    SELECT id, name, start_date, end_date, status, is_locked
     FROM sessions
     WHERE id = :sessionId
       AND school_id = :schoolId
@@ -17,7 +17,7 @@ async function getSessionMeta(sessionId, schoolId) {
 
 async function getClassMeta(classId, schoolId) {
   const [[klass]] = await sequelize.query(`
-    SELECT id, name, order_number
+    SELECT id, name, order_number, stream
     FROM classes
     WHERE id = :classId
       AND school_id = :schoolId
@@ -28,12 +28,13 @@ async function getClassMeta(classId, schoolId) {
   return klass || null;
 }
 
-async function getNextClass(classOrder, schoolId) {
+async function getNextClass(classOrder, schoolId, currentStream) {
   const [[klass]] = await sequelize.query(`
-    SELECT id, name, order_number
+    SELECT id, name, order_number, stream
     FROM classes
     WHERE school_id = :schoolId
       AND order_number > :orderNumber
+      AND (stream = :currentStream OR stream = 'regular' OR stream IS NULL)
       AND COALESCE(is_deleted, false) = false
     ORDER BY order_number ASC
     LIMIT 1;
@@ -41,6 +42,7 @@ async function getNextClass(classOrder, schoolId) {
     replacements: {
       schoolId,
       orderNumber: Number(classOrder),
+      currentStream: currentStream || 'regular',
     },
   });
 
@@ -103,6 +105,13 @@ exports.enroll = async (req, res, next) => {
   try {
     const { student_id, session_id, class_id, section_id, stream, joining_type, joined_date, roll_number } = req.body;
     const normalizedStream = stream ? String(stream).trim().toLowerCase() : 'regular';
+
+    // Verify session status
+    const sessionMeta = await getSessionMeta(session_id, req.user.school_id);
+    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (['closed', 'archived'].includes(sessionMeta.status)) {
+      return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
+    }
 
     // Check section capacity
     const [[capacityCheck]] = await sequelize.query(`
@@ -297,7 +306,7 @@ exports.promotionCandidates = async (req, res, next) => {
       return res.fail('Class not found.', [], 404);
     }
 
-    const nextClass = await getNextClass(currentClass.order_number, schoolId);
+    const nextClass = await getNextClass(currentClass.order_number, schoolId, currentClass.stream);
 
     const [rows] = await sequelize.query(`
       SELECT

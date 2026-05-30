@@ -87,15 +87,27 @@ const authenticate = async (req, res, next) => {
     // This saves memory and keeps key size consistent
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    // Check if token is blacklisted in Redis (only if Redis is connected)
-    if (redis.status === 'ready') {
-      const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
-      if (isBlacklisted) {
-        return res.status(401).json({
+    // Check if token is blacklisted in Redis
+    const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+    if (REDIS_ENABLED) {
+      if (redis.status === 'ready') {
+        const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
+        if (isBlacklisted) {
+          return res.status(401).json({
+            success: false,
+            data: null,
+            message: 'Token has been invalidated. Please log in again.',
+            errors: ['Token blacklisted'],
+          });
+        }
+      } else {
+        // Fail closed for security if Redis is enabled but down
+        console.error(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check failed!`);
+        return res.status(503).json({
           success: false,
           data: null,
-          message: 'Token has been invalidated. Please log in again.',
-          errors: ['Token blacklisted'],
+          message: 'Security verification service temporarily unavailable.',
+          errors: ['Redis unavailable'],
         });
       }
     }

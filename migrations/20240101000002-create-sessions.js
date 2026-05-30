@@ -17,7 +17,7 @@ module.exports = {
         onDelete: 'RESTRICT',
       },
       name: {
-        type: Sequelize.STRING(20),
+        type: Sequelize.STRING(100),
         allowNull: false,
       },
       start_date: {
@@ -38,9 +38,17 @@ module.exports = {
         allowNull: false,
         defaultValue: false,
       },
+      is_locked: {
+        type: Sequelize.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+      },
       created_by: {
         type: Sequelize.INTEGER,
         allowNull: true,
+        references: { model: 'users', key: 'id' },
+        onDelete: 'SET NULL',
+        onUpdate: 'CASCADE',
       },
       created_at: {
         type: Sequelize.DATE,
@@ -52,6 +60,12 @@ module.exports = {
         allowNull: false,
         defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
       },
+    }, {
+      uniqueKeys: {
+        unique_session_name_per_school: {
+          fields: ['school_id', 'name']
+        }
+      }
     });
 
     await queryInterface.addIndex('sessions', ['school_id', 'status'], {
