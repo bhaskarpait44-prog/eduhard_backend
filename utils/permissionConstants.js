@@ -66,6 +66,11 @@ const PERMISSIONS = {
   NOTICES_ALL_CLASSES : 'notices.all_classes',
   NOTICES_EDIT        : 'notices.edit',
   NOTICES_DELETE      : 'notices.delete',
+
+  // Calendar
+  CALENDAR_VIEW   : 'calendar.view',
+  CALENDAR_CREATE : 'calendar.create',
+  CALENDAR_EDIT   : 'calendar.edit',
 };
 
 // Roles that have full access regardless of permission table
@@ -82,6 +87,7 @@ const DEFAULT_ROLE_PERMISSIONS = {
     PERMISSIONS.NOTICES_VIEW,
     PERMISSIONS.NOTICES_POST,
     PERMISSIONS.CLASSES_VIEW,
+    PERMISSIONS.CALENDAR_VIEW,
   ],
   accountant: [
     PERMISSIONS.FEES_VIEW,
@@ -89,6 +95,7 @@ const DEFAULT_ROLE_PERMISSIONS = {
     PERMISSIONS.FEES_EDIT,
     PERMISSIONS.FEES_REPORT,
     PERMISSIONS.REPORTS_EXPORT,
+    PERMISSIONS.CALENDAR_VIEW,
   ],
   student: [],
 };

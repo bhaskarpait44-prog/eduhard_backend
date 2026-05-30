@@ -105,6 +105,8 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 86. `20260526000006-add-upi-enabled-to-schools.js`
 87. `20260527000001-add-unique-isbn-per-school.js`
 88. `20260527000002-create-library-reservations.js`
+89. `20260529000001-add-digital-and-cover-to-books.js`
+90. `20260530000001-create-academic-events.js`
 
 ## Canonical seed flow
 

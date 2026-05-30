@@ -3,9 +3,33 @@
 const PDFDocument = require('pdfkit');
 
 /**
+ * Reusable helper to draw school header on PDF
+ */
+function drawSchoolHeader(doc, school = {}, title, subTitle) {
+  const schoolName = school.name || 'School Management System';
+  const schoolAddress = school.address || '';
+  const schoolPhone = school.phone || '';
+  const schoolEmail = school.email || '';
+
+  doc.fillColor('#2c3e50').fontSize(22).font('Helvetica-Bold').text(schoolName, { align: 'center' });
+  doc.fontSize(10).font('Helvetica').text(`${schoolAddress}${schoolAddress && schoolPhone ? ' | ' : ''}${schoolPhone ? 'Phone: ' + schoolPhone : ''}`, { align: 'center' });
+  if (schoolEmail) doc.fontSize(10).text(`Email: ${schoolEmail}`, { align: 'center' });
+  
+  doc.moveDown(0.5);
+  doc.moveTo(50, doc.y).lineTo(545, doc.y).strokeColor('#eee').stroke();
+  doc.moveDown(1);
+  
+  if (title) {
+    doc.fillColor('#2c3e50').fontSize(16).font('Helvetica-Bold').text(title, { align: 'center', underline: false });
+  }
+  if (subTitle) {
+    doc.fontSize(11).font('Helvetica').text(subTitle, { align: 'center' });
+  }
+  doc.moveDown(1.5);
+}
+
+/**
  * Generates a PDF report card using PDFKit.
- * @param {Object} data - The data to populate the report card.
- * @returns {Promise<Buffer>} - The generated PDF as a buffer.
  */
 async function generateReportCard(data) {
   const { school, student, enrollment, session, results, attendance, finalResult } = data;
@@ -20,15 +44,10 @@ async function generateReportCard(data) {
       doc.on('error', err => reject(err));
 
       // --- Header ---
-      doc.fillColor('#2c3e50').fontSize(24).text(school.name, { align: 'center' });
-      doc.fontSize(10).text(`${school.address || ''} | Phone: ${school.phone || ''}`, { align: 'center' });
-      doc.moveDown(1);
-      doc.fontSize(16).text('ANNUAL PROGRESS REPORT', { align: 'center', underline: true });
-      doc.fontSize(12).text(`Academic Session: ${session.name}`, { align: 'center' });
-      doc.moveDown(2);
+      drawSchoolHeader(doc, school, 'ANNUAL PROGRESS REPORT', `Academic Session: ${session.name}`);
 
       // --- Student Info ---
-      doc.fontSize(11);
+      doc.fontSize(11).font('Helvetica');
       const startY = doc.y;
       doc.text(`Student Name: ${student.first_name} ${student.last_name}`, 50, startY);
       doc.text(`Admission No: ${student.admission_no}`, 50, startY + 20);
@@ -56,11 +75,12 @@ async function generateReportCard(data) {
       doc.text('Grade', col6, tableTop);
       doc.text('Status', col7, tableTop);
       
-      doc.moveTo(50, tableTop + 15).lineTo(580, tableTop + 15).stroke();
+      doc.moveTo(50, tableTop + 15).lineTo(580, tableTop + 15).strokeColor('#333').stroke();
       
       let y = tableTop + 25;
       doc.font('Helvetica');
       results.forEach(r => {
+        if (y > 750) { doc.addPage(); y = 50; }
         doc.text(r.subject, col1, y);
         doc.text(r.theory_marks_obtained !== null ? `${r.theory_marks_obtained}/${r.theory_total}` : '-', col2, y);
         doc.text(r.practical_marks_obtained !== null ? `${r.practical_marks_obtained}/${r.practical_total}` : '-', col3, y);
@@ -104,10 +124,91 @@ async function generateReportCard(data) {
 }
 
 /**
+ * Generates an Academic Calendar PDF using PDFKit.
+ */
+async function generateAcademicCalendarPdf(data) {
+  const { school = {}, session = {}, events = [] } = data;
+
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50, size: 'A4', bufferPages: true });
+      const chunks = [];
+
+      doc.on('data', chunk => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', err => reject(err));
+
+      // --- Header ---
+      drawSchoolHeader(doc, school, 'ACADEMIC CALENDAR', `Session: ${session.name || 'N/A'}`);
+
+      // --- Table Header ---
+      const tableTop = doc.y;
+      const colDate = 50, colTitle = 130, colType = 320, colAudience = 420, colClass = 500;
+      
+      doc.fontSize(10).font('Helvetica-Bold');
+      doc.text('Date', colDate, tableTop);
+      doc.text('Event Title', colTitle, tableTop);
+      doc.text('Type', colType, tableTop);
+      doc.text('Audience', colAudience, tableTop);
+      doc.text('Class', colClass, tableTop);
+      
+      doc.moveTo(50, tableTop + 15).lineTo(545, tableTop + 15).strokeColor('#ccc').stroke();
+      
+      let y = tableTop + 25;
+      doc.font('Helvetica');
+
+      if (events.length === 0) {
+        doc.text('No events scheduled for this period.', 50, y, { align: 'center', width: 495 });
+      } else {
+        events.forEach(event => {
+          // Check for page break
+          if (y > 750) {
+            doc.addPage();
+            y = 50;
+            // Redraw table header on new page if needed, but for calendar a simple list is fine
+          }
+
+          const dateStr = event.start_date === event.end_date 
+            ? event.start_date 
+            : `${event.start_date} to ${event.end_date}`;
+
+          doc.fontSize(9);
+          doc.text(dateStr, colDate, y, { width: 75 });
+          doc.text(event.title, colTitle, y, { width: 180 });
+          doc.text(event.event_type.replace('_', ' ').toUpperCase(), colType, y, { width: 90 });
+          doc.text(event.audience.toUpperCase(), colAudience, y, { width: 75 });
+          doc.text(event.target_class_name || 'All', colClass, y, { width: 45 });
+
+          y += Math.max(25, doc.heightOfString(event.title, { width: 180 }) + 10);
+          
+          // Row separator
+          doc.moveTo(50, y - 5).lineTo(545, y - 5).strokeColor('#f0f0f0').stroke();
+        });
+      }
+
+      // --- Footer ---
+      const pageCount = doc.bufferedPageRange().count;
+      for (let i = 0; i < pageCount; i++) {
+        doc.switchToPage(i);
+        doc.fontSize(8).fillColor('#999').text(
+          `Generated on ${new Date().toLocaleDateString()} | Page ${i + 1} of ${pageCount}`,
+          50,
+          doc.page.height - 50,
+          { align: 'center' }
+        );
+      }
+
+      doc.end();
+    } catch (err) { reject(err); }
+  });
+}
+
+/**
  * Simplified init (no browser needed for PDFKit)
  */
 async function initBrowser() {
   console.log('✅ PDF Engine initialized (PDFKit)');
 }
 
-module.exports = { generateReportCard, initBrowser };
+module.exports = { generateReportCard, generateAcademicCalendarPdf, initBrowser };
+

@@ -13,6 +13,7 @@ router.get('/dashboard', ctrl.dashboard);
 router.get('/dashboard/today-schedule', ctrl.dashboardTodaySchedule);
 router.get('/dashboard/upcoming-events', ctrl.dashboardUpcomingEvents);
 router.get('/dashboard/achievements', ctrl.dashboardAchievements);
+router.get('/calendar', ctrl.getCalendar);
 
 router.get('/attendance', ctrl.attendance);
 router.get('/attendance/summary', ctrl.attendanceSummary);

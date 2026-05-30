@@ -543,7 +543,25 @@ async function getUpcomingEvents(context) {
     },
   });
 
-  return [...exams, ...fees, ...holidays, ...notices]
+  const [academicEvents] = await sequelize.query(`
+    SELECT 'academic_event' AS event_type, id, title, start_date AS event_date
+    FROM academic_events
+    WHERE school_id = :schoolId
+      AND session_id = :sessionId
+      AND is_published = true
+      AND start_date >= CURRENT_DATE
+      AND (audience IN ('everyone', 'students') OR target_class_id IS NULL OR target_class_id = :classId)
+    ORDER BY start_date ASC
+    LIMIT 5;
+  `, {
+    replacements: {
+      schoolId: context.school.id,
+      sessionId: context.sessionId,
+      classId: context.classId
+    }
+  });
+
+  return [...exams, ...fees, ...holidays, ...notices, ...academicEvents]
     .sort((a, b) => String(a.event_date).localeCompare(String(b.event_date)))
     .slice(0, 10)
     .map((event) => ({
@@ -777,6 +795,68 @@ exports.dashboardUpcomingEvents = async (req, res, next) => {
     const events = await getUpcomingEvents(context);
     res.ok({ events }, `${events.length} upcoming event(s) found.`);
   } catch (err) { next(err); }
+};
+
+/**
+ * GET /api/student/calendar
+ * Returns published events relevant to the student (including session holidays)
+ */
+exports.getCalendar = async (req, res, next) => {
+  try {
+    const context = await getStudentContext(req);
+    const { month, year, session_id } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!session_id) return res.fail('session_id is required');
+
+    let query = `
+      SELECT ae.*, c.name as target_class_name, false as is_readonly
+      FROM academic_events ae
+      LEFT JOIN classes c ON c.id = ae.target_class_id
+      WHERE ae.school_id = :schoolId 
+        AND ae.session_id = :sessionId
+        AND ae.is_published = true
+        AND (
+          ae.audience IN ('everyone', 'students')
+          OR (ae.audience = 'parents')
+          OR (ae.target_class_id IS NULL OR ae.target_class_id = :classId)
+        )
+    `;
+    const replacements = { 
+      schoolId, 
+      sessionId: session_id,
+      classId: context.classId
+    };
+
+    if (month && year) {
+      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
+      replacements.month = month;
+      replacements.year = year;
+    }
+
+    // Include session holidays
+    let holidaysQuery = `
+      SELECT 
+        id, NULL as school_id, session_id, name as title, NULL as description, 'holiday' as event_type, 
+        holiday_date as start_date, holiday_date as end_date, NULL as start_time, NULL as end_time,
+        true as is_all_day, 'everyone' as audience, NULL as target_class_id, '#16a34a' as color,
+        true as is_published, false as notify_on_publish, NULL as created_by, NULL as updated_by,
+        created_at, created_at as updated_at, NULL as target_class_name, true as is_readonly
+      FROM session_holidays
+      WHERE session_id = :sessionId
+    `;
+    if (month && year) {
+      holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+    }
+
+    query = `(${query}) UNION ALL (${holidaysQuery})`;
+    query += ` ORDER BY start_date ASC`;
+
+    const [events] = await sequelize.query(query, { replacements });
+    res.ok(events);
+  } catch (err) {
+    next(err);
+  }
 };
 
 exports.dashboardAchievements = async (req, res, next) => {

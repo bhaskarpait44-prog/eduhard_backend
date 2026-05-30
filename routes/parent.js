@@ -12,5 +12,6 @@ router.get('/wards/:student_id/attendance', ctrl.getWardAttendance);
 router.get('/wards/:student_id/fees', ctrl.getWardFees);
 router.get('/wards/:student_id/results', ctrl.getWardResults);
 router.get('/wards/:student_id/homework', ctrl.getWardHomework);
+router.get('/wards/:student_id/calendar', ctrl.getWardCalendar);
 
 module.exports = router;

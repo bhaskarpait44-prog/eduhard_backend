@@ -128,7 +128,9 @@ app.use('/api/audit',
 
 app.use('/api/visitors', require('./routes/visitors'));
 
-app.use('/api/notices', require('./routes/notices'));
+app.use('/api/notices',           require('./routes/notices'));
+app.use('/api/academic-calendar', require('./routes/academicCalendar'));
+
 app.use('/api/certificates', require('./routes/certificateRoutes'));
 
 // Missing or regrouped routes as requested in PART 1

@@ -141,3 +141,71 @@ exports.getWardHomework = async (req, res, next) => {
     res.ok(homework);
   } catch (err) { next(err); }
 };
+
+exports.getWardCalendar = async (req, res, next) => {
+  try {
+    const { student_id } = req.params;
+    const { month, year, session_id } = req.query;
+    const parentEmail = req.user.email;
+    const schoolId = req.user.school_id;
+
+    if (!session_id) return res.fail('session_id is required');
+
+    // Verify ownership and get student class
+    const [[student]] = await sequelize.query(`
+      SELECT s.id, e.class_id
+      FROM students s 
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+    `, { replacements: { student_id, parentEmail, schoolId } });
+
+    if (!student) return res.fail('Unauthorized access to student record.', [], 403);
+
+    let query = `
+      SELECT ae.*, c.name as target_class_name, false as is_readonly
+      FROM academic_events ae
+      LEFT JOIN classes c ON c.id = ae.target_class_id
+      WHERE ae.school_id = :schoolId 
+        AND ae.session_id = :sessionId
+        AND ae.is_published = true
+        AND (
+          ae.audience IN ('everyone', 'parents')
+          OR (ae.audience = 'students')
+          OR (ae.target_class_id IS NULL OR ae.target_class_id = :classId)
+        )
+    `;
+    const replacements = { 
+      schoolId, 
+      sessionId: session_id,
+      classId: student.class_id
+    };
+
+    if (month && year) {
+      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
+      replacements.month = month;
+      replacements.year = year;
+    }
+
+    // Include session holidays
+    let holidaysQuery = `
+      SELECT 
+        id, NULL as school_id, session_id, name as title, NULL as description, 'holiday' as event_type, 
+        holiday_date as start_date, holiday_date as end_date, NULL as start_time, NULL as end_time,
+        true as is_all_day, 'everyone' as audience, NULL as target_class_id, '#16a34a' as color,
+        true as is_published, false as notify_on_publish, NULL as created_by, NULL as updated_by,
+        created_at, created_at as updated_at, NULL as target_class_name, true as is_readonly
+      FROM session_holidays
+      WHERE session_id = :sessionId
+    `;
+    if (month && year) {
+      holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+    }
+
+    query = `(${query}) UNION ALL (${holidaysQuery})`;
+    query += ` ORDER BY start_date ASC`;
+
+    const [events] = await sequelize.query(query, { replacements });
+    res.ok(events);
+  } catch (err) { next(err); }
+};
