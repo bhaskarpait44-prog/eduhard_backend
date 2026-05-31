@@ -383,22 +383,53 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
     }
 
     // ── Step 5: Recalculate percentages for all affected enrollments in BATCH ─
-    // 5a. Group unique joined_dates to minimize working days calculations
-    const uniqueJoinedDates = [...new Set(enrollmentRows.map(e => e.joined_date))];
-    const workingDaysMap = new Map();
-    
-    // Get session metadata for end_date
+    // 5a. Efficiently calculate working days for all possible joined dates
+    // Get session metadata for full range
     const [[sessionInfo]] = await sequelize.query(`
-      SELECT end_date FROM sessions WHERE id = :sessionId LIMIT 1;
+      SELECT start_date, end_date FROM sessions WHERE id = :sessionId LIMIT 1;
     `, { replacements: { sessionId }, transaction });
     
     const today = new Date().toISOString().split('T')[0];
     const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
 
-    for (const jDate of uniqueJoinedDates) {
-      const wdInfo = await getWorkingDays(sessionId, jDate, calcUpTo, transaction);
-      workingDaysMap.set(jDate, wdInfo.workingDays);
-    }
+    // Fetch config and all holidays for the entire session at once
+    const [[workingDaysRow]] = await sequelize.query(`
+      SELECT monday, tuesday, wednesday, thursday, friday, saturday, sunday
+      FROM session_working_days WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId }, transaction });
+
+    const [allHolidays] = await sequelize.query(`
+      SELECT holiday_date FROM session_holidays 
+      WHERE session_id = :sessionId AND holiday_date <= :calcUpTo;
+    `, { replacements: { sessionId, calcUpTo }, transaction });
+    const holidaySet = new Set(allHolidays.map(h => h.holiday_date));
+
+    // Generate prefix sum of working days from session start to calcUpTo
+    const fullDateRange = getDateRange(sessionInfo.start_date, calcUpTo);
+    const prefixSum = new Array(fullDateRange.length).fill(0);
+    const dateToIndex = new Map();
+    
+    let currentSum = 0;
+    fullDateRange.forEach((date, i) => {
+      dateToIndex.set(date, i);
+      const dayOfWeek = getDayOfWeek(date);
+      const colName   = DAY_COLUMN_MAP[dayOfWeek];
+      
+      const isWorking = workingDaysRow[colName] && !holidaySet.has(date);
+      if (isWorking) currentSum++;
+      prefixSum[i] = currentSum;
+    });
+
+    const getWorkingDaysFast = (joinedDate) => {
+      const startIndex = dateToIndex.get(joinedDate);
+      if (startIndex === undefined) return 0; // Joined before session start or after calcUpTo
+      const endIndex = fullDateRange.length - 1;
+      
+      // workingDays in [joinedDate, calcUpTo] = P[end] - P[start-1]
+      const totalAtEnd = prefixSum[endIndex];
+      const totalBeforeStart = startIndex > 0 ? prefixSum[startIndex - 1] : 0;
+      return totalAtEnd - totalBeforeStart;
+    };
 
     // 5b. Fetch status counts for all affected students in a single query
     const [allStatusCounts] = await sequelize.query(`
@@ -411,7 +442,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
         AND a.status != 'holiday'
       GROUP BY a.enrollment_id, a.status;
     `, { replacements: { enrollmentIds, calcUpTo }, transaction });
-
+    
     // 5c. Pivot counts for easy lookup { enrollment_id -> { status: count } }
     const countLookup = new Map();
     allStatusCounts.forEach(r => {
@@ -425,9 +456,11 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
     });
 
     // 5d. Perform in-memory calculation for each enrollment
+    const oldRecordMap = new Map(existingRecords.map(r => [r.enrollment_id, r]));
+
     const affectedStudents = enrollmentRows.map(row => {
-      const oldRecord = existingRecords.find(r => r.enrollment_id === row.enrollment_id);
-      const workingDays = workingDaysMap.get(row.joined_date);
+      const oldRecord = oldRecordMap.get(row.enrollment_id);
+      const workingDays = getWorkingDaysFast(row.joined_date);
       const counts = countLookup.get(row.enrollment_id) || { present: 0, late: 0, half_day: 0, absent: 0 };
 
       let percentage = 0;

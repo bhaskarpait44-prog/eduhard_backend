@@ -216,10 +216,9 @@ exports.activate = async (req, res, next) => {
         }, transaction: t });
       }
 
-      const [[session]] = await sequelize.query(`
+      await sequelize.query(`
         UPDATE sessions SET is_current = true, status = 'active', updated_at = NOW()
-        WHERE id = :id AND school_id = :schoolId
-        RETURNING id, name, status, is_current;
+        WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
       await sequelize.query(`
@@ -230,12 +229,22 @@ exports.activate = async (req, res, next) => {
           ('sessions', :id, 'status', 'upcoming', 'active',
            :userId, :reason, :ip, :device, NOW());
       `, { replacements: {
-        id: session.id,
+        id,
         userId: req.user.id,
         reason: `Session activated by admin`,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
+
+      // Fetch refreshed session data to return
+      const [[session]] = await sequelize.query(`
+        SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
+               wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+        FROM sessions s
+        LEFT JOIN session_working_days wd ON wd.session_id = s.id
+        WHERE s.id = :id AND s.school_id = :schoolId
+        LIMIT 1;
+      `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
       res.ok(session, `Session "${session.name}" activated.`);
       invalidateCache(req.user.school_id, '/api/sessions*');
@@ -258,7 +267,7 @@ exports.addHoliday = async (req, res, next) => {
 
     if (!session) return res.fail('Session not found.', [], 404);
 
-    if (session.is_locked || ['locked', 'closed', 'archived'].includes(session.status)) {
+    if (session.is_locked || ['upcoming', 'locked', 'closed', 'archived'].includes(session.status)) {
       return res.fail(`Cannot add holiday: session is ${session.status}.`);
     }
 
@@ -267,16 +276,16 @@ exports.addHoliday = async (req, res, next) => {
       return res.fail(`Holiday date must be between session start (${session.start_date}) and end (${session.end_date}).`);
     }
 
-    // 2. Check for duplicate holiday
-    const [[duplicate]] = await sequelize.query(`
-      SELECT id FROM session_holidays WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
-    `, { replacements: { sessionId: id, date: holiday_date } });
-
-    if (duplicate) {
-      return res.fail('A holiday already exists for this date in this session.');
-    }
-
     const result = await sequelize.transaction(async (t) => {
+      // 2. Check for duplicate holiday
+      const [[duplicate]] = await sequelize.query(`
+        SELECT id FROM session_holidays WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
+      `, { replacements: { sessionId: id, date: holiday_date }, transaction: t });
+
+      if (duplicate) {
+        throw { name: 'CustomError', message: 'A holiday already exists for this date in this session.', status: 400 };
+      }
+
       // 3. Check if attendance already marked — retroactive if so
       const [[existingAttendance]] = await sequelize.query(`
         SELECT COUNT(*) AS cnt FROM attendance a
@@ -285,9 +294,10 @@ exports.addHoliday = async (req, res, next) => {
       `, { replacements: { sessionId: id, date: holiday_date }, transaction: t });
 
       // Insert holiday record
-      await sequelize.query(`
+      const [[newHoliday]] = await sequelize.query(`
         INSERT INTO session_holidays (session_id, holiday_date, name, type, added_by, created_at)
-        VALUES (:sessionId, :date, :name, :type, :addedBy, NOW());
+        VALUES (:sessionId, :date, :name, :type, :addedBy, NOW())
+        RETURNING id;
       `, { replacements: { sessionId: id, date: holiday_date, name, type, addedBy: req.user.id }, transaction: t });
 
       let retroResult = null;
@@ -304,14 +314,14 @@ exports.addHoliday = async (req, res, next) => {
           ('session_holidays', :id, 'holiday_added', 'none', :date,
            :userId, :reason, NOW());
       `, { replacements: {
-        id,
+        id: newHoliday.id,
         date: holiday_date,
         userId: req.user.id,
         reason: `Holiday "${name}" added to session`
       }, transaction: t });
 
       return {
-        holiday      : { session_id: id, holiday_date, name, type },
+        holiday      : { id: newHoliday.id, session_id: id, holiday_date, name, type },
         retroactive  : retroResult,
       };
     });
