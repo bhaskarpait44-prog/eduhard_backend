@@ -146,7 +146,7 @@ const profileVersioning = {
         reason     : changeReason,
         ipAddress,
         deviceInfo,
-      });
+      }, t);
 
       // Determine which fields actually changed and log each one
       const watchedFields = [

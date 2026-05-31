@@ -2,6 +2,7 @@
 
 const sequelize = require('../config/database');
 const { invalidateCache } = require('../middlewares/cache');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 async function getSessionMeta(sessionId, schoolId) {
   const [[session]] = await sequelize.query(`
@@ -153,6 +154,16 @@ exports.enroll = async (req, res, next) => {
       RETURNING id, student_id, session_id, class_id, section_id, stream, roll_number, joining_type, status;
     `, { replacements: { student_id, session_id, class_id, section_id, stream: normalizedStream, roll_number: finalRollNumber, joined_date, joining_type } });
 
+    await writeAuditLog(sequelize, {
+      tableName: 'enrollments',
+      recordId: enrollment.id,
+      changes: { field: 'status', oldValue: null, newValue: 'active' },
+      changedBy: req.user.id,
+      reason: `Initial enrollment: ${joining_type}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(enrollment, 'Student enrolled successfully.', 201);
     invalidateCache(req.user.school_id, '/api/enrollments*');
     invalidateCache(req.user.school_id, '/api/students*');
@@ -283,6 +294,26 @@ exports.promote = async (req, res, next) => {
         });
 
         promoted.push({ student_id: en.student_id, new_enrollment_id: newEnrollment.id });
+
+        // Audit the promotion
+        await writeAuditLog(sequelize, {
+          tableName: 'enrollments',
+          recordId: en.id,
+          changes: { field: 'status', oldValue: 'active', newValue: 'inactive' },
+          changedBy: req.user.id,
+          reason: 'Promoted to next class',
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent']
+        });
+        await writeAuditLog(sequelize, {
+          tableName: 'enrollments',
+          recordId: newEnrollment.id,
+          changes: { field: 'status', oldValue: null, newValue: 'active' },
+          changedBy: req.user.id,
+          reason: 'Initial enrollment via promotion',
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent']
+        });
       }
     });
 

@@ -13,6 +13,11 @@ async function writeAuditLog(sequelize, {
   ipAddress,
   deviceInfo,
 }) {
+  // Validate reason length (matching auditLogger.setContext behavior)
+  if (!reason || reason.trim().length < 10) {
+    throw new Error('Audit reason must be at least 10 characters.');
+  }
+
   const rows = Array.isArray(changes) ? changes : [changes];
   const now  = new Date();
 

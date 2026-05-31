@@ -3,6 +3,7 @@
 const sequelize  = require('../config/database');
 const feeManager = require('../utils/feeManager');
 const { invalidateCache } = require('../middlewares/cache');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 const formatINR = (amount) => {
   return Number(amount).toLocaleString('en-IN', {
@@ -553,6 +554,17 @@ exports.createStructure = async (req, res, next) => {
       });
 
       const invoice_sync = await syncStructureInvoicesForClass({ structure, transaction });
+      
+      await writeAuditLog(sequelize, {
+        tableName: 'fee_structures',
+        recordId: structure.id,
+        changes: { field: 'name', oldValue: null, newValue: name },
+        changedBy: req.user.id,
+        reason: 'New fee structure created',
+        ipAddress: req.ip,
+        deviceInfo: req.headers['user-agent']
+      }, transaction);
+
       return { ...structure, invoice_sync };
     });
 
@@ -582,6 +594,16 @@ exports.deleteStructure = async (req, res, next) => {
 
     if (!deleted) return res.fail('Fee structure not found.', [], 404);
 
+    await writeAuditLog(sequelize, {
+      tableName: 'fee_structures',
+      recordId: id,
+      changes: { field: 'is_active', oldValue: 'true', newValue: 'deleted' },
+      changedBy: req.user.id,
+      reason: 'Fee structure deleted',
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok({ id }, 'Fee structure deleted.');
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
@@ -591,6 +613,17 @@ exports.deleteStructure = async (req, res, next) => {
 exports.generate = async (req, res, next) => {
   try {
     const result = await feeManager.generateInvoices(req.body.session_id);
+
+    await writeAuditLog(sequelize, {
+      tableName: 'fee_invoices',
+      recordId: req.body.session_id,
+      changes: { field: 'bulk_generation', oldValue: 'none', newValue: `${result.invoicesCreated} invoices` },
+      changedBy: req.user.id,
+      reason: 'Bulk invoice generation for session',
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(result, `${result.invoicesCreated} invoice(s) generated.`);
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
@@ -637,6 +670,16 @@ exports.recordPayment = async (req, res, next) => {
       receivedBy     : req.user.id,
     });
 
+    await writeAuditLog(sequelize, {
+      tableName: 'fee_invoices',
+      recordId: invoice_id,
+      changes: { field: 'amount_paid', oldValue: String(Number(result.oldPaid)), newValue: String(Number(result.newPaid)) },
+      changedBy: req.user.id,
+      reason: `Payment recorded: ${payment_mode}${transaction_ref ? ` (${transaction_ref})` : ''}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(result, `Payment of Rs.${result.amountApplied} applied. Status: ${result.newStatus}.`, 201);
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
@@ -647,6 +690,17 @@ exports.carryForward = async (req, res, next) => {
   try {
     const { student_id, from_session_id, to_session_id } = req.body;
     const result = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id);
+
+    await writeAuditLog(sequelize, {
+      tableName: 'fee_invoices',
+      recordId: student_id,
+      changes: { field: 'carry_forward', oldValue: `from:${from_session_id}`, newValue: `to:${to_session_id}` },
+      changedBy: req.user.id,
+      reason: `Carried forward ${result.invoicesCarried} invoices (Total: Rs.${result.totalAmountCarried})`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(result, `${result.invoicesCarried} invoice(s) carried forward. Total: Rs.${result.totalAmountCarried}.`);
     invalidateCache(req.user.school_id, '/api/fees*');
     invalidateCache(req.user.school_id, '/api/dashboard*');

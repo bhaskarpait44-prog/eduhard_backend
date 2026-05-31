@@ -32,7 +32,7 @@ const auditLogger = {
    * @param {string}    ctx.ipAddress    - request IP
    * @param {string}    ctx.deviceInfo   - user-agent string
    */
-  async setContext(sequelize, { changedBy, reason, ipAddress, deviceInfo }) {
+  async setContext(sequelize, { changedBy, reason, ipAddress, deviceInfo }, t = null) {
     // Validate reason length before touching the DB
     if (reason && reason.trim().length < 10) {
       throw new Error('Audit reason must be at least 10 characters.');
@@ -50,7 +50,7 @@ const auditLogger = {
         set_config('app.change_reason', '${safeReason}',    true),
         set_config('app.ip_address',    '${safeIp}',        true),
         set_config('app.device_info',   '${safeDevice}',    true);
-    `);
+    `, { transaction: t });
   },
 
   /**

@@ -334,6 +334,9 @@ exports.addHoliday = async (req, res, next) => {
     invalidateCache(req.user.school_id, '/api/dashboard*');
     invalidateCache(req.user.school_id, '/api/attendance*');
   } catch (err) { 
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
     if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
       return res.fail('A holiday already exists for this date.');
     }

@@ -4,6 +4,7 @@ const sequelize    = require('../config/database');
 const examEngine   = require('../utils/examEngine');
 const { MarkHistory, GradingScale } = require('../models');
 const { invalidateCache } = require('../middlewares/cache');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 async function getClassReviewSummary(sessionId, classId) {
   const [[row]] = await sequelize.query(`
@@ -150,6 +151,16 @@ exports.enterMarks = async (req, res, next) => {
     });
 
     const examStatus = await syncExamStatus(exam_id);
+
+    await writeAuditLog(sequelize, {
+      tableName: 'exam_results',
+      recordId: enrollment_id,
+      changes: { field: 'bulk_entry', oldValue: 'none', newValue: `${results.length} subjects` },
+      changedBy: req.user.id,
+      reason: `Marks entered for exam: ${exam.id}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
 
     invalidateCache(exam.school_id, '/api/results*');
     invalidateCache(exam.school_id, '/api/dashboard*');
@@ -768,6 +779,16 @@ exports.release = async (req, res, next) => {
       }
     });
 
+    await writeAuditLog(sequelize, {
+      tableName: 'student_results',
+      recordId: enrollment_id,
+      changes: { field: 'release_result', oldValue: String(!release), newValue: String(!!release) },
+      changedBy: req.user.id,
+      reason: `Result ${release ? 'released' : 'withheld'}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     invalidateCache(req.user.school_id, '/api/results*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok({ enrollment_id, release_result: !!release }, `Result ${release ? 'released' : 'withheld'} successfully.`);
@@ -791,6 +812,17 @@ exports.override = async (req, res, next) => {
     }
 
     const result = await examEngine.overrideResult(enrollment_id, new_result, reason, req.user.id);
+
+    await writeAuditLog(sequelize, {
+      tableName: 'student_results',
+      recordId: enrollment_id,
+      changes: { field: 'result', oldValue: result.oldResult, newValue: result.newResult },
+      changedBy: req.user.id,
+      reason: `Result override: ${reason}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     invalidateCache(req.user.school_id, '/api/results*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok(result, `Result overridden: ${result.oldResult} → ${result.newResult}.`);
@@ -950,6 +982,17 @@ exports.overrideMark = async (req, res, next) => {
     if (updatedRows.length === 0) {
       return res.fail('Teacher marks have not been entered for this student yet.', [], 404);
     }
+
+    // Log to audit_logs
+    await writeAuditLog(sequelize, {
+      tableName: 'exam_results',
+      recordId: `${exam_id}_${enrollment_id}_${subject_id}`,
+      changes: { field: 'marks_obtained', oldValue: String(oldResult?.marks_obtained || 0), newValue: String(finalMarks) },
+      changedBy: req.user.id,
+      reason: `Mark override: ${reason}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
 
     // Log to MarkHistory
     await MarkHistory.create({

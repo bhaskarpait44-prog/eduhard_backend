@@ -126,7 +126,7 @@ exports.getAdmins = async (req, res, next) => {
       WITH admin_list AS (
         SELECT id, name, email, role::text, school_id, is_active
         FROM users
-        WHERE role = 'admin'
+        WHERE role IN ('admin', 'super_admin', 'accountant', 'staff', 'librarian', 'receptionist')
         UNION ALL
         SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, school_id, is_active
         FROM teachers
@@ -138,7 +138,7 @@ exports.getAdmins = async (req, res, next) => {
       ORDER BY name ASC;
     `, { replacements: { schoolId: req.user.school_id } });
 
-    res.ok({ users }, `${users.length} admin user(s) retrieved.`);
+    res.ok({ users }, `${users.length} user(s) retrieved for audit filtering.`);
   } catch (err) { next(err); }
 };
 
@@ -146,6 +146,7 @@ exports.getHistory = async (req, res, next) => {
   try {
     const { table, record_id } = req.params;
     const { limit = 50, offset = 0 } = req.query;
+    const schoolId = req.user.school_id;
 
     const [logs] = await sequelize.query(`
       SELECT al.id, al.field_name, al.old_value, al.new_value,
@@ -154,9 +155,15 @@ exports.getHistory = async (req, res, next) => {
       FROM audit_logs al
       LEFT JOIN users u ON u.id = al.changed_by
       WHERE al.table_name = :table AND al.record_id = :record_id
+        AND EXISTS (
+          SELECT 1
+          FROM users u_scope
+          WHERE u_scope.id = al.changed_by
+            AND u_scope.school_id = :schoolId
+        )
       ORDER BY al.created_at DESC
       LIMIT :limit OFFSET :offset;
-    `, { replacements: { table, record_id, limit: parseInt(limit), offset: parseInt(offset) } });
+    `, { replacements: { table, record_id, schoolId, limit: parseInt(limit), offset: parseInt(offset) } });
 
     res.ok({ table, record_id, total: logs.length, logs }, `${logs.length} audit log(s) retrieved.`);
   } catch (err) { next(err); }

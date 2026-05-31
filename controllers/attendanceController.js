@@ -3,6 +3,7 @@
 const sequelize = require('../config/database');
 const { getAttendancePercent } = require('../utils/attendanceCalculator');
 const { invalidateCache } = require('../middlewares/cache');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 function parseOptionalInteger(value) {
   if (value === undefined || value === null || value === '') return null;
@@ -82,6 +83,16 @@ exports.markSingle = async (req, res, next) => {
       RETURNING id, enrollment_id, date, status, method;
     `, { replacements: { enrollment_id, date, status, method, marked_by: req.user.id } });
 
+    await writeAuditLog(sequelize, {
+      tableName: 'attendance',
+      recordId: record.id,
+      changes: { field: 'status', oldValue: null, newValue: status },
+      changedBy: req.user.id,
+      reason: `Attendance marked: ${method}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(record, 'Attendance marked.', 201);
     invalidateCache(req.user.school_id, '/api/attendance*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
@@ -140,6 +151,16 @@ exports.markBulk = async (req, res, next) => {
 
         inserted.push(rec.enrollment_id);
       }
+    });
+
+    await writeAuditLog(sequelize, {
+      tableName: 'attendance',
+      recordId: date,
+      changes: { field: 'bulk_marking', oldValue: 'none', newValue: `${inserted.length + updated.length} records` },
+      changedBy: req.user.id,
+      reason: `Bulk attendance marking for ${date}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
     });
 
     res.ok({
@@ -645,6 +666,17 @@ exports.override = async (req, res, next) => {
     `, { replacements: { status, reason: override_reason, markedBy: req.user.id, id } });
 
     if (!updated) return res.fail('Attendance record not found.', [], 404);
+
+    await writeAuditLog(sequelize, {
+      tableName: 'attendance',
+      recordId: updated.id,
+      changes: { field: 'status', oldValue: 'manual_override', newValue: status },
+      changedBy: req.user.id,
+      reason: `Manual override: ${override_reason}`,
+      ipAddress: req.ip,
+      deviceInfo: req.headers['user-agent']
+    });
+
     res.ok(updated, 'Attendance overridden.');
     invalidateCache(req.user.school_id, '/api/attendance*');
     invalidateCache(req.user.school_id, '/api/dashboard*');

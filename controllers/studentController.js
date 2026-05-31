@@ -947,37 +947,43 @@ exports.updateIdentity = async (req, res, next) => {
       }
     }
 
-    // Set audit context — trigger reads these for each field change
-    await auditLogger.setContext(sequelize, {
-      changedBy  : req.user.id,
-      reason,
-      ipAddress  : req.ip,
-      deviceInfo : req.headers['user-agent'],
+    const updated = await sequelize.transaction(async (t) => {
+      // Set audit context — trigger reads these for each field change
+      await auditLogger.setContext(sequelize, {
+        changedBy  : req.user.id,
+        reason,
+        ipAddress  : req.ip,
+        deviceInfo : req.headers['user-agent'],
+      }, t);
+
+      const updates = {};
+      if (admission_no)  updates.admission_no  = admission_no;
+      if (first_name)    updates.first_name    = first_name;
+      if (last_name)     updates.last_name     = last_name;
+      if (date_of_birth) updates.date_of_birth = date_of_birth;
+      if (gender)        updates.gender        = gender;
+
+      if (Object.keys(updates).length === 0) {
+        return res.fail('No fields provided to update.');
+      }
+
+      const setClauses = Object.keys(updates).map(k => `${k} = :${k}`).join(', ');
+      const [[resRow]] = await sequelize.query(`
+        UPDATE students SET ${setClauses}, updated_at = NOW()
+        WHERE id = :id
+        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
+      `, { replacements: { ...updates, id }, transaction: t });
+
+      return resRow;
     });
 
-    const updates = {};
-    if (admission_no)  updates.admission_no  = admission_no;
-    if (first_name)    updates.first_name    = first_name;
-    if (last_name)     updates.last_name     = last_name;
-    if (date_of_birth) updates.date_of_birth = date_of_birth;
-    if (gender)        updates.gender        = gender;
+    if (updated) {
+      res.ok(updated, 'Student identity updated. Audit log written.');
 
-    if (Object.keys(updates).length === 0) {
-      return res.fail('No fields provided to update.');
+      // Invalidate student list and detail cache
+      invalidateCache(req.user.school_id, '/api/students*');
+      invalidateCache(req.user.school_id, '/api/dashboard*');
     }
-
-    const setClauses = Object.keys(updates).map(k => `${k} = :${k}`).join(', ');
-    const [[updated]] = await sequelize.query(`
-      UPDATE students SET ${setClauses}, updated_at = NOW()
-      WHERE id = :id
-      RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
-    `, { replacements: { ...updates, id } });
-
-    res.ok(updated, 'Student identity updated. Audit log written.');
-
-    // Invalidate student list and detail cache
-    invalidateCache(req.user.school_id, '/api/students*');
-    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -1174,7 +1180,7 @@ exports.remove = async (req, res, next) => {
         reason     : reason || `Student deleted after confirming name ${expectedName}`,
         ipAddress  : req.ip,
         deviceInfo : req.headers['user-agent'],
-      }, { transaction: t });
+      }, t);
 
       await sequelize.query(`
         UPDATE students
