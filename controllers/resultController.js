@@ -108,7 +108,7 @@ exports.enterMarks = async (req, res, next) => {
     const { exam_id, enrollment_id, results } = req.body;
 
     const [[exam]] = await sequelize.query(
-      `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id 
+      `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id, s.status AS session_status, s.is_locked AS session_locked
        FROM exams e 
        JOIN sessions s ON s.id = e.session_id
        WHERE e.id = :exam_id;`,
@@ -116,6 +116,11 @@ exports.enterMarks = async (req, res, next) => {
     );
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+
+    if (['closed', 'archived', 'locked'].includes(exam.session_status) || exam.session_locked) {
+      return res.fail(`Cannot enter marks: session is ${exam.session_status}.`);
+    }
+
     if (exam.status === 'completed') {
       return res.fail('Exam is already completed. Marks can no longer be edited.');
     }
@@ -613,6 +618,15 @@ exports.calculate = async (req, res, next) => {
   try {
     const { enrollment_id, session_id } = req.body;
 
+    const [[sessionMeta]] = await sequelize.query(`
+      SELECT status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: session_id } });
+
+    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
+      return res.fail(`Cannot calculate results: session is ${sessionMeta.status}.`);
+    }
+
     const [[enrollment]] = await sequelize.query(`
       SELECT id, class_id
       FROM enrollments
@@ -648,6 +662,15 @@ exports.bulkCalculate = async (req, res, next) => {
 
     if (!session_id || !class_id) {
       return res.fail('session_id and class_id are required.');
+    }
+
+    const [[sessionMeta]] = await sequelize.query(`
+      SELECT status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: session_id } });
+
+    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
+      return res.fail(`Cannot modify results: session is ${sessionMeta.status}.`);
     }
 
     const reviewSummary = await getClassReviewSummary(session_id, class_id);
@@ -717,11 +740,18 @@ exports.release = async (req, res, next) => {
     const { enrollment_id, release } = req.body;
 
     const [[result]] = await sequelize.query(`
-      SELECT id FROM student_results WHERE enrollment_id = :enrollment_id LIMIT 1;
+      SELECT sr.id, s.status AS session_status, s.is_locked AS session_locked
+      FROM student_results sr
+      JOIN sessions s ON s.id = sr.session_id
+      WHERE sr.enrollment_id = :enrollment_id LIMIT 1;
     `, { replacements: { enrollment_id } });
 
     if (!result) {
       return res.fail('Result not yet calculated for this student. Calculate result before releasing.', [], 400);
+    }
+
+    if (['closed', 'archived', 'locked'].includes(result.session_status) || result.session_locked) {
+      return res.fail(`Cannot modify result release status: session is ${result.session_status}.`);
     }
 
     await sequelize.query(`
@@ -747,6 +777,19 @@ exports.release = async (req, res, next) => {
 exports.override = async (req, res, next) => {
   try {
     const { enrollment_id, new_result, reason } = req.body;
+
+    const [[enrollment]] = await sequelize.query(`
+      SELECT e.id, s.status AS session_status, s.is_locked AS session_locked
+      FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollment_id LIMIT 1;
+    `, { replacements: { enrollment_id } });
+
+    if (!enrollment) return res.fail('Enrollment not found.', [], 404);
+    if (['closed', 'archived', 'locked'].includes(enrollment.session_status) || enrollment.session_locked) {
+      return res.fail(`Cannot override result: session is ${enrollment.session_status}.`);
+    }
+
     const result = await examEngine.overrideResult(enrollment_id, new_result, reason, req.user.id);
     invalidateCache(req.user.school_id, '/api/results*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
@@ -768,14 +811,19 @@ exports.overrideMark = async (req, res, next) => {
     } = req.body;
 
     const [[exam]] = await sequelize.query(`
-      SELECT id, class_id, session_id
-      FROM exams
-      WHERE id = :examId
+      SELECT e.id, e.class_id, e.session_id, s.status AS session_status, s.is_locked AS session_locked
+      FROM exams e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :examId
       LIMIT 1;
     `, { replacements: { examId: exam_id } });
 
     if (!exam) {
       return res.fail('Exam not found.', [], 404);
+    }
+
+    if (['closed', 'archived', 'locked'].includes(exam.session_status) || exam.session_locked) {
+      return res.fail(`Cannot override marks: session is ${exam.session_status}.`);
     }
 
     const [[enrollment]] = await sequelize.query(`

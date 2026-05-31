@@ -70,7 +70,12 @@ exports.create = async (req, res, next) => {
       invalidateCache(schoolId, '/api/sessions*');
       invalidateCache(schoolId, '/api/dashboard*');
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
+      return res.fail('A session with this name already exists for your school.');
+    }
+    next(err);
+  }
 };
 
 // ── GET /api/sessions ────────────────────────────────────────────────────────
@@ -442,7 +447,12 @@ exports.update = async (req, res, next) => {
       invalidateCache(schoolId, '/api/sessions*');
       invalidateCache(schoolId, '/api/dashboard*');
     });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
+      return res.fail('A session with this name already exists for your school.');
+    }
+    next(err);
+  }
 };
 
 // ── PATCH /api/sessions/:id/working-days ────────────────────────────────────
@@ -669,12 +679,11 @@ exports.getStats = async (req, res, next) => {
     // 3. Fee stats (total collected vs total target)
     const [[fees]] = await sequelize.query(`
       SELECT 
-        SUM(amount) as target,
-        SUM(paid_amount) as collected,
-        ROUND((SUM(paid_amount) / NULLIF(SUM(amount), 0) * 100), 2) as collection_pct
+        SUM(amount_due + late_fee_amount - concession_amount) as target,
+        SUM(amount_paid) as collected,
+        ROUND((SUM(amount_paid) / NULLIF(SUM(amount_due + late_fee_amount - concession_amount), 0) * 100), 2) as collection_pct
       FROM fee_invoices
       WHERE enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id)
-        AND is_deleted = false
     `, { replacements: { id } });
 
     res.ok({

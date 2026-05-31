@@ -109,7 +109,7 @@ exports.enroll = async (req, res, next) => {
     // Verify session status
     const sessionMeta = await getSessionMeta(session_id, req.user.school_id);
     if (!sessionMeta) return res.fail('Session not found.', [], 404);
-    if (['closed', 'archived'].includes(sessionMeta.status)) {
+    if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
       return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
     }
 
@@ -190,6 +190,12 @@ exports.promote = async (req, res, next) => {
 
     if (!session_id || !new_session_id || !class_id || !new_class_id || !new_section_id) {
       return res.fail('session_id, new_session_id, class_id, new_class_id and new_section_id are required.');
+    }
+
+    const targetSession = await getSessionMeta(new_session_id, req.user.school_id);
+    if (!targetSession) return res.fail('Target session not found.', [], 404);
+    if (['closed', 'archived', 'locked'].includes(targetSession.status) || targetSession.is_locked) {
+      return res.fail(`Cannot promote students: target session is ${targetSession.status}.`);
     }
 
     if (Number(session_id) === Number(new_session_id) && Number(class_id) === Number(new_class_id)) {
@@ -413,6 +419,10 @@ exports.processPromotions = async (req, res, next) => {
       return res.fail('Promotion context is invalid. Verify sessions and class.', [], 404);
     }
 
+    if (['closed', 'archived', 'locked'].includes(targetSession.status) || targetSession.is_locked) {
+      return res.fail(`Cannot process promotions: target session is ${targetSession.status}.`);
+    }
+
     const nextClass = await getNextClass(currentClass.order_number, schoolId);
     const today = targetSession.start_date || new Date().toISOString().split('T')[0];
 
@@ -614,11 +624,18 @@ exports.transfer = async (req, res, next) => {
     const today = new Date().toISOString().split('T')[0];
 
     const [[current]] = await sequelize.query(`
-      SELECT id, student_id, session_id, class_id, stream FROM enrollments
-      WHERE id = :enrollment_id AND status = 'active';
+      SELECT e.id, e.student_id, e.session_id, e.class_id, e.stream,
+             s.status AS session_status, s.is_locked AS session_locked
+      FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollment_id AND e.status = 'active';
     `, { replacements: { enrollment_id } });
 
     if (!current) return res.fail('Active enrollment not found.', [], 404);
+
+    if (['closed', 'archived', 'locked'].includes(current.session_status) || current.session_locked) {
+      return res.fail(`Cannot transfer student: session is ${current.session_status}.`);
+    }
 
     await sequelize.transaction(async (t) => {
       // Close current
