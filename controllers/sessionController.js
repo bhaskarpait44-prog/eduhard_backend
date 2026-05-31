@@ -83,21 +83,38 @@ exports.list = async (req, res, next) => {
   try {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 20;
+    const { search, status } = req.query;
     const offset = (page - 1) * limit;
+    const schoolId = req.user.school_id;
+
+    let whereClause = 'WHERE s.school_id = :schoolId';
+    const replacements = { schoolId, limit, offset };
+
+    if (search) {
+      whereClause += ' AND s.name ILIKE :search';
+      replacements.search = `%${search}%`;
+    }
+
+    if (status && status !== 'all') {
+      whereClause += ' AND s.status = :status';
+      replacements.status = status;
+    }
 
     const [sessions] = await sequelize.query(`
       SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
              wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
       FROM sessions s
       LEFT JOIN session_working_days wd ON wd.session_id = s.id
-      WHERE s.school_id = :schoolId
+      ${whereClause}
       ORDER BY s.start_date DESC
       LIMIT :limit OFFSET :offset;
-    `, { replacements: { schoolId: req.user.school_id, limit, offset } });
+    `, { replacements });
 
     const [[countRow]] = await sequelize.query(`
-      SELECT COUNT(*) as count FROM sessions WHERE school_id = :schoolId;
-    `, { replacements: { schoolId: req.user.school_id } });
+      SELECT COUNT(*) as count 
+      FROM sessions s 
+      ${whereClause};
+    `, { replacements });
 
     res.ok({
       sessions,
@@ -135,7 +152,7 @@ exports.getById = async (req, res, next) => {
     const { id } = req.params;
 
     const [[session]] = await sequelize.query(`
-      SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current,
+      SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
              wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
       FROM sessions s
       LEFT JOIN session_working_days wd ON wd.session_id = s.id
@@ -233,12 +250,17 @@ exports.addHoliday = async (req, res, next) => {
     const { id } = req.params;
     const { holiday_date, name, type } = req.body;
 
-    // 1. Fetch session date range for validation
+    // 1. Fetch session metadata for validation
     const [[session]] = await sequelize.query(`
-      SELECT start_date, end_date FROM sessions WHERE id = :id AND school_id = :schoolId;
+      SELECT start_date, end_date, status, is_locked 
+      FROM sessions WHERE id = :id AND school_id = :schoolId;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!session) return res.fail('Session not found.', [], 404);
+
+    if (session.is_locked || ['locked', 'closed', 'archived'].includes(session.status)) {
+      return res.fail(`Cannot add holiday: session is ${session.status}.`);
+    }
 
     const hDate = new Date(holiday_date);
     if (hDate < new Date(session.start_date) || hDate > new Date(session.end_date)) {
@@ -254,14 +276,14 @@ exports.addHoliday = async (req, res, next) => {
       return res.fail('A holiday already exists for this date in this session.');
     }
 
-    // 3. Check if attendance already marked — retroactive if so
-    const [[existingAttendance]] = await sequelize.query(`
-      SELECT COUNT(*) AS cnt FROM attendance a
-      JOIN enrollments e ON e.id = a.enrollment_id
-      WHERE e.session_id = :sessionId AND a.date = :date;
-    `, { replacements: { sessionId: id, date: holiday_date } });
-
     const result = await sequelize.transaction(async (t) => {
+      // 3. Check if attendance already marked — retroactive if so
+      const [[existingAttendance]] = await sequelize.query(`
+        SELECT COUNT(*) AS cnt FROM attendance a
+        JOIN enrollments e ON e.id = a.enrollment_id
+        WHERE e.session_id = :sessionId AND a.date = :date;
+      `, { replacements: { sessionId: id, date: holiday_date }, transaction: t });
+
       // Insert holiday record
       await sequelize.query(`
         INSERT INTO session_holidays (session_id, holiday_date, name, type, added_by, created_at)
@@ -270,8 +292,23 @@ exports.addHoliday = async (req, res, next) => {
 
       let retroResult = null;
       if (parseInt(existingAttendance.cnt, 10) > 0) {
-        retroResult = await retroactiveHoliday(parseInt(id), holiday_date, name, req.user.id);
+        retroResult = await retroactiveHoliday(parseInt(id), holiday_date, name, req.user.id, t);
       }
+
+      // Audit log
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, created_at)
+        VALUES
+          ('session_holidays', :id, 'holiday_added', 'none', :date,
+           :userId, :reason, NOW());
+      `, { replacements: {
+        id,
+        date: holiday_date,
+        userId: req.user.id,
+        reason: `Holiday "${name}" added to session`
+      }, transaction: t });
 
       return {
         holiday      : { session_id: id, holiday_date, name, type },
@@ -316,41 +353,46 @@ exports.lock = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
-    // First check current status
-    const [[current]] = await sequelize.query(`
-      SELECT status FROM sessions WHERE id = :id AND school_id = :schoolId;
-    `, { replacements: { id, schoolId } });
+    const result = await sequelize.transaction(async (t) => {
+      // First check current status
+      const [[current]] = await sequelize.query(`
+        SELECT id, status, name FROM sessions WHERE id = :id AND school_id = :schoolId;
+      `, { replacements: { id, schoolId }, transaction: t });
 
-    if (!current) return res.fail('Session not found.', [], 404);
-    if (current.status !== 'active') {
-      return res.fail(`Cannot lock a session that is ${current.status}. Only active sessions can be locked.`);
+      if (!current) return res.fail('Session not found.', [], 404);
+      if (current.status !== 'active') {
+        return res.fail(`Cannot lock a session that is ${current.status}. Only active sessions can be locked.`);
+      }
+
+      const [[session]] = await sequelize.query(`
+        UPDATE sessions SET is_locked = true, status = 'locked', is_current = false, updated_at = NOW()
+        WHERE id = :id AND school_id = :schoolId
+        RETURNING id, name, status, is_locked, is_current;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('sessions', :id, 'status', 'active', 'locked',
+           :userId, :reason, :ip, :device, NOW());
+      `, { replacements: {
+        id: session.id,
+        userId: req.user.id,
+        reason: `Session locked by admin`,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
+
+      return session;
+    });
+
+    if (result) {
+      res.ok(result, `Session "${result.name}" has been locked and is no longer current.`);
+      invalidateCache(schoolId, '/api/sessions*');
+      invalidateCache(schoolId, '/api/dashboard*');
     }
-
-    const [[session]] = await sequelize.query(`
-      UPDATE sessions SET is_locked = true, status = 'locked', updated_at = NOW()
-      WHERE id = :id AND school_id = :schoolId
-      RETURNING id, name, status, is_locked;
-    `, { replacements: { id, schoolId } });
-
-    if (!session) return res.fail('Session not found.', [], 404);
-
-    await sequelize.query(`
-      INSERT INTO audit_logs
-        (table_name, record_id, field_name, old_value, new_value,
-         changed_by, reason, ip_address, device_info, created_at)
-      VALUES
-        ('sessions', :id, 'status', 'active', 'locked',
-         :userId, :reason, :ip, :device, NOW());
-    `, { replacements: {
-      id: session.id,
-      userId: req.user.id,
-      reason: `Session locked by admin`,
-      ip: req.ip || null,
-      device: (req.headers['user-agent'] || '').slice(0, 299)
-    } });
-
-    res.ok(session, `Session "${session.name}" has been locked.`);
-    invalidateCache(schoolId, '/api/sessions*');
   } catch (err) { next(err); }
 };
 
@@ -443,7 +485,17 @@ exports.update = async (req, res, next) => {
         });
       }
 
-      res.ok(null, 'Session updated successfully.');
+      // 6. Fetch refreshed session data to return
+      const [[updated]] = await sequelize.query(`
+        SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
+               wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+        FROM sessions s
+        LEFT JOIN session_working_days wd ON wd.session_id = s.id
+        WHERE s.id = :id AND s.school_id = :schoolId
+        LIMIT 1;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      res.ok(updated, 'Session updated successfully.');
       invalidateCache(schoolId, '/api/sessions*');
       invalidateCache(schoolId, '/api/dashboard*');
     });
@@ -471,8 +523,8 @@ exports.updateWorkingDays = async (req, res, next) => {
       `, { replacements: { id, schoolId }, transaction: t });
 
       if (!session) return res.fail('Session not found.', [], 404);
-      if (session.is_locked || session.status === 'locked') {
-        return res.fail('Cannot update working days: session is locked.');
+      if (session.is_locked || ['locked', 'closed', 'archived'].includes(session.status)) {
+        return res.fail('Cannot update working days: session is locked or inactive.');
       }
 
       // 2. Update config
@@ -505,7 +557,17 @@ exports.updateWorkingDays = async (req, res, next) => {
            :userId, 'Working days updated mid-session', NOW());
       `, { replacements: { id, userId: req.user.id }, transaction: t });
 
-      res.ok(null, 'Working days updated. Note: Historical attendance is not automatically adjusted.');
+      // 4. Fetch refreshed session data
+      const [[updated]] = await sequelize.query(`
+        SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
+               wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+        FROM sessions s
+        LEFT JOIN session_working_days wd ON wd.session_id = s.id
+        WHERE s.id = :id AND s.school_id = :schoolId
+        LIMIT 1;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      res.ok(updated, 'Working days updated. Note: Historical attendance is not automatically adjusted.');
       invalidateCache(schoolId, '/api/sessions*');
       invalidateCache(schoolId, '/api/attendance*');
     });
@@ -529,8 +591,8 @@ exports.removeHoliday = async (req, res, next) => {
       `, { replacements: { holidayId, id, schoolId }, transaction: t });
 
       if (!holiday) return res.fail('Holiday not found.', [], 404);
-      if (holiday.is_locked || holiday.status === 'locked') {
-        return res.fail('Cannot delete holiday: session is locked.');
+      if (holiday.is_locked || ['locked', 'closed', 'archived'].includes(holiday.status)) {
+        return res.fail('Cannot modify holidays on a closed, archived or locked session.');
       }
 
       // 2. Delete holiday
@@ -584,13 +646,21 @@ exports.remove = async (req, res, next) => {
       if (!session) return res.fail('Session not found.', [], 404);
       if (session.is_current) return res.fail('Cannot delete the current active session.');
 
-      // Check for enrollments
-      const [[enrollment]] = await sequelize.query(`
-        SELECT id FROM enrollments WHERE session_id = :id LIMIT 1;
+      // Safety Guard: Check for any dependent data (Enrollments, Attendance, Exams)
+      // This prevents deleting sessions that contain historical student records.
+      const [[usage]] = await sequelize.query(`
+        SELECT 
+          (SELECT COUNT(*) FROM enrollments WHERE session_id = :id) AS enrollment_count,
+          (SELECT COUNT(*) FROM attendance WHERE enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id)) AS attendance_count,
+          (SELECT COUNT(*) FROM exams WHERE session_id = :id) AS exam_count
       `, { replacements: { id }, transaction: t });
 
-      if (enrollment) {
-        return res.fail('Cannot delete session: it has active enrollments. Try archiving it instead.');
+      if (parseInt(usage.enrollment_count) > 0 || parseInt(usage.attendance_count) > 0 || parseInt(usage.exam_count) > 0) {
+        return res.fail(
+          `Cannot delete session: it contains ${usage.enrollment_count} enrollment(s), ` +
+          `${usage.attendance_count} attendance record(s), and ${usage.exam_count} exam(s). ` +
+          `Try archiving it instead to preserve historical data.`
+        );
       }
 
       await sequelize.query(`
@@ -647,7 +717,17 @@ exports.archive = async (req, res, next) => {
            :userId, 'Session archived by admin', NOW());
       `, { replacements: { id, userId: req.user.id }, transaction: t });
 
-      res.ok(null, 'Session archived successfully.');
+      // 4. Fetch refreshed session data
+      const [[updated]] = await sequelize.query(`
+        SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
+               wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+        FROM sessions s
+        LEFT JOIN session_working_days wd ON wd.session_id = s.id
+        WHERE s.id = :id AND s.school_id = :schoolId
+        LIMIT 1;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      res.ok(updated, 'Session archived successfully.');
       invalidateCache(schoolId, '/api/sessions*');
     });
   } catch (err) { next(err); }
@@ -658,6 +738,13 @@ exports.getStats = async (req, res, next) => {
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
+
+    // 0. Ownership Guard: Verify session belongs to this school
+    const [[session]] = await sequelize.query(`
+      SELECT id FROM sessions WHERE id = :id AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!session) return res.fail('Session not found or unauthorized access.', [], 404);
 
     // 1. Basic counts
     const [[counts]] = await sequelize.query(`

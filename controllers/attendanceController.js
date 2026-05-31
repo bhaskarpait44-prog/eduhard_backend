@@ -25,7 +25,7 @@ async function getCurrentSessionForSchool(schoolId) {
   return session || null;
 }
 
-async function resolveSessionId({ requestedSessionId, schoolId }) {
+async function resolveSessionId({ requestedSessionId, schoolId, allowLocked = false }) {
   let sessionId = null;
   if (requestedSessionId != null) {
     const [[session]] = await sequelize.query(`
@@ -36,13 +36,17 @@ async function resolveSessionId({ requestedSessionId, schoolId }) {
       LIMIT 1;
     `, { replacements: { sessionId: requestedSessionId, schoolId } });
     if (session) {
-      if (session.is_locked) throw new Error('Session is locked. Cannot mark attendance.');
+      if (session.is_locked && !allowLocked) {
+        throw new Error('Session is locked. Cannot mark attendance.');
+      }
       sessionId = session.id;
     }
   } else {
     const session = await getCurrentSessionForSchool(schoolId);
     if (session) {
-      if (session.is_locked) throw new Error('Current session is locked. Cannot mark attendance.');
+      if (session.is_locked && !allowLocked) {
+        throw new Error('Current session is locked. Cannot mark attendance.');
+      }
       sessionId = session.id;
     }
   }
@@ -169,6 +173,7 @@ exports.getClassAttendance = async (req, res, next) => {
     const sessionId = await resolveSessionId({
       requestedSessionId: parsedSessionId,
       schoolId: req.user.school_id,
+      allowLocked: true,
     });
 
     if (sessionId == null) {
@@ -262,6 +267,7 @@ exports.getClassRegister = async (req, res, next) => {
     const sessionId = await resolveSessionId({
       requestedSessionId: parsedSessionId,
       schoolId: req.user.school_id,
+      allowLocked: true,
     });
 
     if (sessionId == null) {

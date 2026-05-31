@@ -36,25 +36,27 @@ const toNumber = (value) => {
   return Number.isFinite(numeric) ? numeric : 0;
 };
 
-async function resolveSessionId(requestedSessionId, schoolId) {
+async function resolveSessionId(requestedSessionId, schoolId, allowLocked = false) {
+  let session = null;
   if (requestedSessionId) {
-    const session = await Session.findOne({
+    session = await Session.findOne({
       where: { id: requestedSessionId, school_id: schoolId },
-      attributes: ['id', 'name', 'start_date', 'end_date', 'is_current']
+      attributes: ['id', 'name', 'start_date', 'end_date', 'is_current', 'is_locked']
     });
-    if (session) return session;
   }
 
-  const currentSession = await Session.findOne({
-    where: { school_id: schoolId },
-    attributes: ['id', 'name', 'start_date', 'end_date', 'is_current'],
-    order: [
-      [sequelize.literal('CASE WHEN is_current = true THEN 0 ELSE 1 END'), 'ASC'],
-      ['start_date', 'DESC']
-    ]
-  });
+  if (!session) {
+    session = await Session.findOne({
+      where: { school_id: schoolId, is_current: true },
+      attributes: ['id', 'name', 'start_date', 'end_date', 'is_current', 'is_locked']
+    });
+  }
 
-  return currentSession || null;
+  if (session && session.is_locked && !allowLocked) {
+    throw new Error('Session is locked. Cannot perform financial writes.');
+  }
+
+  return session || null;
 }
 
 function buildReceiptNo(paymentId, paymentDate = new Date()) {
@@ -305,7 +307,7 @@ exports.getDashboard = feeController.getDashboard;
 
 exports.getTodayStats = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [[today]] = await sequelize.query(`
@@ -416,7 +418,7 @@ exports.getTodayStats = async (req, res, next) => {
 
 exports.getRecentTransactions = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [transactions] = await sequelize.query(`
@@ -449,7 +451,7 @@ exports.getRecentTransactions = async (req, res, next) => {
 
 exports.getPendingTasks = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [[dueToday]] = await sequelize.query(`
@@ -510,7 +512,7 @@ exports.getPendingTasks = async (req, res, next) => {
 
 exports.getWeekTrend = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [rows] = await sequelize.query(`
@@ -538,7 +540,7 @@ exports.getWeekTrend = async (req, res, next) => {
 
 exports.searchStudents = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const q = String(req.query.q || '').trim();
@@ -584,7 +586,7 @@ exports.searchStudents = async (req, res, next) => {
 
 exports.getStudentPendingInvoices = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const payload = await getStudentFinanceSummary(req.params.id, session.id, req.user.school_id);
@@ -789,7 +791,7 @@ exports.getReceiptPdf = async (req, res, next) => {
 
 exports.getStudents = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const {
@@ -915,7 +917,7 @@ exports.getStudents = async (req, res, next) => {
 
 exports.getStudentFees = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
     const payload = await getStudentFinanceSummary(req.params.id, session.id, req.user.school_id);
     if (!payload) return res.fail('Student fee record not found.', [], 404);
@@ -927,7 +929,7 @@ exports.getStudentInvoices = async (req, res, next) => exports.getStudentFees(re
 
 exports.getStudentPayments = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
     const payload = await getStudentFinanceSummary(req.params.id, session.id, req.user.school_id);
     if (!payload) return res.fail('Student fee record not found.', [], 404);
@@ -937,7 +939,7 @@ exports.getStudentPayments = async (req, res, next) => {
 
 exports.getStudentStatementPdf = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
     const payload = await getStudentFinanceSummary(req.params.id, session.id, req.user.school_id);
     if (!payload) return res.fail('Student fee record not found.', [], 404);
@@ -1028,7 +1030,7 @@ exports.getOverdueInvoices = async (req, res, next) => {
 
 exports.getDueTodayInvoices = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [invoices] = await sequelize.query(`
@@ -1208,7 +1210,7 @@ exports.createNotice = async (req, res, next) => {
 
 exports.getConcessions = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
 
     const [rows] = await sequelize.query(`
@@ -1399,7 +1401,7 @@ exports.buildCustomReport = async (req, res, next) => {
 
 exports.getCarryForwardEligible = async (req, res, next) => {
   try {
-    const session = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!session) return res.fail('No active session found.', [], 404);
     const [students] = await sequelize.query(`
       SELECT

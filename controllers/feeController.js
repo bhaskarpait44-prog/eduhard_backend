@@ -94,7 +94,7 @@ async function syncStructureInvoicesForClass({ structure, transaction }) {
   return { created, skipped };
 }
 
-async function resolveSessionId(requestedSessionId, schoolId) {
+async function resolveSessionId(requestedSessionId, schoolId, allowLocked = false) {
   let session = null;
   if (requestedSessionId) {
     const [[selectedSession]] = await sequelize.query(`
@@ -121,7 +121,7 @@ async function resolveSessionId(requestedSessionId, schoolId) {
     session = currentSession;
   }
 
-  if (session && session.is_locked) {
+  if (session && session.is_locked && !allowLocked) {
     throw new Error('Session is locked. Cannot modify fee records.');
   }
 
@@ -711,7 +711,7 @@ exports.getReport = async (req, res, next) => {
 
 exports.getDashboard = async (req, res, next) => {
   try {
-    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!sessionId) return res.fail('No active session found.', [], 404);
 
     const [[summary]] = await sequelize.query(`
@@ -811,7 +811,7 @@ exports.getDashboard = async (req, res, next) => {
 
 exports.getInvoices = async (req, res, next) => {
   try {
-    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!sessionId) return res.fail('No active session found.', [], 404);
 
     const {
@@ -900,7 +900,7 @@ exports.getInvoices = async (req, res, next) => {
 
 exports.getReceipts = async (req, res, next) => {
   try {
-    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!sessionId) return res.fail('No active session found.', [], 404);
 
     const {
@@ -1000,7 +1000,7 @@ exports.getReceipts = async (req, res, next) => {
 
 exports.getDefaulters = async (req, res, next) => {
   try {
-    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id, true);
     if (!sessionId) return res.fail('No active session found.', [], 404);
 
     const {
@@ -1056,7 +1056,7 @@ exports.getDefaulters = async (req, res, next) => {
 exports.downloadDefaultersPdf = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const sessionId = await resolveSessionId(req.query.session_id, schoolId);
+    const sessionId = await resolveSessionId(req.query.session_id, schoolId, true);
     const { class_id } = req.query;
 
     const school = await sequelize.query(`SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`, {

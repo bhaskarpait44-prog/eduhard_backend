@@ -74,6 +74,7 @@ const DAY_COLUMN_MAP = {
  * @param {number} sessionId
  * @param {string} fromDate   'YYYY-MM-DD'
  * @param {string} toDate     'YYYY-MM-DD'
+ * @param {object} t          Optional sequelize transaction
  *
  * @returns {{
  *   workingDays   : number,
@@ -83,14 +84,14 @@ const DAY_COLUMN_MAP = {
  *   holidays      : Array<{ date: string, name: string }>
  * }}
  */
-async function getWorkingDays(sessionId, fromDate, toDate) {
+async function getWorkingDays(sessionId, fromDate, toDate, t = null) {
   // ── Fetch working day config for this session ────────────────────────────
   const [[workingDaysRow]] = await sequelize.query(`
     SELECT monday, tuesday, wednesday, thursday, friday, saturday, sunday
     FROM session_working_days
     WHERE session_id = :sessionId
     LIMIT 1;
-  `, { replacements: { sessionId } });
+  `, { replacements: { sessionId }, transaction: t });
 
   if (!workingDaysRow) {
     throw new Error(`No working_days config found for session_id=${sessionId}.`);
@@ -104,7 +105,7 @@ async function getWorkingDays(sessionId, fromDate, toDate) {
       AND holiday_date >= :fromDate
       AND holiday_date <= :toDate
     ORDER BY holiday_date ASC;
-  `, { replacements: { sessionId, fromDate, toDate } });
+  `, { replacements: { sessionId, fromDate, toDate }, transaction: t });
 
   const holidaySet = new Set(holidayRows.map(h => h.holiday_date));
 
@@ -164,6 +165,7 @@ async function getWorkingDays(sessionId, fromDate, toDate) {
  *   percentage = (present + late + half_day×0.5) / workingDays × 100
  *
  * @param {number} enrollmentId
+ * @param {object} t            Optional sequelize transaction
  * @returns {{
  *   enrollmentId    : number,
  *   studentId       : number,
@@ -180,7 +182,7 @@ async function getWorkingDays(sessionId, fromDate, toDate) {
  *   grade           : string,
  * }}
  */
-async function getAttendancePercent(enrollmentId) {
+async function getAttendancePercent(enrollmentId, t = null) {
   // ── Fetch enrollment + session info ─────────────────────────────────────
   const [[enrollment]] = await sequelize.query(`
     SELECT
@@ -193,7 +195,7 @@ async function getAttendancePercent(enrollmentId) {
     FROM enrollments e
     JOIN sessions    s ON s.id = e.session_id
     WHERE e.id = :enrollmentId;
-  `, { replacements: { enrollmentId } });
+  `, { replacements: { enrollmentId }, transaction: t });
 
   if (!enrollment) {
     throw new Error(`Enrollment id=${enrollmentId} not found.`);
@@ -209,7 +211,8 @@ async function getAttendancePercent(enrollmentId) {
   const { workingDays, workingDates } = await getWorkingDays(
     enrollment.session_id,
     fromDate,
-    calcUpTo
+    calcUpTo,
+    t
   );
 
   if (workingDays === 0) {
@@ -239,7 +242,7 @@ async function getAttendancePercent(enrollmentId) {
       AND date <= :calcUpTo
       AND status != 'holiday'
     GROUP BY status;
-  `, { replacements: { enrollmentId, fromDate, calcUpTo } });
+  `, { replacements: { enrollmentId, fromDate, calcUpTo }, transaction: t });
 
   // Build status count map
   const counts = { present: 0, late: 0, half_day: 0, absent: 0 };
@@ -304,6 +307,7 @@ async function getAttendancePercent(enrollmentId) {
  * @param {string} holidayDate  'YYYY-MM-DD'
  * @param {string} holidayName  for the override_reason message
  * @param {number} declaredBy   user id who declared the holiday
+ * @param {object} t            Optional sequelize transaction
  *
  * @returns {{
  *   date             : string,
@@ -311,9 +315,8 @@ async function getAttendancePercent(enrollmentId) {
  *   affectedStudents : Array<{ enrollmentId, studentId, oldStatus, newPercentage }>
  * }}
  */
-async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredBy) {
-  return sequelize.transaction(async (t) => {
-
+async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredBy, t = null) {
+  const execute = async (transaction) => {
     // ── Step 1: Find all enrollment ids active in this session ───────────
     const [enrollmentRows] = await sequelize.query(`
       SELECT e.id AS enrollment_id, e.student_id
@@ -321,7 +324,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       WHERE e.session_id = :sessionId
         AND e.status     = 'active'
         AND e.joined_date <= :holidayDate;
-    `, { replacements: { sessionId, holidayDate }, transaction: t });
+    `, { replacements: { sessionId, holidayDate }, transaction });
 
     if (enrollmentRows.length === 0) {
       return { date: holidayDate, affectedCount: 0, affectedStudents: [] };
@@ -336,7 +339,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       WHERE date          = :holidayDate
         AND enrollment_id IN (:enrollmentIds)
         AND status        != 'holiday';
-    `, { replacements: { holidayDate, enrollmentIds }, transaction: t });
+    `, { replacements: { holidayDate, enrollmentIds }, transaction });
 
     const overrideReason =
       `Retroactive holiday declared: "${holidayName}" on ${holidayDate}. ` +
@@ -354,7 +357,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
           marked_at       = NOW(),
           updated_at      = NOW()
         WHERE id IN (:affectedIds);
-      `, { replacements: { overrideReason, declaredBy, affectedIds }, transaction: t });
+      `, { replacements: { overrideReason, declaredBy, affectedIds }, transaction });
     }
 
     // ── Step 4: Insert holiday records for students with NO record yet ─────
@@ -376,24 +379,82 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
         updated_at      : new Date(),
       }));
 
-      await sequelize.getQueryInterface().bulkInsert('attendance', insertRows, { transaction: t });
+      await sequelize.getQueryInterface().bulkInsert('attendance', insertRows, { transaction });
     }
 
-    // ── Step 5: Recalculate percentages for all affected enrollments ──────
-    const affectedStudents = [];
+    // ── Step 5: Recalculate percentages for all affected enrollments in BATCH ─
+    // 5a. Group unique joined_dates to minimize working days calculations
+    const uniqueJoinedDates = [...new Set(enrollmentRows.map(e => e.joined_date))];
+    const workingDaysMap = new Map();
+    
+    // Get session metadata for end_date
+    const [[sessionInfo]] = await sequelize.query(`
+      SELECT end_date FROM sessions WHERE id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId }, transaction });
+    
+    const today = new Date().toISOString().split('T')[0];
+    const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
 
-    for (const row of enrollmentRows) {
+    for (const jDate of uniqueJoinedDates) {
+      const wdInfo = await getWorkingDays(sessionId, jDate, calcUpTo, transaction);
+      workingDaysMap.set(jDate, wdInfo.workingDays);
+    }
+
+    // 5b. Fetch status counts for all affected students in a single query
+    const [allStatusCounts] = await sequelize.query(`
+      SELECT a.enrollment_id, a.status, COUNT(*) AS count
+      FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      WHERE a.enrollment_id IN (:enrollmentIds)
+        AND a.date >= e.joined_date
+        AND a.date <= :calcUpTo
+        AND a.status != 'holiday'
+      GROUP BY a.enrollment_id, a.status;
+    `, { replacements: { enrollmentIds, calcUpTo }, transaction });
+
+    // 5c. Pivot counts for easy lookup { enrollment_id -> { status: count } }
+    const countLookup = new Map();
+    allStatusCounts.forEach(r => {
+      if (!countLookup.has(r.enrollment_id)) {
+        countLookup.set(r.enrollment_id, { present: 0, late: 0, half_day: 0, absent: 0 });
+      }
+      const counts = countLookup.get(r.enrollment_id);
+      if (counts.hasOwnProperty(r.status)) {
+        counts[r.status] = parseInt(r.count, 10);
+      }
+    });
+
+    // 5d. Perform in-memory calculation for each enrollment
+    const affectedStudents = enrollmentRows.map(row => {
       const oldRecord = existingRecords.find(r => r.enrollment_id === row.enrollment_id);
-      const newStats  = await getAttendancePercent(row.enrollment_id);
+      const workingDays = workingDaysMap.get(row.joined_date);
+      const counts = countLookup.get(row.enrollment_id) || { present: 0, late: 0, half_day: 0, absent: 0 };
 
-      affectedStudents.push({
+      let percentage = 0;
+      let grade = 'N/A';
+
+      if (workingDays > 0) {
+        const effectivePresent =
+          counts.present  * 1.0 +
+          counts.late     * 1.0 +
+          counts.half_day * 0.5;
+
+        percentage = parseFloat(((effectivePresent / workingDays) * 100).toFixed(2));
+        grade =
+          percentage >= 90 ? 'A' :
+          percentage >= 75 ? 'B' :
+          percentage >= 60 ? 'C' :
+          percentage >= 50 ? 'D' : 'F';
+      }
+
+      return {
         enrollmentId   : row.enrollment_id,
         studentId      : row.student_id,
         oldStatus      : oldRecord ? oldRecord.status : 'no_record',
-        newPercentage  : newStats.percentage,
-        newGrade       : newStats.grade,
-      });
-    }
+        newPercentage  : percentage,
+        newGrade       : grade,
+      };
+    });
 
     return {
       date             : holidayDate,
@@ -402,7 +463,13 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       recordsInserted  : unmarkedEnrollments.length,
       affectedStudents,
     };
-  });
+  };
+
+  if (t) {
+    return execute(t);
+  } else {
+    return sequelize.transaction(execute);
+  }
 }
 
 
