@@ -548,6 +548,18 @@ exports.getByEnrollment = async (req, res, next) => {
     const { from, to } = req.query;
     const schoolId = req.user.school_id;
 
+    // 1. Verify ownership first
+    const [[enrollmentCheck]] = await sequelize.query(`
+      SELECT e.id FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.id = :eid AND s.school_id = :schoolId
+    `, { replacements: { eid: enrollment_id, schoolId } });
+
+    if (!enrollmentCheck) {
+      return res.fail('Enrollment not found or access denied.', [], 404);
+    }
+
+    // 2. Build filter and fetch records
     let dateFilter = '';
     const replacements = { eid: enrollment_id, schoolId };
 
@@ -567,16 +579,6 @@ exports.getByEnrollment = async (req, res, next) => {
         ${dateFilter}
       ORDER BY a.date DESC;
     `, { replacements });
-
-    const [[enrollmentCheck]] = await sequelize.query(`
-      SELECT e.id FROM enrollments e
-      JOIN students s ON s.id = e.student_id
-      WHERE e.id = :eid AND s.school_id = :schoolId
-    `, { replacements: { eid: enrollment_id, schoolId } });
-
-    if (!enrollmentCheck) {
-      return res.fail('Enrollment not found or access denied.', [], 404);
-    }
 
     const stats = await getAttendancePercent(parseInt(enrollment_id));
 
@@ -900,7 +902,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-      doc.text('P: Present  A: Absent  L: Leave  HD: Half Day', 40, doc.page.height - 25, { lineBreak: false });
+      doc.text('P: Present  A: Absent  L: Late  HD: Half Day', 40, doc.page.height - 25, { lineBreak: false });
       doc.text(`Page ${i + 1} of ${range.count}`, 450, doc.page.height - 25, { align: 'right', width: 100, lineBreak: false });
     }
 
@@ -1013,11 +1015,11 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     const months = {};
     records.forEach(r => {
       const m = new Date(r.date).toLocaleString('default', { month: 'long', year: 'numeric' });
-      if (!months[m]) months[m] = { present: 0, absent: 0, leave: 0, half_day: 0, working: 0 };
+      if (!months[m]) months[m] = { present: 0, absent: 0, late: 0, half_day: 0, working: 0 };
       if (r.status !== 'holiday') months[m].working++;
-      if (r.status === 'present' || r.status === 'late') months[m].present++;
+      if (r.status === 'present') months[m].present++;
+      else if (r.status === 'late') months[m].late++;
       else if (r.status === 'absent') months[m].absent++;
-      else if (r.status === 'leave') months[m].leave++;
       else if (r.status === 'half_day') months[m].half_day++;
     });
 
@@ -1035,14 +1037,14 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       if (i % 2 === 1) doc.fillColor('#f8fafc').rect(40, rowY, 515, 20).fill();
       doc.fillColor('#1e293b').font('Helvetica').fontSize(9);
       
-      const effective = data.present + (data.half_day * 0.5);
+      const effective = data.present + data.late + (data.half_day * 0.5);
       const mPct = data.working > 0 ? ((effective / data.working) * 100).toFixed(1) : '0.0';
       
       let rx = 40;
       doc.text(name, rx + 5, rowY + 6); rx += mCols[0];
       doc.text(data.present, rx + 5, rowY + 6, { width: mCols[1] - 10, align: 'right' }); rx += mCols[1];
       doc.text(data.absent, rx + 5, rowY + 6, { width: mCols[2] - 10, align: 'right' }); rx += mCols[2];
-      doc.text(data.leave, rx + 5, rowY + 6, { width: mCols[3] - 10, align: 'right' }); rx += mCols[3];
+      doc.text(data.late, rx + 5, rowY + 6, { width: mCols[3] - 10, align: 'right' }); rx += mCols[3];
       doc.text(data.half_day, rx + 5, rowY + 6, { width: mCols[4] - 10, align: 'right' }); rx += mCols[4];
       doc.text(data.working, rx + 5, rowY + 6, { width: mCols[5] - 10, align: 'right' }); rx += mCols[5];
       doc.font('Helvetica-Bold').text(`${mPct}%`, rx + 5, rowY + 6, { width: mCols[6] - 10, align: 'right' });
@@ -1107,7 +1109,7 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-      doc.text('Present: Green  Absent: Red  Late: Amber  Half Day: Blue', 40, doc.page.height - 25, { lineBreak: false });
+      doc.text('P: Present  A: Absent  L: Late  HD: Half Day', 40, doc.page.height - 25, { lineBreak: false });
       doc.text(`Page ${i + 1} of ${range.count}`, 450, doc.page.height - 25, { align: 'right', width: 100, lineBreak: false });
     }
 
