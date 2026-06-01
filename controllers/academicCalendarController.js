@@ -240,9 +240,9 @@ exports.update = async (req, res) => {
     const userId = req.user.id;
     const updates = req.body;
 
-    // Check ownership
+    // Check ownership and get existing dates
     const [[existing]] = await sequelize.query(
-      `SELECT id FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      `SELECT id, start_date, end_date FROM academic_events WHERE id = :id AND school_id = :schoolId`,
       { replacements: { id, schoolId } }
     );
 
@@ -250,7 +250,10 @@ exports.update = async (req, res) => {
       return res.fail('Event not found or access denied', [], 404);
     }
 
-    if (updates.start_date && updates.end_date && new Date(updates.end_date) < new Date(updates.start_date)) {
+    const startDate = updates.start_date || existing.start_date;
+    const endDate = updates.end_date || existing.end_date;
+
+    if (new Date(endDate) < new Date(startDate)) {
       return res.fail('End date cannot be before start date');
     }
 
@@ -305,9 +308,13 @@ exports.destroy = async (req, res) => {
     const schoolId = req.user.school_id;
 
     const [result] = await sequelize.query(
-      `DELETE FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      `DELETE FROM academic_events WHERE id = :id AND school_id = :schoolId RETURNING id`,
       { replacements: { id, schoolId } }
     );
+
+    if (result.length === 0) {
+      return res.fail('Event not found or access denied', [], 404);
+    }
 
     invalidateCache(schoolId, '/api/academic-calendar*');
     res.ok(null, 'Event deleted successfully');
@@ -324,6 +331,7 @@ exports.togglePublish = async (req, res) => {
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
+    const userId = req.user.id;
 
     const [[existing]] = await sequelize.query(
       `SELECT is_published, notify_on_publish FROM academic_events WHERE id = :id AND school_id = :schoolId`,
@@ -337,8 +345,8 @@ exports.togglePublish = async (req, res) => {
     const newPublished = !existing.is_published;
 
     await sequelize.query(
-      `UPDATE academic_events SET is_published = :newPublished, updated_at = NOW() WHERE id = :id`,
-      { replacements: { id, newPublished } }
+      `UPDATE academic_events SET is_published = :newPublished, updated_by = :userId, updated_at = NOW() WHERE id = :id`,
+      { replacements: { id, newPublished, userId } }
     );
 
     const [[event]] = await sequelize.query(`
