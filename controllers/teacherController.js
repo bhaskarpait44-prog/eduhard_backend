@@ -214,11 +214,10 @@ async function syncExamStatus(examId, transaction = null) {
 
   const [[subjectRow]] = await sequelize.query(`
     SELECT COUNT(*) AS cnt
-    FROM subjects
-    WHERE class_id = :classId
-      AND is_deleted = false;
+    FROM exam_subjects
+    WHERE exam_id = :examId;
   `, {
-    replacements: { classId: examMeta.class_id },
+    replacements: { examId },
     transaction,
   });
 

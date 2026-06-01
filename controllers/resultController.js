@@ -50,11 +50,10 @@ async function syncExamStatus(examId, transaction) {
 
   const [[subjectRow]] = await sequelize.query(`
     SELECT COUNT(*) AS cnt
-    FROM subjects
-    WHERE class_id = :classId
-      AND is_deleted = false;
+    FROM exam_subjects
+    WHERE exam_id = :examId;
   `, {
-    replacements: { classId: examMeta.class_id },
+    replacements: { examId },
     transaction,
   });
 
@@ -174,6 +173,19 @@ const { getPendingBalance } = require('../utils/feeManager');
 exports.getResults = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // 0. Verify Enrollment belongs to school
+    const [[enrollmentCheck]] = await sequelize.query(`
+      SELECT e.id FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollment_id AND s.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { enrollment_id, schoolId } });
+
+    if (!enrollmentCheck) {
+      return res.fail('Enrollment not found or access denied.', [], 404);
+    }
 
     // 1. Fetch Subject Wise Results
     const [subjectResults] = await sequelize.query(`
@@ -229,17 +241,19 @@ exports.getResults = async (req, res, next) => {
 exports.getReportCardData = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
+    const schoolId = req.user.school_id;
 
     // 0. Fetch Final Result
     const [[finalResult]] = await sequelize.query(`
-      SELECT release_result, total_marks, marks_obtained, percentage, grade, result, grace_marks_info
-      FROM student_results
-      WHERE enrollment_id = :enrollment_id
+      SELECT sr.release_result, sr.total_marks, sr.marks_obtained, sr.percentage, sr.grade, sr.result, sr.grace_marks_info
+      FROM student_results sr
+      JOIN sessions sess ON sess.id = sr.session_id
+      WHERE sr.enrollment_id = :enrollment_id AND sess.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { enrollment_id } });
+    `, { replacements: { enrollment_id, schoolId } });
 
     if (!finalResult) {
-      return res.fail('Result not yet calculated for this student.', [], 400);
+      return res.fail('Result not yet calculated for this student or access denied.', [], 400);
     }
 
     // 1. Fetch Enrollment, Student, School, Session
@@ -259,9 +273,9 @@ exports.getReportCardData = async (req, res, next) => {
       LEFT JOIN sections sec ON sec.id = e.section_id
       JOIN sessions sess ON sess.id = e.session_id
       JOIN schools sch ON sch.id = s.school_id
-      WHERE e.id = :enrollment_id
+      WHERE e.id = :enrollment_id AND sess.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { enrollment_id } });
+    `, { replacements: { enrollment_id, schoolId } });
 
     if (!data) return res.fail('Enrollment not found.', [], 404);
 
@@ -330,17 +344,19 @@ exports.getReportCardData = async (req, res, next) => {
 exports.getReportCard = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
+    const schoolId = req.user.school_id;
 
     // 0. Fetch Final Result (checks both existence and release flag)
     const [[finalResult]] = await sequelize.query(`
-      SELECT release_result, total_marks, marks_obtained, percentage, grade, result, grace_marks_info
-      FROM student_results
-      WHERE enrollment_id = :enrollment_id
+      SELECT sr.release_result, sr.total_marks, sr.marks_obtained, sr.percentage, sr.grade, sr.result, sr.grace_marks_info
+      FROM student_results sr
+      JOIN sessions sess ON sess.id = sr.session_id
+      WHERE sr.enrollment_id = :enrollment_id AND sess.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { enrollment_id } });
+    `, { replacements: { enrollment_id, schoolId } });
 
     if (!finalResult) {
-      return res.fail('Result not yet calculated for this student.', [], 400);
+      return res.fail('Result not yet calculated for this student or access denied.', [], 400);
     }
 
     // 0a. Fee Check
@@ -364,9 +380,9 @@ exports.getReportCard = async (req, res, next) => {
       LEFT JOIN sections sec ON sec.id = e.section_id
       JOIN sessions sess ON sess.id = e.session_id
       JOIN schools sch ON sch.id = sess.school_id
-      WHERE e.id = :enrollment_id
+      WHERE e.id = :enrollment_id AND sess.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { enrollment_id } });
+    `, { replacements: { enrollment_id, schoolId } });
 
     if (!data) return res.fail('Enrollment not found.', [], 404);
 
@@ -413,9 +429,19 @@ exports.getReportCard = async (req, res, next) => {
 exports.getClassResults = async (req, res, next) => {
   try {
     const { session_id, class_id } = req.query;
+    const schoolId = req.user.school_id;
 
     if (!session_id || !class_id) {
       return res.fail('session_id and class_id are required.');
+    }
+
+    // Verify session belongs to school
+    const [[sessionCheck]] = await sequelize.query(`
+      SELECT id FROM sessions WHERE id = :session_id AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { session_id, schoolId } });
+
+    if (!sessionCheck) {
+      return res.fail('Session not found or access denied.', [], 404);
     }
 
     const [results] = await sequelize.query(`
@@ -516,16 +542,28 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     `, { replacements: { session_id, class_id } });
 
     const [marks] = await sequelize.query(`
-      SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent
+      SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent, e.weightage
       FROM exam_results er
       JOIN exams e ON e.id = er.exam_id
-      WHERE e.session_id = :session_id AND e.class_id = :class_id;
+      WHERE e.session_id = :session_id 
+        AND e.class_id = :class_id
+        AND e.exam_type != 'compartment'
+        AND e.status = 'completed';
     `, { replacements: { session_id, class_id } });
 
     const markMap = {};
     marks.forEach(m => {
       if (!markMap[m.enrollment_id]) markMap[m.enrollment_id] = {};
-      markMap[m.enrollment_id][m.subject_id] = m.is_absent ? 'ABS' : parseFloat(m.marks_obtained).toFixed(1);
+      if (markMap[m.enrollment_id][m.subject_id] === undefined) {
+        markMap[m.enrollment_id][m.subject_id] = 0;
+      }
+      
+      const weight = parseFloat(m.weightage || 100) / 100;
+      const obtained = m.is_absent ? 0 : parseFloat(m.marks_obtained || 0);
+      
+      // If student is ABS in any contributing exam, should we mark as ABS?
+      // For consolidated sheet, showing weighted marks is more accurate.
+      markMap[m.enrollment_id][m.subject_id] += (obtained * weight);
     });
 
     const PDFDocument = require('pdfkit');
@@ -797,7 +835,7 @@ exports.release = async (req, res, next) => {
 
 exports.override = async (req, res, next) => {
   try {
-    const { enrollment_id, new_result, reason } = req.body;
+    const { enrollment_id, new_result, reason, compartment_subjects } = req.body;
 
     const [[enrollment]] = await sequelize.query(`
       SELECT e.id, s.status AS session_status, s.is_locked AS session_locked
@@ -811,7 +849,7 @@ exports.override = async (req, res, next) => {
       return res.fail(`Cannot override result: session is ${enrollment.session_status}.`);
     }
 
-    const result = await examEngine.overrideResult(enrollment_id, new_result, reason, req.user.id);
+    const result = await examEngine.overrideResult(enrollment_id, new_result, reason, req.user.id, compartment_subjects);
 
     await writeAuditLog(sequelize, {
       tableName: 'student_results',

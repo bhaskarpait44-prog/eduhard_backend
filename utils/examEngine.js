@@ -167,30 +167,31 @@ async function calculateResult(enrollmentId, sessionId) {
     const weight = parseFloat(row.weightage || 100) / 100;
     
     if (!subjectMap[key]) {
+      const passingMarks = parseFloat(row.subject_passing);
+      const totalMarks = parseFloat(row.subject_total);
       subjectMap[key] = {
         subject_id      : row.subject_id,
         subject_name    : row.subject_name,
         is_core         : row.is_core,
         total_marks     : 0,
-        passing_marks   : parseFloat(row.subject_passing), // This needs to be weighted if aggregated
+        weighted_passing: 0,
         obtained        : 0,
         is_absent       : false,
         max_possible    : 0,
+        base_passing    : passingMarks,
+        base_total      : totalMarks,
       };
     }
     
     // Weighted aggregation
     const rowMax = parseFloat(row.subject_total);
     const rowObtained = row.is_absent ? 0 : parseFloat(row.marks_obtained || 0);
+    const weight = parseFloat(row.weightage || 100) / 100;
     
-    subjectMap[key].max_possible += rowMax * weight;
-    subjectMap[key].obtained     += rowObtained * weight;
-    
-    // We assume passing_marks is defined per exam, but for final result we need a threshold.
-    // If multiple exams, we could sum weighted passing marks or use a percentage.
-    // Standard approach: if overall % < 40% (or whatever is in grading scale), fail.
-    // But since we have core subject rules, we'll use aggregated weighted passing marks.
-    subjectMap[key].total_marks  += rowMax; // Non-weighted total for reporting
+    subjectMap[key].max_possible    += rowMax * weight;
+    subjectMap[key].obtained        += rowObtained * weight;
+    subjectMap[key].weighted_passing += parseFloat(row.subject_passing) * weight;
+    subjectMap[key].total_marks     += rowMax; // Non-weighted total for reporting
     
     if (row.is_absent) subjectMap[key].is_absent = true;
   }
@@ -204,10 +205,7 @@ async function calculateResult(enrollmentId, sessionId) {
     weightedTotalObtained += sub.obtained;
 
     // Recalculate pass/fail using aggregated marks
-    // We need a combined passing threshold. Usually, it's 33% or 40% of max_possible.
-    // For simplicity, we'll sum the weighted passing marks.
-    // Actually, let's recalculate based on percentage of max_possible.
-    const passingThreshold = (sub.passing_marks / sub.total_marks) * sub.max_possible;
+    const passingThreshold = sub.weighted_passing;
     
     let subPassed = !sub.is_absent && (sub.obtained >= passingThreshold);
 
@@ -376,20 +374,7 @@ async function processCompartment(enrollmentId, subjectId, newMarks, enteredBy) 
       );
     }
 
-    // ── Fetch subject details for grade calc ─────────────────────────────
-    const [[subject]] = await sequelize.query(`
-      SELECT id, total_marks, passing_marks FROM subjects WHERE id = :subjectId;
-    `, { replacements: { subjectId }, transaction: t });
-
-    if (!subject) throw new Error(`Subject id=${subjectId} not found.`);
-
-    if (newMarks > parseFloat(subject.total_marks)) {
-      throw new Error(
-        `Marks entered (${newMarks}) exceed subject total marks (${subject.total_marks}).`
-      );
-    }
-
-    // ── Find or create the compartment exam for this session/class ────────
+    // ── Find the compartment exam first to get its configured marks ────────
     const [[compartmentExam]] = await sequelize.query(`
       SELECT id FROM exams
       WHERE session_id = :sessionId
@@ -409,12 +394,42 @@ async function processCompartment(enrollmentId, subjectId, newMarks, enteredBy) 
       );
     }
 
+    // ── Fetch subject marks from the compartment exam config ─────────────────
+    const [[subject]] = await sequelize.query(`
+      SELECT combined_total_marks AS total_marks, combined_passing_marks AS passing_marks 
+      FROM exam_subjects 
+      WHERE exam_id = :examId AND subject_id = :subjectId;
+    `, { 
+      replacements: { examId: compartmentExam.id, subjectId }, 
+      transaction: t 
+    });
+
+    if (!subject) {
+      throw new Error(`Subject id=${subjectId} is not configured in the compartment exam.`);
+    }
+
+    if (newMarks > parseFloat(subject.total_marks)) {
+      throw new Error(
+        `Marks entered (${newMarks}) exceed subject total marks (${subject.total_marks}).`
+      );
+    }
+
     // ── Calculate grade for this compartment result ───────────────────────
+    const [[enrollmentMeta]] = await sequelize.query(`
+      SELECT s.school_id
+      FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollmentId
+      LIMIT 1;
+    `, { replacements: { enrollmentId }, transaction: t });
+
+    const gradingScale = await getActiveGradingScale(enrollmentMeta.school_id);
     const { grade, isPass } = calcSubjectResult(
       newMarks,
       parseFloat(subject.total_marks),
       parseFloat(subject.passing_marks),
-      false
+      false,
+      gradingScale
     );
 
     // ── Upsert exam_result for compartment exam ───────────────────────────
@@ -500,8 +515,9 @@ async function processCompartment(enrollmentId, subjectId, newMarks, enteredBy) 
  * @param {'pass'|'fail'|'compartment'|'detained'} newResult
  * @param {string} reason    min 10 chars
  * @param {number} adminId
+ * @param {Array<number>} compartmentSubjects optional
  */
-async function overrideResult(enrollmentId, newResult, reason, adminId) {
+async function overrideResult(enrollmentId, newResult, reason, adminId, compartmentSubjects = null) {
   if (!reason || reason.trim().length < 10) {
     throw new Error('Override reason must be at least 10 characters.');
   }
@@ -537,14 +553,21 @@ async function overrideResult(enrollmentId, newResult, reason, adminId) {
         result                    = :newResult,
         is_promoted               = :isPromoted,
         compartment_subjects      = CASE WHEN :newResult = 'compartment'
-                                         THEN compartment_subjects
+                                         THEN :compartmentSubjects
                                          ELSE NULL END,
         promotion_override_by     = :adminId,
         promotion_override_reason = :reason,
         updated_at                = NOW()
       WHERE enrollment_id = :enrollmentId;
     `, {
-      replacements: { newResult, isPromoted, adminId, reason, enrollmentId },
+      replacements: { 
+        newResult, 
+        isPromoted, 
+        adminId, 
+        reason, 
+        enrollmentId,
+        compartmentSubjects: compartmentSubjects ? JSON.stringify(compartmentSubjects) : null
+      },
       transaction: t,
     });
 

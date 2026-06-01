@@ -13,8 +13,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 // GET /api/exams - List exams
 router.get('/', requireAdminOrTeacher, ctrl.list);
 
-router.get('/:id/timetable/pdf', requireAdminOrTeacher, ctrl.downloadTimetablePdf);
 router.get('/class/timetable/pdf', requireAdminOrTeacher, ctrl.downloadClassTimetablePdf);
+router.get('/:id/timetable/pdf', requireAdminOrTeacher, ctrl.downloadTimetablePdf);
 
 router.get('/:id/subjects/:subjectId/template', requireAdminOrTeacher, ctrl.getTemplate);
 

@@ -36,6 +36,8 @@ router.post('/',                  requireAdmin, [
 
 router.get('/',                   requireRole('admin', 'teacher', 'receptionist', 'librarian', 'accountant'), cache(300), ctrl.list);
 
+router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
+
 router.get('/:id',                requireRole('admin', 'teacher', 'receptionist', 'librarian'), cache(600), [
   param('id').isInt(),
 ], validate, ctrl.getById);
@@ -47,8 +49,6 @@ router.get('/:id/id-card/data',   requireRole('admin', 'teacher', 'receptionist'
 router.get('/:id/tc/data',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getTcData);
-
-router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
 
 router.patch('/:id/identity',     requireAdmin, [
   param('id').isInt(),

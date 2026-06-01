@@ -367,6 +367,11 @@ exports.create = async (req, res, next) => {
       return res.fail('At least one subject must be selected for the exam.', [], 422);
     }
 
+    const uniqueSubjectIds = [...new Set(subjects.map(s => Number(s.subject_id)).filter(Boolean))];
+    if (uniqueSubjectIds.length !== subjects.length) {
+      return res.fail('Duplicate subjects are not allowed.', [], 422);
+    }
+
     const [subjectRows] = await sequelize.query(`
       SELECT id, class_id, name, code, subject_type,
              theory_total_marks, theory_passing_marks,
