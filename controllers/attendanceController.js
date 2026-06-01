@@ -102,7 +102,7 @@ exports.markSingle = async (req, res, next) => {
 // ── POST /api/attendance/bulk ─────────────────────────────────────────────────
 exports.markBulk = async (req, res, next) => {
   try {
-    const { date, records, session_id } = req.body;
+    const { date, records, session_id, section_id } = req.body;
 
     const sessionId = await resolveSessionId({
       requestedSessionId: session_id,
@@ -115,9 +115,21 @@ exports.markBulk = async (req, res, next) => {
 
     const inserted = [];
     const updated  = [];
+    let skipped = 0;
 
     await sequelize.transaction(async (t) => {
       for (const rec of records) {
+        // Verify each enrollment belongs to the declared section and session
+        const [[enrollment]] = await sequelize.query(`
+          SELECT id FROM enrollments
+          WHERE id = :eid AND section_id = :sectionId AND session_id = :sessionId;
+        `, { replacements: { eid: rec.enrollment_id, sectionId: section_id, sessionId }, transaction: t });
+
+        if (!enrollment) {
+          skipped++;
+          continue;
+        }
+
         const [[existing]] = await sequelize.query(`
           SELECT id, status FROM attendance WHERE enrollment_id = :eid AND date = :date;
         `, { replacements: { eid: rec.enrollment_id, date }, transaction: t });
@@ -167,9 +179,9 @@ exports.markBulk = async (req, res, next) => {
       date,
       marked  : inserted.length,
       updated : updated.length,
-      skipped : 0,
+      skipped,
       updated_enrollment_ids: updated,
-    }, `${inserted.length} record(s) marked. ${updated.length} updated.`);
+    }, `${inserted.length} record(s) marked. ${updated.length} updated. ${skipped} skipped.`);
     invalidateCache(req.user.school_id, '/api/attendance*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
@@ -491,12 +503,12 @@ exports.downloadRegisterPdf = async (req, res, next) => {
         let color = '#94a3b8';
 
         if (record) {
-          if (record.status === 'present' || record.status === 'late') {
+          if (record.status === 'present') {
             char = 'P'; color = '#15803d'; pCount++;
+          } else if (record.status === 'late') {
+            char = 'L'; color = '#d97706'; pCount++;
           } else if (record.status === 'absent') {
             char = 'A'; color = '#b91c1c'; aCount++;
-          } else if (record.status === 'leave') {
-            char = 'L'; color = '#d97706';
           } else if (record.status === 'half_day') {
             char = '½'; color = '#1d4ed8'; pCount += 0.5;
           }
@@ -516,7 +528,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     // Legend
     doc.moveDown(1);
     doc.fontSize(7).font('Helvetica').fillColor('#64748b');
-    doc.text('P: Present | A: Absent | L: Leave | ½: Half Day | ·: Not Marked', startX, doc.y);
+    doc.text('P: Present | A: Absent | L: Late | ½: Half Day | ·: Not Marked', startX, doc.y);
 
     // Pagination
     const range = doc.bufferedPageRange();
@@ -534,16 +546,37 @@ exports.getByEnrollment = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
     const { from, to } = req.query;
+    const schoolId = req.user.school_id;
 
     let dateFilter = '';
-    if (from && to) dateFilter = `AND a.date BETWEEN '${from}' AND '${to}'`;
+    const replacements = { eid: enrollment_id, schoolId };
+
+    if (from && to) {
+      dateFilter = 'AND a.date BETWEEN :from AND :to';
+      replacements.from = from;
+      replacements.to = to;
+    }
 
     const [records] = await sequelize.query(`
       SELECT a.id, a.date, a.status, a.method, a.marked_at, a.override_reason
       FROM attendance a
-      WHERE a.enrollment_id = :eid ${dateFilter}
+      JOIN enrollments e ON e.id = a.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE a.enrollment_id = :eid 
+        AND s.school_id = :schoolId
+        ${dateFilter}
       ORDER BY a.date DESC;
-    `, { replacements: { eid: enrollment_id } });
+    `, { replacements });
+
+    const [[enrollmentCheck]] = await sequelize.query(`
+      SELECT e.id FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.id = :eid AND s.school_id = :schoolId
+    `, { replacements: { eid: enrollment_id, schoolId } });
+
+    if (!enrollmentCheck) {
+      return res.fail('Enrollment not found or access denied.', [], 404);
+    }
 
     const stats = await getAttendancePercent(parseInt(enrollment_id));
 
@@ -581,6 +614,7 @@ exports.sessionReport = async (req, res, next) => {
             '[]'::json
           ) AS attendance
         FROM attendance a
+        JOIN enrollments e ON e.id = a.enrollment_id AND e.session_id = :session_id
         GROUP BY a.enrollment_id
       ),
       attendance_summary AS (
@@ -602,6 +636,7 @@ exports.sessionReport = async (req, res, next) => {
             2
           ) AS percentage
         FROM attendance a
+        JOIN enrollments e ON e.id = a.enrollment_id AND e.session_id = :session_id
         GROUP BY a.enrollment_id
       )
       SELECT
@@ -633,7 +668,7 @@ exports.sessionReport = async (req, res, next) => {
       ORDER BY
         c.order_number,
         sec.name,
-        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\D', '', 'g'), ''), '999999')::integer,
+        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer,
         e.roll_number,
         s.admission_no;
     `, {
@@ -662,8 +697,13 @@ exports.override = async (req, res, next) => {
         marked_at       = NOW(),
         updated_at      = NOW()
       WHERE id = :id
+        AND enrollment_id IN (
+          SELECT e.id FROM enrollments e
+          JOIN sessions sess ON sess.id = e.session_id
+          WHERE sess.school_id = :schoolId
+        )
       RETURNING id, enrollment_id, date, status, override_reason;
-    `, { replacements: { status, reason: override_reason, markedBy: req.user.id, id } });
+    `, { replacements: { status, reason: override_reason, markedBy: req.user.id, id, schoolId: req.user.school_id } });
 
     if (!updated) return res.fail('Attendance record not found.', [], 404);
 
@@ -719,7 +759,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
         s.first_name, s.last_name,
         COUNT(*) FILTER (WHERE a.status = 'present') AS present,
         COUNT(*) FILTER (WHERE a.status = 'absent')  AS absent,
-        COUNT(*) FILTER (WHERE a.status = 'leave')   AS leave,
+        COUNT(*) FILTER (WHERE a.status = 'late')    AS late,
         COUNT(*) FILTER (WHERE a.status = 'half_day') AS half_day,
         COUNT(*) FILTER (WHERE a.status NOT IN ('holiday')) AS total_days,
         ROUND(
@@ -842,9 +882,10 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
       doc.text(`${row.first_name} ${row.last_name}`, rx + 5, rowY + 7, { width: colWidths[1] - 10 }); rx += colWidths[1];
       doc.text(row.present, rx + 5, rowY + 7, { width: colWidths[2] - 10, align: 'right' }); rx += colWidths[2];
       doc.text(row.absent, rx + 5, rowY + 7, { width: colWidths[3] - 10, align: 'right' }); rx += colWidths[3];
-      doc.text(row.leave, rx + 5, rowY + 7, { width: colWidths[4] - 10, align: 'right' }); rx += colWidths[4];
+      doc.text(row.late, rx + 5, rowY + 7, { width: colWidths[4] - 10, align: 'right' }); rx += colWidths[4];
       doc.text(row.half_day, rx + 5, rowY + 7, { width: colWidths[5] - 10, align: 'right' }); rx += colWidths[5];
       doc.text(row.total_days, rx + 5, rowY + 7, { width: colWidths[6] - 10, align: 'right' }); rx += colWidths[6];
+
 
       let pctColor = '#15803d';
       if (pct < 75) pctColor = '#b91c1c';
@@ -888,10 +929,10 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       JOIN classes c ON c.id = e.class_id
       JOIN sections sec ON sec.id = e.section_id
       LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
-      WHERE e.id = :enrollmentId LIMIT 1
-    `, { replacements: { enrollmentId: enrollment_id } });
+      WHERE e.id = :enrollmentId AND s.school_id = :schoolId LIMIT 1
+    `, { replacements: { enrollmentId: enrollment_id, schoolId } });
 
-    if (!student) return res.fail('Student enrollment record not found.');
+    if (!student) return res.fail('Student enrollment record not found or access denied.', [], 404);
 
     // Helper: formatINR with Rs. (Shared PDF Rule)
     const formatINR = (amount) =>
@@ -1043,9 +1084,9 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
         
         let color = '#f1f5f9'; // Not marked
         if (rec) {
-          if (rec.status === 'present' || rec.status === 'late') color = '#dcfce7';
+          if (rec.status === 'present') color = '#dcfce7';
+          else if (rec.status === 'late') color = '#fef3c7';
           else if (rec.status === 'absent') color = '#fee2e2';
-          else if (rec.status === 'leave') color = '#fef3c7';
           else if (rec.status === 'half_day') color = '#dbeafe';
         }
         
@@ -1066,7 +1107,7 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fillColor('#64748b').fontSize(8).font('Helvetica');
-      doc.text('Present: Green  Absent: Red  Leave: Amber  Half Day: Blue', 40, doc.page.height - 25, { lineBreak: false });
+      doc.text('Present: Green  Absent: Red  Late: Amber  Half Day: Blue', 40, doc.page.height - 25, { lineBreak: false });
       doc.text(`Page ${i + 1} of ${range.count}`, 450, doc.page.height - 25, { align: 'right', width: 100, lineBreak: false });
     }
 

@@ -179,7 +179,7 @@ async function assertAttendanceAccess(teacherId, classId, sectionId, date, scope
   throw error;
 }
 
-async function getEnrollmentByAttendanceId(attendanceId) {
+async function getEnrollmentByAttendanceId(attendanceId, schoolId) {
   const [[record]] = await sequelize.query(`
     SELECT
       a.id,
@@ -191,8 +191,9 @@ async function getEnrollmentByAttendanceId(attendanceId) {
       e.section_id
     FROM attendance a
     JOIN enrollments e ON e.id = a.enrollment_id
-    WHERE a.id = :attendanceId;
-  `, { replacements: { attendanceId } });
+    JOIN students s ON s.id = e.student_id
+    WHERE a.id = :attendanceId AND s.school_id = :schoolId;
+  `, { replacements: { attendanceId, schoolId } });
 
   return record || null;
 }
@@ -1259,10 +1260,14 @@ exports.markAttendance = async (req, res, next) => {
 
     const existingMap = new Map(existingRows.map((row) => [Number(row.enrollment_id), row]));
     const submittedRecords = records.length > 0 ? records : [];
+    const inserted = [];
+    const updated  = [];
+    let skipped = 0;
 
     await sequelize.transaction(async (transaction) => {
       for (const record of submittedRecords) {
-        const existing = existingMap.get(Number(record.enrollment_id));
+        const eid = Number(record.enrollment_id);
+        const existing = existingMap.get(eid);
 
         if (existing) {
           await sequelize.query(`
@@ -1282,13 +1287,28 @@ exports.markAttendance = async (req, res, next) => {
             },
             transaction,
           });
+          updated.push(eid);
         } else {
+          // Guard: Verify enrollment belongs to this section/session
+          const [[enrollment]] = await sequelize.query(`
+            SELECT id FROM enrollments
+            WHERE id = :eid AND class_id = :classId AND section_id = :sectionId AND session_id = :sessionId;
+          `, { 
+            replacements: { eid, classId: class_id, sectionId: section_id, sessionId: session.id },
+            transaction
+          });
+
+          if (!enrollment) {
+            skipped++;
+            continue;
+          }
+
           await sequelize.query(`
             INSERT INTO attendance (enrollment_id, date, status, method, marked_by, marked_at, override_reason, created_at, updated_at)
             VALUES (:enrollmentId, :date, :status, 'manual', :markedBy, NOW(), :overrideReason, NOW(), NOW());
           `, {
             replacements: {
-              enrollmentId: record.enrollment_id,
+              enrollmentId: eid,
               date,
               status: record.status || 'present',
               markedBy: req.user.id,
@@ -1296,6 +1316,7 @@ exports.markAttendance = async (req, res, next) => {
             },
             transaction,
           });
+          inserted.push(eid);
         }
       }
     });
@@ -1303,7 +1324,7 @@ exports.markAttendance = async (req, res, next) => {
     await audit('attendance', Number(class_id), {
       field: 'teacher_mark',
       oldValue: existingRows.length ? 'existing' : null,
-      newValue: `${submittedRecords.length} records`,
+      newValue: `${inserted.length + updated.length} records`,
       reason: reason || `Attendance marked for ${date}${subject_id ? ` subject ${subject_id}` : ''}`,
     }, req);
 
@@ -1313,9 +1334,12 @@ exports.markAttendance = async (req, res, next) => {
       subject_id: subject_id ? Number(subject_id) : null,
       date,
       access,
-      processed: submittedRecords.length,
+      marked: inserted.length,
+      updated: updated.length,
+      skipped,
+      updated_enrollment_ids: updated,
       edited_existing: existingRows.length > 0,
-    }, 'Attendance saved successfully.');
+    }, `Attendance saved. ${inserted.length} marked, ${updated.length} updated, ${skipped} skipped.`);
   } catch (err) { next(err); }
 };
 
@@ -1330,10 +1354,10 @@ exports.updateAttendance = async (req, res, next) => {
     requireFields(req.body, ['status', 'reason']);
 
     const { scope } = await getTeacherContext(req);
-    const record = await getEnrollmentByAttendanceId(Number(id));
-    if (!record) return res.fail('Attendance record not found.', [], 404);
+    const record = await getEnrollmentByAttendanceId(Number(id), req.user.school_id);
+    if (!record) return res.fail('Attendance record not found or access denied.', [], 404);
 
-    assertClassTeacherAccess(scope, record.class_id, record.section_id);
+    assertAccess(scope, record.class_id, record.section_id);
 
     await sequelize.query(`
       UPDATE attendance

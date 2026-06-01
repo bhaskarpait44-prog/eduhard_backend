@@ -598,7 +598,7 @@ exports.studentsPdf = async (req, res, next) => {
         s.id, s.admission_no, s.first_name, s.last_name, e.roll_number
       ORDER BY
         sec.name ASC,
-        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\D', '', 'g'), ''), '999999')::integer ASC,
+        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer ASC,
         s.first_name ASC,
         s.last_name ASC;
     `, {
