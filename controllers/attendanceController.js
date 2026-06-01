@@ -167,7 +167,7 @@ exports.markBulk = async (req, res, next) => {
 
     await writeAuditLog(sequelize, {
       tableName: 'attendance',
-      recordId: date,
+      recordId: Number(section_id) || 0,
       changes: { field: 'bulk_marking', oldValue: 'none', newValue: `${inserted.length + updated.length} records` },
       changedBy: req.user.id,
       reason: `Bulk attendance marking for ${date}`,
