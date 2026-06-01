@@ -259,24 +259,26 @@ exports.addHoliday = async (req, res, next) => {
     const { id } = req.params;
     const { holiday_date, name, type } = req.body;
 
-    // 1. Fetch session metadata for validation
-    const [[session]] = await sequelize.query(`
-      SELECT start_date, end_date, status, is_locked 
-      FROM sessions WHERE id = :id AND school_id = :schoolId;
-    `, { replacements: { id, schoolId: req.user.school_id } });
-
-    if (!session) return res.fail('Session not found.', [], 404);
-
-    if (session.is_locked || ['upcoming', 'locked', 'closed', 'archived'].includes(session.status)) {
-      return res.fail(`Cannot add holiday: session is ${session.status}.`);
-    }
-
-    const hDate = new Date(holiday_date);
-    if (hDate < new Date(session.start_date) || hDate > new Date(session.end_date)) {
-      return res.fail(`Holiday date must be between session start (${session.start_date}) and end (${session.end_date}).`);
-    }
-
     const result = await sequelize.transaction(async (t) => {
+      // 1. Fetch session metadata for validation (Inside transaction)
+      const [[session]] = await sequelize.query(`
+        SELECT start_date, end_date, status, is_locked 
+        FROM sessions WHERE id = :id AND school_id = :schoolId;
+      `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
+
+      if (!session) {
+        throw { name: 'CustomError', message: 'Session not found.', status: 404 };
+      }
+
+      if (session.is_locked || ['upcoming', 'locked', 'closed', 'archived'].includes(session.status)) {
+        throw { name: 'CustomError', message: `Cannot add holiday: session is ${session.status}.`, status: 400 };
+      }
+
+      const hDate = new Date(holiday_date);
+      if (hDate < new Date(session.start_date) || hDate > new Date(session.end_date)) {
+        throw { name: 'CustomError', message: `Holiday date must be between session start (${session.start_date}) and end (${session.end_date}).`, status: 400 };
+      }
+
       // 2. Check for duplicate holiday
       const [[duplicate]] = await sequelize.query(`
         SELECT id FROM session_holidays WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
@@ -768,13 +770,56 @@ exports.getStats = async (req, res, next) => {
     `, { replacements: { id } });
 
     // 2. Attendance stats (overall % for session)
-    const [[attendance]] = await sequelize.query(`
+    // We calculate the total effective presence and divide by the total expected working days for all active students.
+    const [[sessionInfo]] = await sequelize.query(`
+      SELECT start_date, end_date FROM sessions WHERE id = :id LIMIT 1;
+    `, { replacements: { id } });
+
+    const [[wdRow]] = await sequelize.query(`
+      SELECT monday, tuesday, wednesday, thursday, friday, saturday, sunday
+      FROM session_working_days WHERE session_id = :id LIMIT 1;
+    `, { replacements: { id } });
+
+    const [holidayRows] = await sequelize.query(`
+      SELECT holiday_date FROM session_holidays WHERE session_id = :id AND holiday_date <= :today;
+    `, { replacements: { id, today: new Date().toISOString().split('T')[0] } });
+
+    const [enrollmentRows] = await sequelize.query(`
+      SELECT joined_date FROM enrollments WHERE session_id = :id AND status = 'active';
+    `, { replacements: { id } });
+
+    const { _internal } = require('../utils/attendanceCalculator');
+    const today = new Date().toISOString().split('T')[0];
+    const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
+    const allDates = _internal.getDateRange(sessionInfo.start_date, calcUpTo);
+    
+    const holidaySet = new Set(holidayRows.map(h => h.holiday_date));
+    const workingDates = allDates.filter(date => {
+      const dayOfWeek = _internal.getDayOfWeek(date);
+      const colName = _internal.DAY_COLUMN_MAP[dayOfWeek];
+      return wdRow[colName] && !holidaySet.has(date);
+    });
+
+    let totalExpectedRecords = 0;
+    enrollmentRows.forEach(e => {
+      // Binary search or simple find index for first date >= joined_date
+      // For simplicity and safety, we'll use a simple loop or filter here as the numbers are manageable
+      const studentWorkingDays = workingDates.filter(d => d >= e.joined_date).length;
+      totalExpectedRecords += studentWorkingDays;
+    });
+
+    const [[presence]] = await sequelize.query(`
       SELECT 
-        ROUND(AVG(CASE WHEN status IN ('present', 'late') THEN 100 WHEN status = 'half_day' THEN 50 ELSE 0 END), 2) as avg_rate
+        SUM(CASE WHEN status IN ('present', 'late') THEN 1.0 WHEN status = 'half_day' THEN 0.5 ELSE 0 END) as effective_present
       FROM attendance
       WHERE enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id)
         AND status != 'holiday'
-    `, { replacements: { id } });
+        AND date <= :calcUpTo
+    `, { replacements: { id, calcUpTo } });
+
+    const avgRate = totalExpectedRecords > 0 
+      ? parseFloat(((parseFloat(presence.effective_present || 0) / totalExpectedRecords) * 100).toFixed(2))
+      : 0;
 
     // 3. Fee stats (total collected vs total target)
     const [[fees]] = await sequelize.query(`
@@ -790,7 +835,7 @@ exports.getStats = async (req, res, next) => {
       students: parseInt(counts.total_students || 0),
       holidays: parseInt(counts.holiday_count || 0),
       exams: parseInt(counts.exam_count || 0),
-      attendance_rate: parseFloat(attendance.avg_rate || 0),
+      attendance_rate: avgRate,
       fee_stats: {
         target: parseFloat(fees.target || 0),
         collected: parseFloat(fees.collected || 0),

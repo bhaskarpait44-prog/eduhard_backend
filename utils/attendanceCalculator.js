@@ -190,6 +190,7 @@ async function getAttendancePercent(enrollmentId, t = null) {
       e.student_id,
       e.session_id,
       e.joined_date,
+      s.start_date  AS session_start_date,
       s.end_date    AS session_end_date,
       s.status      AS session_status
     FROM enrollments e
@@ -205,7 +206,11 @@ async function getAttendancePercent(enrollmentId, t = null) {
   const today       = new Date().toISOString().split('T')[0];
   const sessionEnd  = enrollment.session_end_date;
   const calcUpTo    = today < sessionEnd ? today : sessionEnd;
-  const fromDate    = enrollment.joined_date;
+  
+  // Use joined_date, but cap it at session_start_date
+  const fromDate    = enrollment.joined_date < enrollment.session_start_date
+    ? enrollment.session_start_date
+    : enrollment.joined_date;
 
   // ── Get working days FROM joined_date ────────────────────────────────────
   const { workingDays, workingDates } = await getWorkingDays(
@@ -319,7 +324,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
   const execute = async (transaction) => {
     // ── Step 1: Find all enrollment ids active in this session ───────────
     const [enrollmentRows] = await sequelize.query(`
-      SELECT e.id AS enrollment_id, e.student_id
+      SELECT e.id AS enrollment_id, e.student_id, e.joined_date
       FROM enrollments e
       WHERE e.session_id = :sessionId
         AND e.status     = 'active'
@@ -421,8 +426,18 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
     });
 
     const getWorkingDaysFast = (joinedDate) => {
-      const startIndex = dateToIndex.get(joinedDate);
-      if (startIndex === undefined) return 0; // Joined before session start or after calcUpTo
+      let startIndex = dateToIndex.get(joinedDate);
+      
+      if (startIndex === undefined) {
+        // If joined before session starts, we start counting from the session start
+        if (joinedDate < sessionInfo.start_date) {
+          startIndex = 0;
+        } else {
+          // Joined after calcUpTo
+          return 0;
+        }
+      }
+
       const endIndex = fullDateRange.length - 1;
       
       // workingDays in [joinedDate, calcUpTo] = P[end] - P[start-1]
