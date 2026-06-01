@@ -317,7 +317,7 @@ exports.markAsLeft = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[student]] = await sequelize.query(`
-      SELECT id FROM students WHERE id = :id AND school_id = :schoolId
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
     `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);
@@ -363,7 +363,7 @@ exports.markAsGraduated = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[student]] = await sequelize.query(`
-      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId
+      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
     `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);
@@ -585,7 +585,7 @@ exports.readmitStudent = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[student]] = await sequelize.query(`
-      SELECT id FROM students WHERE id = :id AND school_id = :schoolId
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
     `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);

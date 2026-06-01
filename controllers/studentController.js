@@ -681,13 +681,17 @@ exports.confirmAdmission = async (req, res, next) => {
           // 1. Resolve Admission No
           let admNo = row.admission_no?.trim();
           if (!admNo) {
+            // Lock the school record to serialize admission number generation
+            await sequelize.query(`SELECT id FROM schools WHERE id = :schoolId FOR UPDATE`, { 
+              replacements: { schoolId }, transaction: t 
+            });
+
             const year = new Date(row.admission_date).getFullYear();
             const [[seq]] = await sequelize.query(
               `SELECT COUNT(*)::int + 1 as next_val FROM students WHERE school_id = :schoolId AND admission_no LIKE :pattern`,
               { 
                 replacements: { schoolId, pattern: `ADM-${year}-%` },
-                transaction: t,
-                lock: t.LOCK.UPDATE 
+                transaction: t
               }
             );
             admNo = `ADM-${year}-${String(seq.next_val).padStart(4, '0')}`;
@@ -740,6 +744,11 @@ exports.confirmAdmission = async (req, res, next) => {
           const sectionId = sectionMap.get(`${row.admission_class.trim().toLowerCase()}|${row.section.trim().toLowerCase()}`);
 
           if (session && classId && sectionId) {
+            // Lock the section to serialize roll number assignment
+            await sequelize.query(`SELECT id FROM sections WHERE id = :sectionId FOR UPDATE`, {
+              replacements: { sectionId }, transaction: t
+            });
+
             // Auto-assign roll number
             const [[maxRoll]] = await sequelize.query(`
               SELECT MAX(CAST(roll_number AS INTEGER)) AS max_roll
@@ -750,8 +759,7 @@ exports.confirmAdmission = async (req, res, next) => {
                 AND roll_number ~ '^\\d+$';
             `, { 
               replacements: { sectionId, sessionId: session.id },
-              transaction: t,
-              lock: t.LOCK.UPDATE
+              transaction: t
             });
             const rollNumber = String((parseInt(maxRoll?.max_roll) || 0) + 1);
 
@@ -947,6 +955,17 @@ exports.updateIdentity = async (req, res, next) => {
       }
     }
 
+    const updates = {};
+    if (admission_no)  updates.admission_no  = admission_no;
+    if (first_name)    updates.first_name    = first_name;
+    if (last_name)     updates.last_name     = last_name;
+    if (date_of_birth) updates.date_of_birth = date_of_birth;
+    if (gender)        updates.gender        = gender;
+
+    if (Object.keys(updates).length === 0) {
+      return res.fail('No fields provided to update.');
+    }
+
     const updated = await sequelize.transaction(async (t) => {
       // Set audit context — trigger reads these for each field change
       await auditLogger.setContext(sequelize, {
@@ -955,17 +974,6 @@ exports.updateIdentity = async (req, res, next) => {
         ipAddress  : req.ip,
         deviceInfo : req.headers['user-agent'],
       }, t);
-
-      const updates = {};
-      if (admission_no)  updates.admission_no  = admission_no;
-      if (first_name)    updates.first_name    = first_name;
-      if (last_name)     updates.last_name     = last_name;
-      if (date_of_birth) updates.date_of_birth = date_of_birth;
-      if (gender)        updates.gender        = gender;
-
-      if (Object.keys(updates).length === 0) {
-        return res.fail('No fields provided to update.');
-      }
 
       const setClauses = Object.keys(updates).map(k => `${k} = :${k}`).join(', ');
       const [[resRow]] = await sequelize.query(`
