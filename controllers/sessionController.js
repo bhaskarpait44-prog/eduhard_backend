@@ -14,7 +14,7 @@ exports.create = async (req, res, next) => {
       return res.fail('end_date must be after start_date.');
     }
 
-    await sequelize.transaction(async (t) => {
+    const session = await sequelize.transaction(async (t) => {
       // Check for overlapping sessions
       const [[overlap]] = await sequelize.query(`
         SELECT id FROM sessions
@@ -24,10 +24,10 @@ exports.create = async (req, res, next) => {
       `, { replacements: { schoolId, start_date, end_date }, transaction: t });
 
       if (overlap) {
-        return res.fail('This session dates overlap with an existing session.');
+        throw { name: 'CustomError', message: 'This session dates overlap with an existing session.', status: 400 };
       }
 
-      const [[session]] = await sequelize.query(`
+      const [[newSession]] = await sequelize.query(`
         INSERT INTO sessions (school_id, name, start_date, end_date, status, is_current, created_by, created_at, updated_at)
         VALUES (:schoolId, :name, :start_date, :end_date, 'upcoming', false, :createdBy, NOW(), NOW())
         RETURNING id, name, start_date, end_date, status, is_current;
@@ -40,7 +40,7 @@ exports.create = async (req, res, next) => {
           (:sid, :mon, :tue, :wed, :thu, :fri, :sat, :sun);
       `, {
         replacements: {
-          sid : session.id,
+          sid : newSession.id,
           mon : working_days.monday    ?? true,
           tue : working_days.tuesday   ?? true,
           wed : working_days.wednesday ?? true,
@@ -60,17 +60,32 @@ exports.create = async (req, res, next) => {
           ('sessions', :id, 'created', 'none', 'exists',
            :userId, 'Session created by admin', :ip, :device, NOW());
       `, { replacements: {
-        id: session.id,
+        id: newSession.id,
         userId: req.user.id,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
 
-      res.ok(session, 'Session created.', 201);
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/dashboard*');
+      // Fetch full refreshed session data to return (matching list format)
+      const [[session]] = await sequelize.query(`
+        SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
+               wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+        FROM sessions s
+        LEFT JOIN session_working_days wd ON wd.session_id = s.id
+        WHERE s.id = :id
+        LIMIT 1;
+      `, { replacements: { id: newSession.id }, transaction: t });
+
+      return session;
     });
+
+    res.ok(session, 'Session created.', 201);
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
     if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
       return res.fail('A session with this name already exists for your school.');
     }
@@ -178,15 +193,15 @@ exports.activate = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    await sequelize.transaction(async (t) => {
+    const sessionData = await sequelize.transaction(async (t) => {
       // 1. Verify target session exists and belongs to this school
       const [[target]] = await sequelize.query(`
         SELECT id, status FROM sessions WHERE id = :id AND school_id = :schoolId LIMIT 1;
       `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
-      if (!target) return res.fail('Session not found.', [], 404);
+      if (!target) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
       if (target.status !== 'upcoming') {
-        return res.fail(`Cannot activate a session that is ${target.status}. Only upcoming sessions can be activated.`);
+        throw { name: 'CustomError', message: `Cannot activate a session that is ${target.status}. Only upcoming sessions can be activated.`, status: 400 };
       }
 
       // 2. Only one session can be current per school
@@ -246,11 +261,18 @@ exports.activate = async (req, res, next) => {
         LIMIT 1;
       `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
-      res.ok(session, `Session "${session.name}" activated.`);
-      invalidateCache(req.user.school_id, '/api/sessions*');
-      invalidateCache(req.user.school_id, '/api/dashboard*');
+      return session;
     });
-  } catch (err) { next(err); }
+
+    res.ok(sessionData, `Session "${sessionData.name}" activated.`);
+    invalidateCache(req.user.school_id, '/api/sessions*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
 };
 
 // ── POST /api/sessions/:id/holidays ─────────────────────────────────────────
@@ -368,18 +390,18 @@ exports.lock = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
-    const result = await sequelize.transaction(async (t) => {
+    const session = await sequelize.transaction(async (t) => {
       // First check current status
       const [[current]] = await sequelize.query(`
         SELECT id, status, name FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      if (!current) return res.fail('Session not found.', [], 404);
+      if (!current) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
       if (current.status !== 'active') {
-        return res.fail(`Cannot lock a session that is ${current.status}. Only active sessions can be locked.`);
+        throw { name: 'CustomError', message: `Cannot lock a session that is ${current.status}. Only active sessions can be locked.`, status: 400 };
       }
 
-      const [[session]] = await sequelize.query(`
+      const [[updatedSession]] = await sequelize.query(`
         UPDATE sessions SET is_locked = true, status = 'locked', is_current = false, updated_at = NOW()
         WHERE id = :id AND school_id = :schoolId
         RETURNING id, name, status, is_locked, is_current;
@@ -393,22 +415,25 @@ exports.lock = async (req, res, next) => {
           ('sessions', :id, 'status', 'active', 'locked',
            :userId, :reason, :ip, :device, NOW());
       `, { replacements: {
-        id: session.id,
+        id: updatedSession.id,
         userId: req.user.id,
         reason: `Session locked by admin`,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
 
-      return session;
+      return updatedSession;
     });
 
-    if (result) {
-      res.ok(result, `Session "${result.name}" has been locked and is no longer current.`);
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/dashboard*');
+    res.ok(session, `Session "${session.name}" has been locked and is no longer current.`);
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/dashboard*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
     }
-  } catch (err) { next(err); }
+    next(err);
+  }
 };
 
 // ── PATCH /api/sessions/:id ─────────────────────────────────────────────────
@@ -422,16 +447,16 @@ exports.update = async (req, res, next) => {
       return res.fail('end_date must be after start_date.');
     }
 
-    await sequelize.transaction(async (t) => {
+    const updated = await sequelize.transaction(async (t) => {
       // 1. Check if session exists
       const [[session]] = await sequelize.query(`
         SELECT id, status, is_locked, is_current FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      if (!session) return res.fail('Session not found.', [], 404);
+      if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
 
       if (session.is_locked || ['closed', 'archived', 'locked'].includes(session.status)) {
-        return res.fail(`Cannot update session: it is already ${session.status}.`);
+        throw { name: 'CustomError', message: `Cannot update session: it is already ${session.status}.`, status: 400 };
       }
 
       // 2. Check for overlaps (excluding this session)
@@ -443,7 +468,7 @@ exports.update = async (req, res, next) => {
       `, { replacements: { schoolId, id, start_date, end_date }, transaction: t });
 
       if (overlap) {
-        return res.fail('Updated dates overlap with another existing session.');
+        throw { name: 'CustomError', message: 'Updated dates overlap with another existing session.', status: 400 };
       }
 
       // 3. Verify existing holidays are still within new range
@@ -453,7 +478,7 @@ exports.update = async (req, res, next) => {
       `, { replacements: { id, start_date, end_date }, transaction: t });
 
       if (parseInt(holidayCheck.count) > 0) {
-        return res.fail(`Cannot update dates: ${holidayCheck.count} holiday(s) would fall outside the new range.`);
+        throw { name: 'CustomError', message: `Cannot update dates: ${holidayCheck.count} holiday(s) would fall outside the new range.`, status: 400 };
       }
 
       // 4. Update session
@@ -501,7 +526,7 @@ exports.update = async (req, res, next) => {
       }
 
       // 6. Fetch refreshed session data to return
-      const [[updated]] = await sequelize.query(`
+      const [[updatedSession]] = await sequelize.query(`
         SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
                wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
         FROM sessions s
@@ -510,11 +535,16 @@ exports.update = async (req, res, next) => {
         LIMIT 1;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      res.ok(updated, 'Session updated successfully.');
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/dashboard*');
+      return updatedSession;
     });
+
+    res.ok(updated, 'Session updated successfully.');
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
     if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
       return res.fail('A session with this name already exists for your school.');
     }
@@ -531,15 +561,15 @@ exports.updateWorkingDays = async (req, res, next) => {
 
     if (!working_days) return res.fail('Working days configuration required.');
 
-    await sequelize.transaction(async (t) => {
+    const updated = await sequelize.transaction(async (t) => {
       // 1. Verify session ownership and status
       const [[session]] = await sequelize.query(`
         SELECT id, status, is_locked FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      if (!session) return res.fail('Session not found.', [], 404);
+      if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
       if (session.is_locked || ['locked', 'closed', 'archived'].includes(session.status)) {
-        return res.fail('Cannot update working days: session is locked or inactive.');
+        throw { name: 'CustomError', message: 'Cannot update working days: session is locked or inactive.', status: 400 };
       }
 
       // 2. Update config
@@ -573,7 +603,7 @@ exports.updateWorkingDays = async (req, res, next) => {
       `, { replacements: { id, userId: req.user.id }, transaction: t });
 
       // 4. Fetch refreshed session data
-      const [[updated]] = await sequelize.query(`
+      const [[updatedSession]] = await sequelize.query(`
         SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
                wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
         FROM sessions s
@@ -582,11 +612,18 @@ exports.updateWorkingDays = async (req, res, next) => {
         LIMIT 1;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      res.ok(updated, 'Working days updated. Note: Historical attendance is not automatically adjusted.');
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/attendance*');
+      return updatedSession;
     });
-  } catch (err) { next(err); }
+
+    res.ok(updated, 'Working days updated. Note: Historical attendance is not automatically adjusted.');
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/attendance*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
 };
 
 // ── DELETE /api/sessions/:id/holidays/:holidayId ────────────────────────────
@@ -595,7 +632,7 @@ exports.removeHoliday = async (req, res, next) => {
     const { id, holidayId } = req.params;
     const schoolId = req.user.school_id;
 
-    await sequelize.transaction(async (t) => {
+    const removedDate = await sequelize.transaction(async (t) => {
       // 1. Verify holiday and session ownership
       const [[holiday]] = await sequelize.query(`
         SELECT h.id, h.holiday_date, s.status, s.is_locked
@@ -605,9 +642,9 @@ exports.removeHoliday = async (req, res, next) => {
         LIMIT 1;
       `, { replacements: { holidayId, id, schoolId }, transaction: t });
 
-      if (!holiday) return res.fail('Holiday not found.', [], 404);
+      if (!holiday) throw { name: 'CustomError', message: 'Holiday not found.', status: 404 };
       if (holiday.is_locked || ['locked', 'closed', 'archived'].includes(holiday.status)) {
-        return res.fail('Cannot modify holidays on a closed, archived or locked session.');
+        throw { name: 'CustomError', message: 'Cannot modify holidays on a closed, archived or locked session.', status: 400 };
       }
 
       // 2. Delete holiday
@@ -617,8 +654,7 @@ exports.removeHoliday = async (req, res, next) => {
       });
 
       // 3. Reverse retroactive attendance (Delete 'holiday' records for this date)
-      // This forces re-marking for converted records and cleans up auto-inserted ones.
-      const [deletedAttendance] = await sequelize.query(`
+      await sequelize.query(`
         DELETE FROM attendance
         WHERE date = :date
           AND status = 'holiday'
@@ -632,19 +668,23 @@ exports.removeHoliday = async (req, res, next) => {
            changed_by, reason, created_at)
         VALUES
           ('sessions', :id, 'holiday_removed', :date, 'removed',
-           :userId, 'Holiday deleted. Associated "holiday" attendance records removed.', NOW());
+           :userId, :reason, NOW());
       `, { replacements: { id, date: holiday.holiday_date, userId: req.user.id }, transaction: t });
 
-      res.ok({
-        removed_holiday_date: holiday.holiday_date,
-        attendance_records_cleared: deletedAttendance.rowCount || 0
-      }, 'Holiday removed. Associated attendance records cleared.');
-
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/dashboard*');
-      invalidateCache(schoolId, '/api/attendance*');
+      return holiday.holiday_date;
     });
-  } catch (err) { next(err); }
+
+    res.ok({ removed_holiday_date: removedDate }, 'Holiday removed. Associated attendance records cleared.');
+
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/dashboard*');
+    invalidateCache(schoolId, '/api/attendance*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
 };
 
 // ── DELETE /api/sessions/:id ────────────────────────────────────────────────
@@ -658,11 +698,10 @@ exports.remove = async (req, res, next) => {
         SELECT id, is_current FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      if (!session) return res.fail('Session not found.', [], 404);
-      if (session.is_current) return res.fail('Cannot delete the current active session.');
+      if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
+      if (session.is_current) throw { name: 'CustomError', message: 'Cannot delete the current active session.', status: 400 };
 
       // Safety Guard: Check for any dependent data (Enrollments, Attendance, Exams)
-      // This prevents deleting sessions that contain historical student records.
       const [[usage]] = await sequelize.query(`
         SELECT 
           (SELECT COUNT(*) FROM enrollments WHERE session_id = :id) AS enrollment_count,
@@ -671,11 +710,13 @@ exports.remove = async (req, res, next) => {
       `, { replacements: { id }, transaction: t });
 
       if (parseInt(usage.enrollment_count) > 0 || parseInt(usage.attendance_count) > 0 || parseInt(usage.exam_count) > 0) {
-        return res.fail(
-          `Cannot delete session: it contains ${usage.enrollment_count} enrollment(s), ` +
-          `${usage.attendance_count} attendance record(s), and ${usage.exam_count} exam(s). ` +
-          `Try archiving it instead to preserve historical data.`
-        );
+        throw { 
+          name: 'CustomError', 
+          message: `Cannot delete session: it contains ${usage.enrollment_count} enrollment(s), ` +
+                   `${usage.attendance_count} attendance record(s), and ${usage.exam_count} exam(s). ` +
+                   `Try archiving it instead to preserve historical data.`,
+          status: 400 
+        };
       }
 
       await sequelize.query(`
@@ -694,12 +735,17 @@ exports.remove = async (req, res, next) => {
       }, transaction: t });
 
       await sequelize.query(`DELETE FROM sessions WHERE id = :id;`, { replacements: { id }, transaction: t });
-
-      res.ok(null, 'Session deleted successfully.');
-      invalidateCache(schoolId, '/api/sessions*');
-      invalidateCache(schoolId, '/api/dashboard*');
     });
-  } catch (err) { next(err); }
+
+    res.ok(null, 'Session deleted successfully.');
+    invalidateCache(schoolId, '/api/sessions*');
+    invalidateCache(schoolId, '/api/dashboard*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
 };
 
 // ── PATCH /api/sessions/:id/archive ─────────────────────────────────────────
@@ -708,15 +754,15 @@ exports.archive = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
-    await sequelize.transaction(async (t) => {
+    const updated = await sequelize.transaction(async (t) => {
       const [[session]] = await sequelize.query(`
         SELECT id, status, is_current FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      if (!session) return res.fail('Session not found.', [], 404);
-      if (session.is_current) return res.fail('Cannot archive the current active session.');
+      if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
+      if (session.is_current) throw { name: 'CustomError', message: 'Cannot archive the current active session.', status: 400 };
       if (session.status !== 'closed') {
-        return res.fail('Only closed sessions can be archived.');
+        throw { name: 'CustomError', message: 'Only closed sessions can be archived.', status: 400 };
       }
 
       await sequelize.query(`
@@ -733,7 +779,7 @@ exports.archive = async (req, res, next) => {
       `, { replacements: { id, userId: req.user.id }, transaction: t });
 
       // 4. Fetch refreshed session data
-      const [[updated]] = await sequelize.query(`
+      const [[updatedSession]] = await sequelize.query(`
         SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current, s.is_locked,
                wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
         FROM sessions s
@@ -742,10 +788,17 @@ exports.archive = async (req, res, next) => {
         LIMIT 1;
       `, { replacements: { id, schoolId }, transaction: t });
 
-      res.ok(updated, 'Session archived successfully.');
-      invalidateCache(schoolId, '/api/sessions*');
+      return updatedSession;
     });
-  } catch (err) { next(err); }
+
+    res.ok(updated, 'Session archived successfully.');
+    invalidateCache(schoolId, '/api/sessions*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
 };
 
 // ── GET /api/sessions/:id/stats ─────────────────────────────────────────────
@@ -804,17 +857,20 @@ exports.getStats = async (req, res, next) => {
     enrollmentRows.forEach(e => {
       // Binary search or simple find index for first date >= joined_date
       // For simplicity and safety, we'll use a simple loop or filter here as the numbers are manageable
-      const studentWorkingDays = workingDates.filter(d => d >= e.joined_date).length;
+      const joinedDateOnly = (e.joined_date || '').slice(0, 10);
+      const studentWorkingDays = workingDates.filter(d => d >= joinedDateOnly).length;
       totalExpectedRecords += studentWorkingDays;
     });
 
     const [[presence]] = await sequelize.query(`
       SELECT 
-        SUM(CASE WHEN status IN ('present', 'late') THEN 1.0 WHEN status = 'half_day' THEN 0.5 ELSE 0 END) as effective_present
-      FROM attendance
-      WHERE enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id)
-        AND status != 'holiday'
-        AND date <= :calcUpTo
+        SUM(CASE WHEN a.status IN ('present', 'late') THEN 1.0 WHEN a.status = 'half_day' THEN 0.5 ELSE 0 END) as effective_present
+      FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      WHERE e.session_id = :id
+        AND a.status != 'holiday'
+        AND a.date >= e.joined_date
+        AND a.date <= :calcUpTo
     `, { replacements: { id, calcUpTo } });
 
     const avgRate = totalExpectedRecords > 0 

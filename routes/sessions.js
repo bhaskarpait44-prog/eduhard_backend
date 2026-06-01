@@ -38,7 +38,7 @@ router.patch('/:id/archive', requireAdmin, [
   param('id').isInt().withMessage('Session id must be integer'),
 ], validate, ctrl.archive);
 
-router.get('/:id/stats', [
+router.get('/:id/stats', requireAdmin, [
   param('id').isInt().withMessage('Session id must be integer'),
 ], validate, ctrl.getStats);
 
