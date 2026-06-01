@@ -33,12 +33,12 @@ const auditLogger = {
    * @param {string}    ctx.deviceInfo   - user-agent string
    */
   async setContext(sequelize, { changedBy, reason, ipAddress, deviceInfo }, t = null) {
-    // Validate reason length before touching the DB
-    if (reason && reason.trim().length < 10) {
-      throw new Error('Audit reason must be at least 10 characters.');
-    }
+    // Use provided reason or fallback if too short/missing
+    const finalReason = (reason && reason.trim().length >= 10)
+      ? reason.trim()
+      : 'Student record updated (reason omitted or too short)';
 
-    const safeReason     = (reason     || 'No reason provided').replace(/'/g, "''");
+    const safeReason     = finalReason.replace(/'/g, "''");
     const safeIp         = (ipAddress  || 'unknown').replace(/'/g, "''");
     const safeDevice     = (deviceInfo || 'unknown').replace(/'/g, "''").substring(0, 299);
     const safeChangedBy  = changedBy ? String(parseInt(changedBy, 10)) : 'NULL';

@@ -74,6 +74,7 @@ const updateSubjectRules = [
   body('reason')
     .optional()
     .trim()
+    .isLength({ min: 10 }).withMessage('Audit reason must be at least 10 characters')
     .isLength({ max: 500 }).withMessage('Reason max 500 chars'),
 ];
 
@@ -91,8 +92,18 @@ const reorderSubjectsRules = [
     .withMessage('order_number must be a positive integer'),
 ];
 
+const deleteSubjectRules = [
+  param('classId').isInt({ min: 1 }).withMessage('Invalid class ID'),
+  param('id').isInt({ min: 1 }).withMessage('Invalid subject ID'),
+  body('reason')
+    .optional()
+    .trim()
+    .isLength({ min: 10 }).withMessage('Audit reason must be at least 10 characters'),
+];
+
 module.exports = {
   createSubjectRules,
   updateSubjectRules,
   reorderSubjectsRules,
+  deleteSubjectRules,
 };

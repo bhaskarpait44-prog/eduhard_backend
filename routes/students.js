@@ -77,7 +77,7 @@ router.post('/:id/reset-parent-password', requireAdmin, [
 router.delete('/:id',             requireAdmin, [
   param('id').isInt(),
   body('confirm_name').trim().notEmpty().withMessage('confirm_name is required'),
-  body('reason').optional({ nullable: true }).trim(),
+  body('reason').optional({ nullable: true }).trim().isLength({ min: 10 }).withMessage('reason must be at least 10 characters'),
 ], validate, ctrl.remove);
 
 router.get('/:id/history',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [

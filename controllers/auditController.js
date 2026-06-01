@@ -12,11 +12,17 @@ exports.getLogs = async (req, res, next) => {
       admin_id,
       table_name,
       record_id,
+      export: isExport = 'false',
     } = req.query;
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const limitNum = Math.max(parseInt(limit, 10) || 30, 1);
-    const offset = (pageNum - 1) * limitNum;
+    let limitNum = Math.max(parseInt(limit, 10) || 30, 1);
+    const offset = isExport === 'true' ? 0 : (pageNum - 1) * limitNum;
+
+    // If exporting, set a large but safe limit
+    if (isExport === 'true') {
+      limitNum = 5000;
+    }
 
     const replacements = {
       schoolId: req.user.school_id,
@@ -172,7 +178,39 @@ exports.getHistory = async (req, res, next) => {
 exports.getByAdmin = async (req, res, next) => {
   try {
     const { admin_id } = req.params;
-    const { from, to, limit = 100 } = req.query;
+    const { from, to, page = 1, limit = 50 } = req.query;
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(limit, 10) || 50, 1);
+    const offset = (pageNum - 1) * limitNum;
+    const schoolId = req.user.school_id;
+
+    const replacements = {
+      admin_id,
+      schoolId,
+      from: from || null,
+      to: to || null,
+      limit: limitNum,
+      offset,
+    };
+
+    const whereClause = `
+      al.changed_by = :admin_id
+      AND EXISTS (
+        SELECT 1
+        FROM users u_scope
+        WHERE u_scope.id = al.changed_by
+          AND u_scope.school_id = :schoolId
+      )
+      AND (:from IS NULL OR al.created_at >= CAST(:from AS TIMESTAMP))
+      AND (:to IS NULL OR al.created_at < CAST(:to AS TIMESTAMP) + INTERVAL '1 day')
+    `;
+
+    const [[{ total }]] = await sequelize.query(`
+      SELECT COUNT(*)::int AS total
+      FROM audit_logs al
+      WHERE ${whereClause};
+    `, { replacements });
 
     const [logs] = await sequelize.query(`
       SELECT al.id, al.table_name, al.record_id, al.field_name,
@@ -180,27 +218,21 @@ exports.getByAdmin = async (req, res, next) => {
              al.changed_by, al.created_at, u.name AS changed_by_name, u.email AS changed_by_email
       FROM audit_logs al
       LEFT JOIN users u ON u.id = al.changed_by
-      WHERE al.changed_by = :admin_id
-        AND EXISTS (
-          SELECT 1
-          FROM users u_scope
-          WHERE u_scope.id = al.changed_by
-            AND u_scope.school_id = :schoolId
-        )
-        AND (:from IS NULL OR al.created_at >= CAST(:from AS TIMESTAMP))
-        AND (:to IS NULL OR al.created_at < CAST(:to AS TIMESTAMP) + INTERVAL '1 day')
-      ORDER BY al.created_at DESC
-      LIMIT :limit;
-    `, {
-      replacements: {
-        admin_id,
-        schoolId: req.user.school_id,
-        from: from || null,
-        to: to || null,
-        limit: parseInt(limit, 10),
-      },
-    });
+      WHERE ${whereClause}
+      ORDER BY al.created_at DESC, al.id DESC
+      LIMIT :limit OFFSET :offset;
+    `, { replacements });
 
-    res.ok({ admin_id, total: logs.length, logs }, `${logs.length} change(s) by this admin.`);
+    res.ok({
+      admin_id,
+      logs,
+      total,
+      meta: {
+        page: pageNum,
+        perPage: limitNum,
+        total,
+        totalPages: Math.max(Math.ceil(total / limitNum), 1),
+      },
+    }, `${logs.length} change(s) by this admin.`);
   } catch (err) { next(err); }
 };

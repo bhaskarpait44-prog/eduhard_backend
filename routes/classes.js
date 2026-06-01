@@ -7,8 +7,9 @@ const subCtrl    = require('../controllers/subjectController');
 const {
   createClassRules, updateClassRules,
   createSectionRules, updateSectionRules,
+  deleteClassRules,
 } = require('../validators/classValidators');
-const { createSubjectRules, updateSubjectRules, reorderSubjectsRules } = require('../validators/subjectValidators');
+const { createSubjectRules, updateSubjectRules, reorderSubjectsRules, deleteSubjectRules } = require('../validators/subjectValidators');
 
 // ── All routes require auth ───────────────────────────────────────────────
 router.use(authenticate);
@@ -21,7 +22,7 @@ router.get   ('/:id',        ctrl.getById);
 router.get   ('/:id/students/pdf', ctrl.studentsPdf);
 router.get   ('/:id/students/pdf/simple', ctrl.simpleStudentsPdf);
 router.patch ('/:id',        requireAdmin, updateClassRules, validate, ctrl.update);
-router.delete('/:id',        requireAdmin, ctrl.remove);
+router.delete('/:id',        requireAdmin, deleteClassRules, validate, ctrl.remove);
 router.patch ('/:id/toggle', requireAdmin, ctrl.toggleActive);
 
 // ── Section CRUD ──────────────────────────────────────────────────────────
@@ -37,6 +38,6 @@ router.post  ('/:classId/subjects',               requireAdmin, createSubjectRul
 router.patch ('/:classId/subjects/reorder',       requireAdmin, reorderSubjectsRules, validate, subCtrl.reorder);
 router.get   ('/:classId/subjects/:id',           subCtrl.getById);
 router.patch ('/:classId/subjects/:id',           requireAdmin, updateSubjectRules, validate, subCtrl.update);
-router.delete('/:classId/subjects/:id',           requireAdmin, subCtrl.remove);
+router.delete('/:classId/subjects/:id',           requireAdmin, deleteSubjectRules, validate, subCtrl.remove);
 
 module.exports = router;

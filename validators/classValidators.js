@@ -62,6 +62,7 @@ const updateClassRules = [
   body('reason')
     .optional()
     .trim()
+    .isLength({ min: 10 }).withMessage('Audit reason must be at least 10 characters')
     .isLength({ max: 500 }).withMessage('Reason max 500 chars'),
 ];
 
@@ -101,9 +102,18 @@ const updateSectionRules = [
     .isBoolean().withMessage('is_active must be boolean'),
 ];
 
+const deleteClassRules = [
+  param('id').isInt().withMessage('Invalid class ID'),
+  body('reason')
+    .optional()
+    .trim()
+    .isLength({ min: 10 }).withMessage('Audit reason must be at least 10 characters'),
+];
+
 module.exports = {
   createClassRules,
   updateClassRules,
   createSectionRules,
   updateSectionRules,
+  deleteClassRules,
 };
