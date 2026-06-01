@@ -487,13 +487,14 @@ exports.toggleActive = async (req, res, next) => {
     const cls = await Class.findOne({ where: { id, school_id: schoolId } });
     if (!cls) return res.fail('Class not found.', [], 404);
 
-    const newStatus = !cls.is_active;
+    const oldStatus = cls.is_active;
+    const newStatus = !oldStatus;
     await cls.update({ is_active: newStatus, updated_by: req.user.id });
 
     await writeAuditLog(sequelize, {
       tableName : 'classes',
       recordId  : cls.id,
-      changes   : [{ field: 'is_active', oldValue: cls.is_active, newValue: newStatus }],
+      changes   : [{ field: 'is_active', oldValue: oldStatus, newValue: newStatus }],
       reason    : `Class ${newStatus ? 'activated' : 'deactivated'}`,
       ...auditCtx(req),
     });
