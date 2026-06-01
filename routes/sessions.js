@@ -3,7 +3,7 @@
 const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
-const { requireAdmin } = require('../middlewares/auth');
+const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
 const ctrl     = require('../controllers/sessionController');
 
 router.post('/',                requireAdmin, [
@@ -13,9 +13,9 @@ router.post('/',                requireAdmin, [
   body('working_days').isObject().withMessage('working_days object required'),
 ], validate, ctrl.create);
 
-router.get('/',                            ctrl.list);
+router.get('/',                            requireAdminOrTeacher, ctrl.list);
 router.get('/current',                     ctrl.getCurrent);
-router.get('/:id',               [param('id').isInt()], validate, ctrl.getById);
+router.get('/:id',               requireAdminOrTeacher, [param('id').isInt()], validate, ctrl.getById);
 
 router.patch('/:id', requireAdmin, [
   param('id').isInt(),

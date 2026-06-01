@@ -729,7 +729,7 @@ exports.remove = async (req, res, next) => {
       `, { replacements: {
         id,
         userId: req.user.id,
-        reason: `Session deleted by admin`,
+        reason: `Session "${session.name}" deleted by admin`,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
@@ -846,7 +846,10 @@ exports.getStats = async (req, res, next) => {
     const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
     const allDates = _internal.getDateRange(sessionInfo.start_date, calcUpTo);
     
-    const holidaySet = new Set(holidayRows.map(h => h.holiday_date));
+    const holidaySet = new Set(holidayRows.map(h => {
+      const d = h.holiday_date;
+      return d instanceof Date ? d.toISOString().split('T')[0] : String(d).slice(0, 10);
+    }));
     const workingDates = allDates.filter(date => {
       const dayOfWeek = _internal.getDayOfWeek(date);
       const colName = _internal.DAY_COLUMN_MAP[dayOfWeek];
