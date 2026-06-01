@@ -56,6 +56,10 @@ router.patch('/override',
     body('enrollment_id').isInt(),
     body('new_result').isIn(['pass', 'fail', 'compartment', 'detained']),
     body('reason').isLength({ min: 10 }),
+    body('compartment_subjects')
+      .if(body('new_result').equals('compartment'))
+      .isArray({ min: 1 })
+      .withMessage('compartment_subjects required when overriding to compartment'),
   ],
   validate,
   ctrl.override

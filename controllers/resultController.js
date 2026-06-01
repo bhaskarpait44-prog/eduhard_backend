@@ -521,6 +521,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       JOIN exam_subjects es ON es.subject_id = sub.id
       JOIN exams e ON e.id = es.exam_id
       WHERE e.session_id = :session_id AND e.class_id = :class_id
+        AND e.exam_type != 'compartment'
       ORDER BY sub.name;
     `, { replacements: { session_id, class_id } });
 
@@ -552,18 +553,24 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     `, { replacements: { session_id, class_id } });
 
     const markMap = {};
+    const isAbsentMap = {};
+
     marks.forEach(m => {
-      if (!markMap[m.enrollment_id]) markMap[m.enrollment_id] = {};
-      if (markMap[m.enrollment_id][m.subject_id] === undefined) {
-        markMap[m.enrollment_id][m.subject_id] = 0;
+      const eid = m.enrollment_id;
+      const sid = m.subject_id;
+
+      if (!markMap[eid]) markMap[eid] = {};
+      if (!isAbsentMap[eid]) isAbsentMap[eid] = {};
+
+      if (markMap[eid][sid] === undefined) {
+        markMap[eid][sid] = 0;
       }
       
       const weight = parseFloat(m.weightage || 100) / 100;
       const obtained = m.is_absent ? 0 : parseFloat(m.marks_obtained || 0);
       
-      // If student is ABS in any contributing exam, should we mark as ABS?
-      // For consolidated sheet, showing weighted marks is more accurate.
-      markMap[m.enrollment_id][m.subject_id] += (obtained * weight);
+      markMap[eid][sid] += (obtained * weight);
+      if (m.is_absent) isAbsentMap[eid][sid] = true;
     });
 
     const PDFDocument = require('pdfkit');
@@ -634,7 +641,14 @@ exports.downloadClassResultSheet = async (req, res, next) => {
 
       subjects.forEach((sub, i) => {
         const x = startX + rollWidth + nameWidth + i * subWidth;
-        const mark = markMap[student.enrollment_id]?.[sub.id] || '-';
+        const eid = student.enrollment_id;
+        const sid = sub.id;
+        
+        const rawMark = markMap[eid]?.[sid];
+        const mark = rawMark === undefined ? '-' 
+                   : (rawMark === 0 && isAbsentMap[eid]?.[sid]) ? 'ABS'
+                   : parseFloat(rawMark).toFixed(1);
+
         doc.text(mark, x, y + 6, { width: subWidth, align: 'center' });
       });
 
