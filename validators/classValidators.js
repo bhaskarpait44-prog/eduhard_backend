@@ -72,7 +72,7 @@ const createSectionRules = [
   body('name')
     .trim()
     .notEmpty().withMessage('Section name is required')
-    .isLength({ max: 50 }).withMessage('Name max 50 chars'),
+    .isLength({ max: 10 }).withMessage('Name max 10 chars'),
   body('capacity')
     .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('Capacity must be positive'),
@@ -90,7 +90,7 @@ const updateSectionRules = [
     .optional()
     .trim()
     .notEmpty().withMessage('Section name cannot be empty')
-    .isLength({ max: 50 }).withMessage('Name max 50 chars'),
+    .isLength({ max: 10 }).withMessage('Name max 10 chars'),
   body('capacity')
     .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('Capacity must be positive'),
