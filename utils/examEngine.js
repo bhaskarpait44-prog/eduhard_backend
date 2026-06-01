@@ -186,7 +186,6 @@ async function calculateResult(enrollmentId, sessionId) {
     // Weighted aggregation
     const rowMax = parseFloat(row.subject_total);
     const rowObtained = row.is_absent ? 0 : parseFloat(row.marks_obtained || 0);
-    const weight = parseFloat(row.weightage || 100) / 100;
     
     subjectMap[key].max_possible    += rowMax * weight;
     subjectMap[key].obtained        += rowObtained * weight;
