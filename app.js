@@ -68,6 +68,9 @@ app.get('/api/status', (req, res) =>
   res.ok({ status: 'ok', timestamp: new Date() })
 );
 
+app.use('/api/public', require('./routes/public'));
+app.use('/api/applications', require('./routes/applications'));
+
 app.use('/api/auth', require('./routes/auth'));
 
 app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
