@@ -56,6 +56,7 @@ exports.list = async (req, res, next) => {
     const [applications] = await sequelize.query(`
       SELECT 
         a.id, a.reference_no, a.status, a.student_data, a.created_at,
+        a.class_id, a.session_id,
         c.name AS class_name, sess.name AS session_name
       FROM applications a
       LEFT JOIN classes c ON c.id = a.class_id
@@ -216,33 +217,43 @@ exports.updateStatus = async (req, res, next) => {
           const [[maxRoll]] = await sequelize.query(`
             SELECT MAX(CAST(roll_number AS INTEGER)) AS max_roll
             FROM enrollments
-            WHERE section_id = :sectionId
+            WHERE section_id = :section_id
               AND session_id = :sessionId
               AND status = 'active'
               AND roll_number ~ '^\\d+$';
           `, { 
-            replacements: { sectionId, sessionId: application.session_id },
+            replacements: { section_id, sessionId: application.session_id },
             transaction: t
           });
           rollNo = String((parseInt(maxRoll?.max_roll) || 0) + 1);
         }
+
+        // Map joining type to DB ENUM: fresh, promoted, failed, transfer_in, rejoined
+        const joiningTypeMap = {
+          'New Admission': 'fresh',
+          'Transfer': 'transfer_in'
+        };
+        const mappedJoiningType = joiningTypeMap[joining_type] || 'fresh';
+
+        // Map stream to DB Check: regular, arts, commerce, science
+        const mappedStream = (stream || 'regular').toLowerCase();
 
         await sequelize.query(`
           INSERT INTO enrollments
             (student_id, session_id, class_id, section_id, stream, roll_number, joined_date,
              joining_type, status, created_at, updated_at)
           VALUES
-            (:studentId, :sessionId, :classId, :sectionId, :stream, :rollNumber, CURRENT_DATE,
+            (:studentId, :sessionId, :classId, :section_id, :stream, :rollNumber, CURRENT_DATE,
              :joiningType, 'active', NOW(), NOW())
         `, {
           replacements: {
             studentId: student.id,
             sessionId: application.session_id,
             classId: application.class_id,
-            sectionId,
-            stream: stream || 'regular',
+            section_id,
+            stream: mappedStream,
             rollNumber: rollNo,
-            joiningType: (joining_type || 'new_admission').toLowerCase().replace(' ', '_'),
+            joiningType: mappedJoiningType,
           },
           transaction: t,
         });
@@ -283,7 +294,57 @@ exports.updateStatus = async (req, res, next) => {
     }
 
   } catch (err) {
+    console.error('--- ADMISSION APPROVAL ERROR ---');
+    console.error('Error Name:', err.name);
+    console.error('Error Message:', err.message);
+    if (err.parent) console.error('DB Parent Error:', err.parent);
+    console.error('Stack Trace:', err.stack);
+    console.error('--------------------------------');
+
     if (err.name === 'CustomError') return res.fail(err.message, [], err.status || 400);
     next(err);
   }
+};
+
+// ── POST /api/applications/:id/email ─────────────────────────────────────────
+exports.sendEmail = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { subject, message } = req.body;
+    const schoolId = req.user.school_id;
+
+    if (!subject || !message) {
+      return res.fail('Subject and message are required.', [], 422);
+    }
+
+    const [[application]] = await sequelize.query(`
+      SELECT reference_no, student_data FROM applications WHERE id = :id AND school_id = :schoolId;
+    `, { replacements: { id, schoolId } });
+
+    if (!application) return res.fail('Application not found.', [], 404);
+
+    const email = application.student_data.email;
+    const name = `${application.student_data.first_name} ${application.student_data.last_name}`;
+
+    const mailer = require('../utils/mailer');
+    await mailer.sendMail({
+      to: email,
+      subject: `[${application.reference_no}] ${subject}`,
+      text: `Dear ${name},\n\n${message}\n\nRegards,\nAdmissions Team\n${req.user.school_name || 'The School'}`,
+      html: `
+        <div style="font-family: sans-serif; padding: 20px; color: #333;">
+          <h2 style="color: #4f46e5;">Admission Update</h2>
+          <p>Dear <strong>${name}</strong>,</p>
+          <p style="white-space: pre-wrap; line-height: 1.6;">${message}</p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
+          <p style="font-size: 12px; color: #666;">
+            Reference: ${application.reference_no}<br>
+            Please do not reply to this automated email.
+          </p>
+        </div>
+      `
+    });
+
+    res.ok(null, 'Email sent successfully.');
+  } catch (err) { next(err); }
 };
