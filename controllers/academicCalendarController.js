@@ -26,12 +26,12 @@ exports.downloadPdf = async (req, res) => {
 
     // 2. Fetch Session Details
     const [[session]] = await sequelize.query(
-      `SELECT name FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
+      `SELECT id, name FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
       { replacements: { sessionId: session_id, schoolId } }
     );
 
     if (!session) {
-      return res.fail('Session not found');
+      return res.fail('Session not found or access denied');
     }
 
     // 3. Fetch Events (reuse logic from list)
@@ -51,9 +51,11 @@ exports.downloadPdf = async (req, res) => {
     const replacements = { schoolId, sessionId: session_id };
 
     if (month && year) {
-      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
-      replacements.month = month;
-      replacements.year = year;
+      const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
+      const lastDay = new Date(year, month, 0).toISOString().split('T')[0];
+      query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
+      replacements.firstDay = firstDay;
+      replacements.lastDay = lastDay;
     }
 
     if (event_type) {
@@ -74,7 +76,7 @@ exports.downloadPdf = async (req, res) => {
         WHERE session_id = :sessionId
       `;
       if (month && year) {
-        holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+        holidaysQuery += ` AND holiday_date >= :firstDay AND holiday_date <= :lastDay`;
       }
       query = `(${query}) UNION ALL (${holidaysQuery})`;
     }
@@ -111,6 +113,13 @@ exports.list = async (req, res) => {
       return res.fail('session_id is required');
     }
 
+    // Validate Session
+    const [[session]] = await sequelize.query(
+      `SELECT id FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
+      { replacements: { sessionId: session_id, schoolId } }
+    );
+    if (!session) return res.fail('Invalid session ID or access denied');
+
     const columns = `
       ae.id, ae.school_id, ae.session_id, ae.title, ae.description, ae.event_type, 
       ae.start_date, ae.end_date, ae.start_time, ae.end_time, ae.is_all_day, 
@@ -127,9 +136,11 @@ exports.list = async (req, res) => {
     const replacements = { schoolId, sessionId: session_id };
 
     if (month && year) {
-      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
-      replacements.month = month;
-      replacements.year = year;
+      const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
+      const lastDay = new Date(year, month, 0).toISOString().split('T')[0];
+      query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
+      replacements.firstDay = firstDay;
+      replacements.lastDay = lastDay;
     }
 
     if (event_type) {
@@ -150,7 +161,7 @@ exports.list = async (req, res) => {
         WHERE session_id = :sessionId
       `;
       if (month && year) {
-        holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+        holidaysQuery += ` AND holiday_date >= :firstDay AND holiday_date <= :lastDay`;
       }
       query = `(${query}) UNION ALL (${holidaysQuery})`;
     }
@@ -181,6 +192,22 @@ exports.create = async (req, res) => {
 
     if (!session_id || !title || !event_type || !start_date || !end_date) {
       return res.fail('Missing required fields');
+    }
+
+    // Validate Session
+    const [[session]] = await sequelize.query(
+      `SELECT id FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
+      { replacements: { sessionId: session_id, schoolId } }
+    );
+    if (!session) return res.fail('Invalid session ID or access denied');
+
+    // Validate Class if provided
+    if (target_class_id) {
+      const [[cls]] = await sequelize.query(
+        `SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId`,
+        { replacements: { classId: target_class_id, schoolId } }
+      );
+      if (!cls) return res.fail('Invalid class ID or access denied');
     }
 
     if (new Date(end_date) < new Date(start_date)) {
@@ -250,6 +277,15 @@ exports.update = async (req, res) => {
       return res.fail('Event not found or access denied', [], 404);
     }
 
+    // If target_class_id is updated, validate it
+    if (updates.target_class_id) {
+      const [[cls]] = await sequelize.query(
+        `SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId`,
+        { replacements: { classId: updates.target_class_id, schoolId } }
+      );
+      if (!cls) return res.fail('Invalid class ID or access denied');
+    }
+
     const startDate = updates.start_date || existing.start_date;
     const endDate = updates.end_date || existing.end_date;
 
@@ -291,6 +327,10 @@ exports.update = async (req, res) => {
     `, { replacements: { id } });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
+
+    if (event.is_published && event.notify_on_publish && updates.is_published) {
+      fireEventNotification(event);
+    }
 
     res.ok(event, 'Event updated successfully');
   } catch (err) {
@@ -402,6 +442,34 @@ async function fireEventNotification(event) {
       const studentIds = students.map(s => s.id);
       if (studentIds.length > 0) {
         sendPushToStudents(studentIds, payload);
+      }
+    }
+
+    // For parents
+    if (event.audience === 'everyone' || event.audience === 'parents') {
+      let parentQuery = `
+        SELECT DISTINCT f.user_id 
+        FROM families f
+        JOIN students s ON s.family_id = f.id
+        WHERE s.school_id = :schoolId AND s.is_active = true AND s.is_deleted = false AND f.user_id IS NOT NULL
+      `;
+      const replacements = { schoolId: event.school_id };
+
+      if (event.target_class_id) {
+        parentQuery = `
+          SELECT DISTINCT f.user_id
+          FROM families f
+          JOIN students s ON s.family_id = f.id
+          JOIN enrollments e ON e.student_id = s.id
+          WHERE s.school_id = :schoolId AND e.class_id = :classId AND e.status = 'active' AND f.user_id IS NOT NULL
+        `;
+        replacements.classId = event.target_class_id;
+      }
+
+      const [parents] = await sequelize.query(parentQuery, { replacements });
+      const parentUserIds = parents.map(p => p.user_id);
+      if (parentUserIds.length > 0) {
+        sendPushToUsers(parentUserIds, payload);
       }
     }
 

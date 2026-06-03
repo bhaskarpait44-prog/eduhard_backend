@@ -6,7 +6,7 @@ const { invalidateCache } = require('../middlewares/cache');
 exports.getSettings = async (req, res, next) => {
   try {
     const [[school]] = await sequelize.query(`
-      SELECT id, name, upi_id, upi_name, upi_enabled, email, phone, address
+      SELECT id, name, upi_id, upi_name, upi_enabled, email, phone, address, online_admission_open
       FROM schools
       WHERE id = :schoolId
       LIMIT 1;
@@ -22,6 +22,7 @@ exports.getSettings = async (req, res, next) => {
       school_email: school.email,
       school_phone: school.phone,
       school_address: school.address,
+      online_admission_open: !!school.online_admission_open,
     });
   } catch (err) { next(err); }
 };
@@ -30,7 +31,8 @@ exports.updateSettings = async (req, res, next) => {
   try {
     const { 
       upi_id, upi_name, upi_enabled, 
-      school_name, school_email, school_phone, school_address 
+      school_name, school_email, school_phone, school_address,
+      online_admission_open
     } = req.body;
     const schoolId = req.user.school_id;
 
@@ -44,6 +46,7 @@ exports.updateSettings = async (req, res, next) => {
         email = :schoolEmail,
         phone = :schoolPhone,
         address = :schoolAddress,
+        online_admission_open = :onlineAdmissionOpen,
         updated_at = NOW()
       WHERE id = :schoolId;
     `, { replacements: { 
@@ -54,12 +57,14 @@ exports.updateSettings = async (req, res, next) => {
       schoolEmail: school_email || null,
       schoolPhone: school_phone || null,
       schoolAddress: school_address || null,
+      onlineAdmissionOpen: online_admission_open !== undefined ? online_admission_open : false,
       schoolId 
     } });
 
     res.ok({ 
       upi_id, upi_name, upi_enabled, 
-      school_name, school_email, school_phone, school_address 
+      school_name, school_email, school_phone, school_address,
+      online_admission_open
     }, 'Settings updated successfully.');
     invalidateCache(schoolId, '/api/settings*');
     invalidateCache(schoolId, '/api/student*');

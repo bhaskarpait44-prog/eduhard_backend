@@ -5,19 +5,20 @@ const sequelize = require('../config/database');
 // ── GET /api/public/sessions/current ────────────────────────────────────────
 exports.getCurrentSession = async (req, res, next) => {
   try {
-    // We assume the first school for public access if not specified
-    // Or we can allow school_id as a query param
     const schoolId = req.query.school_id || 1;
 
-    const [[session]] = await sequelize.query(`
-      SELECT id, name, start_date, end_date
-      FROM sessions
-      WHERE school_id = :schoolId AND is_current = true
+    const [[data]] = await sequelize.query(`
+      SELECT 
+        s.id, s.name, s.start_date, s.end_date,
+        sch.online_admission_open
+      FROM sessions s
+      JOIN schools sch ON sch.id = s.school_id
+      WHERE s.school_id = :schoolId AND s.is_current = true
       LIMIT 1;
     `, { replacements: { schoolId } });
 
-    if (!session) return res.ok(null, 'No active session found.');
-    res.ok(session, 'Current session retrieved.');
+    if (!data) return res.ok(null, 'No active session found.');
+    res.ok(data, 'Current session retrieved.');
   } catch (err) { next(err); }
 };
 
@@ -45,12 +46,21 @@ exports.createApplication = async (req, res, next) => {
       ...rest 
     } = req.body;
     
-    // Validate required fields (already done by frontend, but safety first)
+    // Validate required fields
     if (!first_name || !last_name || !email || !class_id) {
       return res.fail('Missing required fields.', [], 422);
     }
 
     const schoolId = req.body.school_id || 1;
+
+    // Check if admissions are open
+    const [[school]] = await sequelize.query(`
+      SELECT online_admission_open FROM schools WHERE id = :schoolId;
+    `, { replacements: { schoolId } });
+
+    if (!school || !school.online_admission_open) {
+      return res.fail('Online admissions are currently closed.', [], 403);
+    }
 
     // Get current session for this school
     const [[session]] = await sequelize.query(`

@@ -12,6 +12,7 @@ const School = sequelize.define('School', {
   email       : { type: DataTypes.STRING(150), allowNull: true, validate: { isEmail: true } },
   logo_url    : { type: DataTypes.STRING(500), allowNull: true },
   principal_name: { type: DataTypes.STRING(150), allowNull: true },
+  online_admission_open: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
   is_active   : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
 }, {
   tableName  : 'schools',
