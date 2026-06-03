@@ -105,7 +105,7 @@ app.use('/api/exams',
 );
 
 app.use('/api/analytics', require('./routes/analytics'));
-
+app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/results',
   requirePermission('results.view'),
   require('./routes/results')
