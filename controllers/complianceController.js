@@ -21,7 +21,7 @@ exports.getReport = async (req, res, next) => {
 
     // 2. Fetch Session Date Range for queries that don't directly use session_id (like audit_logs, payrolls)
     const [[sessionInfo]] = await sequelize.query(`
-      SELECT start_date, end_date FROM sessions WHERE id = :sessionId;
+      SELECT id, name, start_date, end_date FROM sessions WHERE id = :sessionId;
     `, { replacements: { sessionId } });
 
     if (!sessionInfo) return res.fail('Session not found.');
@@ -49,12 +49,12 @@ exports.getReport = async (req, res, next) => {
       (async () => {
         const [[stats]] = await sequelize.query(`
           SELECT 
-            COUNT(*)::int AS total_enrolled,
-            COUNT(*) FILTER (WHERE e.joining_type = 'fresh')::int AS new_admissions,
+            COUNT(*) FILTER (WHERE e.status = 'active')::int AS total_enrolled,
+            COUNT(*) FILTER (WHERE e.joining_type = 'fresh' AND e.status = 'active')::int AS new_admissions,
             COUNT(*) FILTER (WHERE e.left_date IS NOT NULL)::int AS students_left
           FROM enrollments e
           JOIN students s ON s.id = e.student_id
-          WHERE e.session_id = :sessionId AND s.school_id = :schoolId AND e.status = 'active';
+          WHERE e.session_id = :sessionId AND s.school_id = :schoolId;
         `, { replacements: { sessionId, schoolId } });
 
         const genderBreakdown = await sequelize.query(`
@@ -71,14 +71,14 @@ exports.getReport = async (req, res, next) => {
             SELECT COUNT(*)::int AS new_admissions
             FROM enrollments e
             JOIN students s ON s.id = e.student_id
-            WHERE e.session_id = :prevSessionId AND s.school_id = :schoolId AND e.joining_type = 'fresh';
+            WHERE e.session_id = :prevSessionId AND s.school_id = :schoolId AND e.joining_type = 'fresh' AND e.status = 'active';
           `, { replacements: { prevSessionId, schoolId } });
           prevNewAdmissions = prevStats?.new_admissions || 0;
         }
 
         const total = stats.total_enrolled || 0;
         const left = stats.students_left || 0;
-        const retentionRate = total > 0 ? ((total - left) / total) * 100 : 100;
+        const retentionRate = total > 0 ? ((total) / (total + left)) * 100 : 100;
 
         return {
           total_enrolled: total,
@@ -279,7 +279,7 @@ exports.getReport = async (req, res, next) => {
         const [[issues]] = await sequelize.query(`
           SELECT 
             COUNT(*)::int AS total_issues,
-            COUNT(DISTINCT borrower_id) FILTER (WHERE borrower_type = 'student')::int AS active_borrowers,
+            COUNT(DISTINCT borrower_id) FILTER (WHERE borrower_type = 'student' AND status = 'issued')::int AS active_borrowers,
             COUNT(*) FILTER (WHERE status = 'overdue' OR (status = 'issued' AND due_date < CURRENT_DATE))::int AS overdue_count
           FROM library_issues
           WHERE school_id = :schoolId AND issue_date BETWEEN :start AND :end;
@@ -337,6 +337,7 @@ exports.getReport = async (req, res, next) => {
     res.ok({
       session: {
         id: sessionId,
+        name: sessionInfo.name,
         start_date: sessionInfo.start_date,
         end_date: sessionInfo.end_date
       },
