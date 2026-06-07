@@ -132,9 +132,17 @@ exports.generatePayroll = async (req, res, next) => {
     if (!month || !year) throw new Error('Month and year required.');
 
     const [structures] = await sequelize.query(`
-      SELECT user_id, teacher_id, basic, hra, da, allowances, deductions
-      FROM salary_structures
-      WHERE school_id = :schoolId;
+      SELECT 
+        ss.user_id, ss.teacher_id, ss.basic, ss.hra, ss.da, ss.allowances, ss.deductions
+      FROM salary_structures ss
+      LEFT JOIN users u ON u.id = ss.user_id
+      LEFT JOIN teachers t ON t.id = ss.teacher_id
+      WHERE ss.school_id = :schoolId
+        AND (
+          (ss.user_id IS NOT NULL AND u.is_active = true AND u.is_deleted = false)
+          OR
+          (ss.teacher_id IS NOT NULL AND t.is_active = true AND t.is_deleted = false)
+        );
     `, { replacements: { schoolId }, transaction });
 
     if (structures.length === 0) {

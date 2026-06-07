@@ -65,7 +65,7 @@ exports.createReservation = async (req, res, next) => {
       actualBorrowerId = student.id;
     }
 
-    // 3. Check if already reserved or issued
+    // 3. Check if already reserved
     const existing = await LibraryReservation.findOne({
       where: { 
         school_id: schoolId, 
@@ -78,7 +78,16 @@ exports.createReservation = async (req, res, next) => {
 
     if (existing) return res.fail('You already have an active reservation for this book.', [], 400);
 
-    // 4. Create reservation
+    // 4. Check if currently issued to this borrower
+    const [[activeIssue]] = await sequelize.query(`
+      SELECT id FROM library_issues
+      WHERE book_id = :book_id AND borrower_id = :borrowerId AND borrower_type = :borrowerType AND status != 'returned'
+      LIMIT 1;
+    `, { replacements: { book_id, borrowerId: actualBorrowerId, borrowerType } });
+
+    if (activeIssue) return res.fail('You already have this book issued to you.', [], 400);
+
+    // 5. Create reservation
     const reservation = await LibraryReservation.create({
       school_id: schoolId,
       book_id,

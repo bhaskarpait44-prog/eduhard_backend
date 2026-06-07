@@ -14,6 +14,7 @@ const collectFeesRules = [
   body('bank_name').optional({ nullable: true }).trim(),
   body('cheque_number').optional({ nullable: true }).trim(),
   body('cheque_date').optional({ nullable: true }).isDate(),
+  body('upi_id').optional({ nullable: true }).trim().isLength({ max: 100 }),
 ];
 
 const createNoticeRules = [

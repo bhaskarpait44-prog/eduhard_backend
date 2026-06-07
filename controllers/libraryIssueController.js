@@ -87,12 +87,20 @@ exports.issueBook = async (req, res, next) => {
     `, { replacements: { book_id }, transaction: t });
 
     // Handle Reservations: If this borrower had a reservation, mark it as completed
-    await sequelize.query(`
-      UPDATE library_reservations SET
-        status = 'completed',
-        updated_at = NOW()
+    const [[reservation]] = await sequelize.query(`
+      SELECT id FROM library_reservations 
       WHERE book_id = :book_id AND borrower_id = :borrower_id AND borrower_type = :borrower_type AND status IN ('pending', 'ready')
+      LIMIT 1
     `, { replacements: { book_id, borrower_id, borrower_type }, transaction: t });
+
+    if (reservation) {
+      await sequelize.query(`
+        UPDATE library_reservations SET
+          status = 'completed',
+          updated_at = NOW()
+        WHERE id = :reservationId
+      `, { replacements: { reservationId: reservation.id }, transaction: t });
+    }
 
     await t.commit();
     res.ok(issue[0], 'Book issued successfully.', 201);
@@ -151,15 +159,15 @@ exports.returnBook = async (req, res, next) => {
 
     await sequelize.query(`
       UPDATE library_books SET available_copies = available_copies + 1, updated_at = NOW()
-      WHERE id = :bookId
+      WHERE id = :bookId;
     `, { replacements: { bookId: issue.book_id }, transaction: t });
 
     // Handle Reservations: Check if anyone is waiting for this book
     const [[nextReservation]] = await sequelize.query(`
-      SELECT id FROM library_reservations
+      SELECT id, borrower_id, borrower_type FROM library_reservations
       WHERE book_id = :bookId AND school_id = :schoolId AND status = 'pending'
       ORDER BY reservation_date ASC
-      LIMIT 1
+      LIMIT 1;
     `, { replacements: { bookId: issue.book_id, schoolId }, transaction: t });
 
     if (nextReservation) {
@@ -171,7 +179,7 @@ exports.returnBook = async (req, res, next) => {
           status = 'ready',
           expires_at = :expiresAt,
           updated_at = NOW()
-        WHERE id = :reservationId
+        WHERE id = :reservationId;
       `, { 
         replacements: { 
           reservationId: nextReservation.id,
@@ -179,7 +187,12 @@ exports.returnBook = async (req, res, next) => {
         },
         transaction: t
       });
-      // In a real app, send a push notification here
+
+      // Keep availability reduced as it's now "held" for this user
+      await sequelize.query(`
+        UPDATE library_books SET available_copies = available_copies - 1, updated_at = NOW()
+        WHERE id = :bookId;
+      `, { replacements: { bookId: issue.book_id }, transaction: t });
     }
 
     await t.commit();

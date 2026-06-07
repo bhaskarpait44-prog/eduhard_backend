@@ -82,47 +82,48 @@ function buildDueDates(sessionStart, sessionEnd, frequency, dueDay) {
  *   breakdown        : Array
  * }}
  */
-async function generateInvoices(sessionId) {
-  // ── Fetch session date range ─────────────────────────────────────────────
-  const [[session]] = await sequelize.query(`
-    SELECT id, name, start_date, end_date
-    FROM sessions
-    WHERE id = :sessionId;
-  `, { replacements: { sessionId } });
+async function generateInvoices(sessionId, options = {}) {
+  const { transaction: externalTransaction } = options;
 
-  if (!session) throw new Error(`Session id=${sessionId} not found.`);
+  const execute = async (t) => {
+    // ── Fetch session date range ─────────────────────────────────────────────
+    const [[session]] = await sequelize.query(`
+      SELECT id, name, start_date, end_date
+      FROM sessions
+      WHERE id = :sessionId;
+    `, { replacements: { sessionId }, transaction: t });
 
-  // ── Fetch all active enrollments for this session ────────────────────────
-  const [enrollments] = await sequelize.query(`
-    SELECT e.id AS enrollment_id, e.class_id, e.student_id,
-           (SELECT COUNT(id) FROM students WHERE family_id = s.family_id AND is_deleted = false AND is_active = true) AS sibling_count
-    FROM enrollments e
-    JOIN students s ON s.id = e.student_id
-    WHERE e.session_id = :sessionId
-      AND e.status     = 'active';
-  `, { replacements: { sessionId } });
+    if (!session) throw new Error(`Session id=${sessionId} not found.`);
 
-  // ── Fetch all active fee structures for this session ─────────────────────
-  const [structures] = await sequelize.query(`
-    SELECT id, class_id, name, amount, frequency, due_day
-    FROM fee_structures
-    WHERE session_id = :sessionId
-      AND is_active  = true;
-  `, { replacements: { sessionId } });
+    // ── Fetch all active enrollments for this session ────────────────────────
+    const [enrollments] = await sequelize.query(`
+      SELECT e.id AS enrollment_id, e.class_id, e.student_id,
+             (SELECT COUNT(id) FROM students WHERE family_id = s.family_id AND is_deleted = false AND is_active = true) AS sibling_count
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.session_id = :sessionId
+        AND e.status     = 'active';
+    `, { replacements: { sessionId }, transaction: t });
 
-  // Group structures by class_id for fast lookup
-  const structuresByClass = {};
-  structures.forEach(s => {
-    if (!structuresByClass[s.class_id]) structuresByClass[s.class_id] = [];
-    structuresByClass[s.class_id].push(s);
-  });
+    // ── Fetch all active fee structures for this session ─────────────────────
+    const [structures] = await sequelize.query(`
+      SELECT id, class_id, name, amount, frequency, due_day
+      FROM fee_structures
+      WHERE session_id = :sessionId
+        AND is_active  = true;
+    `, { replacements: { sessionId }, transaction: t });
 
-  let invoicesCreated = 0;
-  let invoicesSkipped = 0;
-  const breakdown     = [];
+    // Group structures by class_id for fast lookup
+    const structuresByClass = {};
+    structures.forEach(s => {
+      if (!structuresByClass[s.class_id]) structuresByClass[s.class_id] = [];
+      structuresByClass[s.class_id].push(s);
+    });
 
-  // ── Process each enrollment ──────────────────────────────────────────────
-  await sequelize.transaction(async (t) => {
+    let invoicesCreated = 0;
+    let invoicesSkipped = 0;
+    const breakdown     = [];
+
     for (const enrollment of enrollments) {
       const classStructures = structuresByClass[enrollment.class_id] || [];
       const enrollmentSummary = { enrollmentId: enrollment.enrollment_id, invoices: [] };
@@ -193,17 +194,20 @@ async function generateInvoices(sessionId) {
 
       if (enrollmentSummary.invoices.length > 0) breakdown.push(enrollmentSummary);
     }
-  });
 
-  return {
-    sessionId,
-    sessionName      : session.name,
-    totalEnrollments : enrollments.length,
-    totalStructures  : structures.length,
-    invoicesCreated,
-    invoicesSkipped,
-    breakdown,
+    return {
+      sessionId,
+      sessionName      : session.name,
+      totalEnrollments : enrollments.length,
+      totalStructures  : structures.length,
+      invoicesCreated,
+      invoicesSkipped,
+      breakdown,
+    };
   };
+
+  if (externalTransaction) return execute(externalTransaction);
+  return sequelize.transaction(execute);
 }
 
 
@@ -235,9 +239,10 @@ async function generateInvoices(sessionId) {
  *   details           : Array
  * }}
  */
-async function carryForwardFees(studentId, fromSessionId, toSessionId) {
-  return sequelize.transaction(async (t) => {
+async function carryForwardFees(studentId, fromSessionId, toSessionId, options = {}) {
+  const { transaction: externalTransaction } = options;
 
+  const execute = async (t) => {
     // ── Fetch both enrollments ───────────────────────────────────────────
     const [[fromEnrollment]] = await sequelize.query(`
       SELECT e.id, s.name AS session_name
@@ -361,7 +366,10 @@ async function carryForwardFees(studentId, fromSessionId, toSessionId) {
       totalAmountCarried : parseFloat(totalAmountCarried.toFixed(2)),
       details,
     };
-  });
+  };
+
+  if (externalTransaction) return execute(externalTransaction);
+  return sequelize.transaction(execute);
 }
 
 
@@ -399,15 +407,15 @@ async function carryForwardFees(studentId, fromSessionId, toSessionId) {
  *   originalInvoiceAlsoClosed: boolean,
  * }}
  */
-async function applyPayment(invoiceId, paymentData) {
+async function applyPayment(invoiceId, paymentData, options = {}) {
   const { amount, paymentDate, paymentMode, transactionRef, receivedBy, upiId } = paymentData;
+  const { transaction: externalTransaction } = options;
 
   if (!amount || amount <= 0) {
     throw new Error('Payment amount must be greater than 0.');
   }
 
-  return sequelize.transaction(async (t) => {
-
+  const execute = async (t) => {
     // ── Fetch invoice with row lock ───────────────────────────────────────
     const [[invoice]] = await sequelize.query(`
       SELECT
@@ -513,9 +521,14 @@ async function applyPayment(invoiceId, paymentData) {
       originalInvoiceAlsoClosed,
       carryFromInvoiceId       : invoice.carry_from_invoice_id || null,
     };
-  });
+  };
+
+  if (externalTransaction) {
+    return execute(externalTransaction);
   }
 
+  return sequelize.transaction(execute);
+}
   /**
   * Calculates the total pending balance for a student's enrollment.
   * Returns the sum of (amount_due + late_fee - concession - amount_paid)

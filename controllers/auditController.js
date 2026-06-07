@@ -36,12 +36,7 @@ exports.getLogs = async (req, res, next) => {
     };
 
     const whereClause = `
-      EXISTS (
-        SELECT 1
-        FROM users u_scope
-        WHERE u_scope.id = al.changed_by
-          AND u_scope.school_id = :schoolId
-      )
+      al.school_id = :schoolId
       AND (:from IS NULL OR al.created_at >= CAST(:from AS TIMESTAMP))
       AND (:to IS NULL OR al.created_at < CAST(:to AS TIMESTAMP) + INTERVAL '1 day')
       AND (:admin_id IS NULL OR al.changed_by = CAST(:admin_id AS INTEGER))
@@ -96,28 +91,13 @@ exports.getDetail = async (req, res, next) => {
 
     const [[log]] = await sequelize.query(`
       SELECT
-        al.id,
-        al.table_name,
-        al.record_id,
-        al.field_name,
-        al.old_value,
-        al.new_value,
-        al.reason,
-        al.ip_address,
-        al.device_info,
-        al.changed_by,
-        al.created_at,
+        al.*,
         u.name AS changed_by_name,
         u.email AS changed_by_email
       FROM audit_logs al
       LEFT JOIN users u ON u.id = al.changed_by
       WHERE al.id = :id
-        AND EXISTS (
-          SELECT 1
-          FROM users u_scope
-          WHERE u_scope.id = al.changed_by
-            AND u_scope.school_id = :schoolId
-        )
+        AND al.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
@@ -155,18 +135,12 @@ exports.getHistory = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [logs] = await sequelize.query(`
-      SELECT al.id, al.field_name, al.old_value, al.new_value,
-             al.reason, al.ip_address, al.device_info, al.created_at,
+      SELECT al.*,
              u.name AS changed_by_name, u.email AS changed_by_email
       FROM audit_logs al
       LEFT JOIN users u ON u.id = al.changed_by
       WHERE al.table_name = :table AND al.record_id = :record_id
-        AND EXISTS (
-          SELECT 1
-          FROM users u_scope
-          WHERE u_scope.id = al.changed_by
-            AND u_scope.school_id = :schoolId
-        )
+        AND al.school_id = :schoolId
       ORDER BY al.created_at DESC
       LIMIT :limit OFFSET :offset;
     `, { replacements: { table, record_id, schoolId, limit: parseInt(limit), offset: parseInt(offset) } });
@@ -196,12 +170,7 @@ exports.getByAdmin = async (req, res, next) => {
 
     const whereClause = `
       al.changed_by = :admin_id
-      AND EXISTS (
-        SELECT 1
-        FROM users u_scope
-        WHERE u_scope.id = al.changed_by
-          AND u_scope.school_id = :schoolId
-      )
+      AND al.school_id = :schoolId
       AND (:from IS NULL OR al.created_at >= CAST(:from AS TIMESTAMP))
       AND (:to IS NULL OR al.created_at < CAST(:to AS TIMESTAMP) + INTERVAL '1 day')
     `;
@@ -213,9 +182,8 @@ exports.getByAdmin = async (req, res, next) => {
     `, { replacements });
 
     const [logs] = await sequelize.query(`
-      SELECT al.id, al.table_name, al.record_id, al.field_name,
-             al.old_value, al.new_value, al.reason, al.ip_address, al.device_info,
-             al.changed_by, al.created_at, u.name AS changed_by_name, u.email AS changed_by_email
+      SELECT al.*,
+             u.name AS changed_by_name, u.email AS changed_by_email
       FROM audit_logs al
       LEFT JOIN users u ON u.id = al.changed_by
       WHERE ${whereClause}

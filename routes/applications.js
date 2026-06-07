@@ -39,7 +39,18 @@ const upload = multer({
 router.post('/', upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'birth_certificate', maxCount: 1 },
-  { name: 'marksheet', maxCount: 1 }
+  { name: 'transfer_certificate', maxCount: 1 },
+  { name: 'marksheet', maxCount: 1 },
+  { name: 'admit_card', maxCount: 1 },
+  { name: 'pass_certificate', maxCount: 1 },
+  { name: 'registration_certificate', maxCount: 1 },
+  { name: 'character_certificate', maxCount: 1 },
+  { name: 'prc', maxCount: 1 },
+  { name: 'caste_certificate', maxCount: 1 },
+  { name: 'blood_group_doc', maxCount: 1 },
+  { name: 'aadhar_student', maxCount: 1 },
+  { name: 'aadhar_father', maxCount: 1 },
+  { name: 'aadhar_mother', maxCount: 1 }
 ]), publicCtrl.createApplication);
 
 // Admin routes

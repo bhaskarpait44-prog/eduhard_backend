@@ -299,16 +299,14 @@ exports.getReport = async (req, res, next) => {
           SELECT 
             COUNT(*)::int AS total_actions,
             COUNT(DISTINCT changed_by)::int AS unique_admins
-          FROM audit_logs al
-          JOIN users u ON u.id = al.changed_by
-          WHERE u.school_id = :schoolId AND al.created_at BETWEEN :start AND :end;
+          FROM audit_logs
+          WHERE school_id = :schoolId AND created_at BETWEEN :start AND :end;
         `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
 
         const [[mostModified]] = await sequelize.query(`
           SELECT table_name, COUNT(*)::int AS count
-          FROM audit_logs al
-          JOIN users u ON u.id = al.changed_by
-          WHERE u.school_id = :schoolId AND al.created_at BETWEEN :start AND :end
+          FROM audit_logs
+          WHERE school_id = :schoolId AND created_at BETWEEN :start AND :end
           GROUP BY table_name
           ORDER BY count DESC
           LIMIT 1;

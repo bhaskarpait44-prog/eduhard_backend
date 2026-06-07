@@ -187,7 +187,7 @@ router.post('/student/login',
         LIMIT 1;
       `, { replacements: { admission_no: searchAdmission, email: searchEmail } });
 
-      if (!student) return res.fail('Invalid credentials.', [], 401);
+      if (!student) return res.fail('Incorrect admission number or email.', [], 401);
       if (!student.is_active) return res.fail('Account is deactivated.', [], 401);
       if (!student.password_hash) return res.fail('Portal access not configured. Please contact school admin.', [], 401);
 
@@ -218,7 +218,7 @@ router.post('/student/login',
         if (lockedUntil) {
           return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
         }
-        return res.fail('Invalid credentials.', [], 401);
+        return res.fail('Incorrect password.', [], 401);
       }
 
       // Reset failed attempts on success
@@ -287,7 +287,7 @@ router.post('/login',
         LIMIT 1;
       `, { replacements: { email } });
 
-      if (!user) return res.fail('Invalid credentials.', [], 401);
+      if (!user) return res.fail('Email is incorrect.', [], 401);
       if (!user.is_active) return res.fail('Account is deactivated.', [], 401);
 
       // Check if account is locked
@@ -326,7 +326,7 @@ router.post('/login',
         if (lockedUntil) {
           return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
         }
-        return res.fail('Invalid credentials.', [], 401);
+        return res.fail('Password is incorrect.', [], 401);
       }
 
       const normalizedRole = normalizeUserRole(user.role);

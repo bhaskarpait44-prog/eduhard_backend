@@ -74,6 +74,7 @@ const audit = async (tableName, recordId, changes, req) => {
   const rows = (Array.isArray(changes) ? changes : [changes]).map(c => ({
     table_name  : tableName,
     record_id   : recordId,
+    school_id   : req.user?.school_id || null,
     field_name  : c.field,
     old_value   : c.oldValue != null ? String(c.oldValue) : null,
     new_value   : c.newValue != null ? String(c.newValue) : null,
@@ -83,7 +84,11 @@ const audit = async (tableName, recordId, changes, req) => {
     device_info : (req.headers['user-agent'] || '').substring(0, 299),
     created_at  : new Date(),
   }));
-  try { await sequelize.getQueryInterface().bulkInsert('audit_logs', rows); } catch {}
+  try { 
+    await sequelize.getQueryInterface().bulkInsert('audit_logs', rows); 
+  } catch (err) {
+    console.error(`[Audit] Failed to log change for ${tableName}:${recordId}`, err.message);
+  }
 };
 
 // ── Helper: check caller can manage target ────────────────────────────────
@@ -206,20 +211,21 @@ exports.list = async (req, res, next) => {
       GROUP BY is_active;
     `, { replacements });
 
-    // Fetch online status from Redis
-    const usersWithOnlineStatus = await Promise.all(users.map(async (user) => {
-      let is_online = false;
-      if (redis.status === 'ready') {
+    // Fetch online status from Redis efficiently using a pipeline
+    let usersWithOnlineStatus = users.map(u => ({ ...u, role: normalizeUserRole(u.role), is_online: false }));
+    
+    if (redis.status === 'ready' && users.length > 0) {
+      const pipeline = redis.pipeline();
+      users.forEach(user => {
         const key = `online:${schoolId}:${user.role}:${user.source_id}`;
-        const val = await redis.get(key);
-        is_online = val === '1';
-      }
-      return {
+        pipeline.get(key);
+      });
+      const results = await pipeline.exec();
+      usersWithOnlineStatus = usersWithOnlineStatus.map((user, idx) => ({
         ...user,
-        role: normalizeUserRole(user.role),
-        is_online,
-      };
-    }));
+        is_online: results[idx] && results[idx][1] === '1'
+      }));
+    }
 
     return res.ok({
       users: usersWithOnlineStatus,

@@ -25,13 +25,14 @@ async function audit(tableName, recordId, changes, req) {
   const rows = (Array.isArray(changes) ? changes : [changes]).map((change) => ({
     table_name: tableName,
     record_id: recordId,
+    school_id: req.user?.school_id || null,
     field_name: change.field,
     old_value: change.oldValue != null ? String(change.oldValue) : null,
     new_value: change.newValue != null ? String(change.newValue) : null,
     changed_by: req.user?.id || null,
     reason: change.reason || null,
     ip_address: req.ip || null,
-    device_info: (req.headers['user-agent'] || '').slice(0, 299),
+    device_info: (req.headers['user-agent'] || '').substring(0, 299),
     created_at: new Date(),
   }));
 
@@ -213,7 +214,8 @@ exports.teachers = async (req, res, next) => {
 
 exports.assignments = async (req, res, next) => {
   try {
-    const session = await getCurrentSession(req.user.school_id);
+    const schoolId = req.user.school_id;
+    const session = await getCurrentSession(schoolId);
     const [rows] = await sequelize.query(`
       SELECT
         ta.*,
@@ -230,20 +232,23 @@ exports.assignments = async (req, res, next) => {
       JOIN sections sec ON sec.id = ta.section_id
       JOIN sessions sess ON sess.id = ta.session_id
       LEFT JOIN subjects sub ON sub.id = ta.subject_id
-      WHERE ta.session_id = :sessionId
+      WHERE ta.session_id = :sessionId AND u.school_id = :schoolId
       ORDER BY ta.is_active DESC, u.first_name ASC, u.last_name ASC, c.name ASC, sec.name ASC, ta.is_class_teacher DESC;
-    `, { replacements: { sessionId: session?.id || 0 } });
+    `, { replacements: { sessionId: session?.id || 0, schoolId } });
 
-    // Check online status in Redis for each teacher in the assignments
-    const assignmentsWithOnlineStatus = await Promise.all(rows.map(async (row) => {
-      let is_online = false;
-      if (redis.status === 'ready') {
-        const key = `online:${req.user.school_id}:teacher:${row.teacher_id}`;
-        const val = await redis.get(key);
-        is_online = val === '1';
-      }
-      return { ...row, is_online };
-    }));
+    // Check online status in Redis for each teacher using a pipeline
+    let assignmentsWithOnlineStatus = rows.map(r => ({ ...r, is_online: false }));
+    if (redis.status === 'ready' && rows.length > 0) {
+      const pipeline = redis.pipeline();
+      rows.forEach(r => {
+        pipeline.get(`online:${schoolId}:teacher:${r.teacher_id}`);
+      });
+      const results = await pipeline.exec();
+      assignmentsWithOnlineStatus = assignmentsWithOnlineStatus.map((r, idx) => ({
+        ...r,
+        is_online: results[idx] && results[idx][1] === '1'
+      }));
+    }
 
     res.ok({ session, assignments: assignmentsWithOnlineStatus }, `${assignmentsWithOnlineStatus.length} teacher assignment(s) found.`);
   } catch (err) { next(err); }
@@ -347,13 +352,17 @@ exports.createAssignment = async (req, res, next) => {
 exports.updateAssignment = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
     const { teacher_id, class_id, section_id, subject_id, is_class_teacher, is_active } = req.body;
 
     const [[assignment]] = await sequelize.query(`
-      SELECT * FROM teacher_assignments WHERE id = :id LIMIT 1;
-    `, { replacements: { id } });
+      SELECT ta.* FROM teacher_assignments ta
+      JOIN teachers t ON t.id = ta.teacher_id
+      WHERE ta.id = :id AND t.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { id, schoolId } });
 
-    if (!assignment) return res.fail('Assignment not found.', [], 404);
+    if (!assignment) return res.fail('Assignment not found or unauthorized.', [], 404);
 
     const session = await getCurrentSession(req.user.school_id);
     const sessionId = session?.id || 0;
@@ -480,11 +489,16 @@ exports.updateAssignment = async (req, res, next) => {
 exports.deleteAssignment = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const [[assignment]] = await sequelize.query(`
-      SELECT * FROM teacher_assignments WHERE id = :id LIMIT 1;
-    `, { replacements: { id } });
+    const schoolId = req.user.school_id;
 
-    if (!assignment) return res.fail('Assignment not found.', [], 404);
+    const [[assignment]] = await sequelize.query(`
+      SELECT ta.* FROM teacher_assignments ta
+      JOIN teachers t ON t.id = ta.teacher_id
+      WHERE ta.id = :id AND t.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!assignment) return res.fail('Assignment not found or unauthorized.', [], 404);
 
     await sequelize.query(`DELETE FROM teacher_assignments WHERE id = :id;`, { replacements: { id } });
 
@@ -611,14 +625,16 @@ exports.createTimetableSlot = async (req, res, next) => {
 exports.updateTimetableSlot = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const [[slot]] = await sequelize.query(`
-      SELECT id, is_active
-      FROM timetable_slots
-      WHERE id = :id
-      LIMIT 1;
-    `, { replacements: { id } });
+    const schoolId = req.user.school_id;
 
-    if (!slot) return res.fail('Timetable slot not found.', [], 404);
+    const [[slot]] = await sequelize.query(`
+      SELECT ts.id, ts.is_active FROM timetable_slots ts
+      JOIN sessions s ON s.id = ts.session_id
+      WHERE ts.id = :id AND s.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!slot) return res.fail('Timetable slot not found or unauthorized.', [], 404);
 
     const fields = ['room_number', 'start_time', 'end_time', 'is_active'];
     const updates = fields.filter((field) => req.body[field] !== undefined);
@@ -692,12 +708,12 @@ exports.updateHomework = async (req, res, next) => {
     }
 
     const [[homework]] = await sequelize.query(`
-      SELECT id, status
-      FROM homework
-      WHERE id = :id
+      SELECT h.id, h.status FROM homework h
+      JOIN teachers t ON t.id = h.teacher_id
+      WHERE h.id = :id AND t.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { id } });
-    if (!homework) return res.fail('Homework not found.', [], 404);
+    `, { replacements: { id, schoolId } });
+    if (!homework) return res.fail('Homework not found or unauthorized.', [], 404);
 
     await sequelize.query(`
       UPDATE homework
@@ -1412,12 +1428,13 @@ exports.updateAttendance = async (req, res, next) => {
     requireFields(req.body, ['status', 'reason']);
 
     const [[record]] = await sequelize.query(`
-      SELECT id, status, override_reason
-      FROM attendance
-      WHERE id = :id
+      SELECT a.id, a.status FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE a.id = :id AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { id } });
-    if (!record) return res.fail('Attendance record not found.', [], 404);
+    `, { replacements: { id, schoolId } });
+    if (!record) return res.fail('Attendance record not found or unauthorized.', [], 404);
 
     await sequelize.query(`
       UPDATE attendance
@@ -1495,10 +1512,12 @@ exports.updateMark = async (req, res, next) => {
       SELECT er.id, er.marks_obtained, er.is_absent, er.subject_id, er.exam_id, ex.total_marks
       FROM exam_results er
       JOIN exams ex ON ex.id = er.exam_id
-      WHERE er.id = :id
+      JOIN enrollments e ON e.id = er.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE er.id = :id AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { id } });
-    if (!record) return res.fail('Mark record not found.', [], 404);
+    `, { replacements: { id, schoolId } });
+    if (!record) return res.fail('Mark record not found or unauthorized.', [], 404);
 
     if (!is_absent && (marks_obtained === undefined || marks_obtained === null || Number(marks_obtained) < 0 || Number(marks_obtained) > Number(record.total_marks))) {
       return res.fail('marks_obtained must be within valid exam range.', [], 422);
@@ -1576,16 +1595,18 @@ exports.remarks = async (req, res, next) => {
 exports.updateRemark = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
     const { remark_text, visibility, reason } = req.body;
     requireFields(req.body, ['remark_text', 'reason']);
 
     const [[record]] = await sequelize.query(`
-      SELECT id, remark_text, visibility
-      FROM student_remarks
-      WHERE id = :id AND is_deleted = false
+      SELECT sr.id, sr.remark_text, sr.visibility
+      FROM student_remarks sr
+      JOIN students s ON s.id = sr.student_id
+      WHERE sr.id = :id AND sr.is_deleted = false AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { id } });
-    if (!record) return res.fail('Remark not found.', [], 404);
+    `, { replacements: { id, schoolId } });
+    if (!record) return res.fail('Remark not found or unauthorized.', [], 404);
 
     await sequelize.query(`
       UPDATE student_remarks
@@ -1620,10 +1641,11 @@ exports.revokeLeave = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[leave]] = await sequelize.query(`
-      SELECT id, status, teacher_id, leave_type, days_count
-      FROM teacher_leaves
-      WHERE id = :id;
-    `, { replacements: { id } });
+      SELECT tl.id, tl.status, tl.teacher_id, tl.leave_type, tl.days_count, tl.from_date
+      FROM teacher_leaves tl
+      JOIN teachers t ON t.id = tl.teacher_id
+      WHERE tl.id = :id AND t.school_id = :schoolId;
+    `, { replacements: { id, schoolId } });
 
     if (!leave) return res.fail('Leave application not found.', [], 404);
     if (leave.status !== 'approved') {

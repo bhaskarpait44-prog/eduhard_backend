@@ -92,6 +92,14 @@ exports.createStop = async (req, res, next) => {
   try {
     const { route_id } = req.params;
     const { name, pickup_time, drop_time, fare } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify route ownership
+    const [[route]] = await sequelize.query(`
+      SELECT id FROM transport_routes WHERE id = :route_id AND school_id = :schoolId
+    `, { replacements: { route_id, schoolId } });
+
+    if (!route) return res.fail('Route not found or unauthorized.', [], 404);
 
     const [stop] = await sequelize.query(`
       INSERT INTO transport_stops (route_id, name, pickup_time, drop_time, fare, created_at, updated_at)
@@ -112,6 +120,16 @@ exports.updateStop = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, pickup_time, drop_time, fare } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify stop ownership via route
+    const [[stop]] = await sequelize.query(`
+      SELECT s.id FROM transport_stops s
+      JOIN transport_routes r ON r.id = s.route_id
+      WHERE s.id = :id AND r.school_id = :schoolId
+    `, { replacements: { id, schoolId } });
+
+    if (!stop) return res.fail('Stop not found or unauthorized.', [], 404);
 
     const [result] = await sequelize.query(`
       UPDATE transport_stops SET
@@ -127,8 +145,6 @@ exports.updateStop = async (req, res, next) => {
       fare: fare || 0 
     } });
 
-    if (result.length === 0) return res.fail('Stop not found.', [], 404);
-
     res.ok(result[0], 'Stop updated.');
   } catch (err) { next(err); }
 };
@@ -136,11 +152,18 @@ exports.updateStop = async (req, res, next) => {
 exports.deleteStop = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const [result] = await sequelize.query(`
-      DELETE FROM transport_stops WHERE id = :id RETURNING id
-    `, { replacements: { id } });
+    const schoolId = req.user.school_id;
 
-    if (result.length === 0) return res.fail('Stop not found.', [], 404);
+    // Verify stop ownership via route
+    const [[stop]] = await sequelize.query(`
+      SELECT s.id FROM transport_stops s
+      JOIN transport_routes r ON r.id = s.route_id
+      WHERE s.id = :id AND r.school_id = :schoolId
+    `, { replacements: { id, schoolId } });
+
+    if (!stop) return res.fail('Stop not found or unauthorized.', [], 404);
+
+    await sequelize.query(`DELETE FROM transport_stops WHERE id = :id`, { replacements: { id } });
 
     res.ok(null, 'Stop deleted.');
   } catch (err) { next(err); }
@@ -152,6 +175,17 @@ exports.assignStudent = async (req, res, next) => {
   try {
     const { student_id, transport_stop_id } = req.body;
     const schoolId = req.user.school_id;
+
+    if (transport_stop_id) {
+      // Verify stop ownership
+      const [[stop]] = await sequelize.query(`
+        SELECT s.id FROM transport_stops s
+        JOIN transport_routes r ON r.id = s.route_id
+        WHERE s.id = :transport_stop_id AND r.school_id = :schoolId
+      `, { replacements: { transport_stop_id, schoolId } });
+
+      if (!stop) return res.fail('Invalid transport stop for this school.', [], 422);
+    }
 
     const [result] = await sequelize.query(`
       UPDATE students SET transport_stop_id = :transport_stop_id, updated_at = NOW()

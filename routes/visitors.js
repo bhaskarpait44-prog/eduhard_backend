@@ -12,5 +12,6 @@ router.get('/', requireRole('receptionist', 'admin'), visitorController.listVisi
 router.get('/stats', requireRole('receptionist', 'admin'), visitorController.getTodayStats);
 router.post('/', requireRole('receptionist', 'admin'), visitorController.logVisitor);
 router.patch('/:id/checkout', requireRole('receptionist', 'admin'), visitorController.checkoutVisitor);
+router.delete('/:id', requireRole('receptionist', 'admin'), visitorController.deleteVisitor);
 
 module.exports = router;

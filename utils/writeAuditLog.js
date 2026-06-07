@@ -7,6 +7,7 @@
 async function writeAuditLog(sequelize, {
   tableName,
   recordId,
+  schoolId,    // Added schoolId for multi-tenant isolation
   changes,     // [{ field, oldValue, newValue }] or single object
   changedBy,
   reason,
@@ -24,6 +25,7 @@ async function writeAuditLog(sequelize, {
   const insertRows = rows.map(c => ({
     table_name  : tableName,
     record_id   : recordId,
+    school_id   : schoolId   || null, // Store school_id directly in log
     field_name  : c.field,
     old_value   : c.oldValue !== undefined ? String(c.oldValue ?? '') : null,
     new_value   : c.newValue !== undefined ? String(c.newValue ?? '') : null,

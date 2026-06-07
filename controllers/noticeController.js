@@ -911,12 +911,13 @@ exports.unpinNotice = async (req, res, next) => {
 
 exports.getParentNotices = async (req, res, next) => {
   try {
-    const userId = req.user.id;
+    const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
     const [wards] = await sequelize.query(`
-      SELECT s.id, e.class_id, e.section_id
+      SELECT s.id, s.first_name, s.last_name, e.class_id, e.section_id
       FROM students s
+      JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       LEFT JOIN LATERAL (
         SELECT en.class_id, en.section_id, en.status
         FROM enrollments en
@@ -925,11 +926,8 @@ exports.getParentNotices = async (req, res, next) => {
         LIMIT 1
       ) e ON true
       WHERE s.school_id = :schoolId AND s.is_deleted = false
-        AND (
-          s.family_id IN (SELECT id FROM families WHERE user_id = :userId)
-          OR s.id IN (SELECT student_id FROM student_profiles WHERE id = :userId)
-        )
-    `, { replacements: { userId, schoolId } });
+        AND LOWER(sp.parent_email) = LOWER(:parentEmail)
+    `, { replacements: { parentEmail, schoolId } });
 
     if (wards.length === 0) return res.ok({ notices: [], unread_count: 0 });
 
@@ -937,17 +935,12 @@ exports.getParentNotices = async (req, res, next) => {
     const classIds = [...new Set(wards.map(w => w.class_id).filter(id => id))];
     const sectionIds = [...new Set(wards.map(w => w.section_id).filter(id => id))];
 
-    let actualUserId = userId;
-    if (req.user.role === 'parent') {
-       const [[linkedUser]] = await sequelize.query(`
-         SELECT u.id FROM users u
-         JOIN families f ON f.user_id = u.id
-         JOIN students s ON s.family_id = f.id
-         WHERE s.id IN (:studentIds) AND u.role = 'parent' AND u.school_id = :schoolId
-         LIMIT 1
-       `, { replacements: { studentIds, schoolId } });
-       if (linkedUser) actualUserId = linkedUser.id;
-    }
+    // Resolve the parent's User ID (if they have one) for read tracking
+    let readTrackingId = req.user.id;
+    const [[user]] = await sequelize.query(`
+      SELECT id FROM users WHERE LOWER(email) = LOWER(:parentEmail) AND school_id = :schoolId AND role = 'parent' LIMIT 1
+    `, { replacements: { parentEmail, schoolId } });
+    if (user) readTrackingId = user.id;
 
     const [notices] = await sequelize.query(`
       WITH combined_notices AS (
@@ -1000,7 +993,8 @@ exports.getParentNotices = async (req, res, next) => {
           )
       )
       SELECT n.*,
-             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :actualUserId) ELSE false END) as is_read
+             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :readTrackingId) ELSE false END) as is_read,
+             (SELECT s.first_name FROM students s WHERE s.id = n.target_student_id AND s.id IN (:studentIds)) as target_ward_name
       FROM combined_notices n
       WHERE 
         n.is_school_wide = true 
@@ -1010,7 +1004,7 @@ exports.getParentNotices = async (req, res, next) => {
         OR (LOWER(n.audience::text) IN ('student', 'specific_student') AND n.target_student_id IN (:studentIds))
       ORDER BY n.created_at DESC
     `, { replacements: { 
-      schoolId, actualUserId, 
+      schoolId, readTrackingId, 
       studentIds: studentIds.length > 0 ? studentIds : [0], 
       classIds: classIds.length > 0 ? classIds : [0], 
       sectionIds: sectionIds.length > 0 ? sectionIds : [0] 
@@ -1023,12 +1017,25 @@ exports.getParentNotices = async (req, res, next) => {
 exports.markParentRead = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const userId = req.user.id;
+    const parentEmail = req.user.email;
+    const schoolId = req.user.school_id;
+
+    let readTrackingId = req.user.id;
+    const [[user]] = await sequelize.query(`
+      SELECT id FROM users WHERE LOWER(email) = LOWER(:parentEmail) AND school_id = :schoolId AND role = 'parent' LIMIT 1
+    `, { replacements: { parentEmail, schoolId } });
+    
+    if (user) {
+      readTrackingId = user.id;
+    } else {
+      return res.ok(null, 'Notice status update skipped (No linked user account).');
+    }
+
     await sequelize.query(`
       INSERT INTO notice_reads (notice_id, user_id, read_at)
-      VALUES (:noticeId, :userId, NOW())
+      VALUES (:noticeId, :readTrackingId, NOW())
       ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-    `, { replacements: { noticeId: id, userId } });
+    `, { replacements: { noticeId: id, readTrackingId } });
     res.ok(null, 'Notice marked as read.');
   } catch (err) { next(err); }
 };

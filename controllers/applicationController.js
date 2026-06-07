@@ -124,7 +124,12 @@ exports.updateStatus = async (req, res, next) => {
     if (status === 'approved') {
       // Logic to convert to student
       const data = application.student_data;
-      const { first_name, last_name, email, date_of_birth, gender, stream, joining_type, ...profile } = data;
+      const { 
+        first_name, last_name, email, date_of_birth, gender, aadhar_no,
+        stream, joining_type, 
+        previous_academic_records = [],
+        ...profile 
+      } = data;
 
       if (!admission_no) return res.fail('Admission number is required for approval.', [], 422);
       if (!section_id) return res.fail('Section assignment is required for approval.', [], 422);
@@ -148,7 +153,7 @@ exports.updateStatus = async (req, res, next) => {
 
         if (existing) throw Object.assign(new Error('Admission number already exists.'), { status: 409 });
 
-        // 2. Parent / Family
+        // 2. Parent / Family (Same logic as before)
         let parentUserId;
         const [[existingParentUser]] = await sequelize.query(`
           SELECT id FROM users WHERE email = :email AND school_id = :schoolId LIMIT 1;
@@ -190,28 +195,28 @@ exports.updateStatus = async (req, res, next) => {
           familyId = newFamily.id;
         }
 
-        // 3. Create Student
+        // 3. Create Student (Added aadhar_no)
         const [[student]] = await sequelize.query(`
           INSERT INTO students (
             school_id, family_id, admission_no, first_name, last_name, 
-            date_of_birth, gender, password_hash, is_active, 
+            date_of_birth, gender, aadhar_no, password_hash, is_active, 
             last_password_change, is_deleted, created_at, updated_at
           )
           VALUES (
             :schoolId, :familyId, :admission_no, :first_name, :last_name, 
-            :date_of_birth, :gender, :studentHash, true, 
+            :date_of_birth, :gender, :aadhar_no, :studentHash, true, 
             NOW(), false, NOW(), NOW()
           )
           RETURNING id;
         `, {
           replacements: {
             schoolId, familyId, admission_no, first_name, last_name, 
-            date_of_birth, gender, studentHash,
+            date_of_birth, gender, aadhar_no: aadhar_no || null, studentHash,
           },
           transaction: t,
         });
 
-        // 4. Enrollment
+        // 4. Enrollment (Same logic as before)
         let rollNo = roll_number;
         if (!rollNo) {
           const [[maxRoll]] = await sequelize.query(`
@@ -228,14 +233,11 @@ exports.updateStatus = async (req, res, next) => {
           rollNo = String((parseInt(maxRoll?.max_roll) || 0) + 1);
         }
 
-        // Map joining type to DB ENUM: fresh, promoted, failed, transfer_in, rejoined
         const joiningTypeMap = {
           'New Admission': 'fresh',
           'Transfer': 'transfer_in'
         };
         const mappedJoiningType = joiningTypeMap[joining_type] || 'fresh';
-
-        // Map stream to DB Check: regular, arts, commerce, science
         const mappedStream = (stream || 'regular').toLowerCase();
 
         await sequelize.query(`
@@ -258,7 +260,22 @@ exports.updateStatus = async (req, res, next) => {
           transaction: t,
         });
 
-        // 5. Update Application
+        // 5. Previous Academic Records
+        if (Array.isArray(previous_academic_records) && previous_academic_records.length > 0) {
+          const records = previous_academic_records.map(r => ({
+            student_id: student.id,
+            school_name: r.school_name,
+            location: r.location,
+            class_name: r.class_name,
+            year_of_study: r.year_of_study,
+            percentage_grade: r.percentage_grade,
+            created_at: new Date(),
+            updated_at: new Date()
+          }));
+          await sequelize.getQueryInterface().bulkInsert('student_previous_academic_records', records, { transaction: t });
+        }
+
+        // 6. Update Application
         await sequelize.query(`
           UPDATE applications 
           SET status = 'approved', updated_at = NOW() 

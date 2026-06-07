@@ -96,36 +96,50 @@ exports.recordTransaction = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const { item_id, type, quantity, date, remarks } = req.body;
 
-    const [[item]] = await sequelize.query(`
-      SELECT * FROM inventory_items WHERE id = :item_id AND school_id = :schoolId
-    `, { replacements: { item_id, schoolId } });
+    const result = await sequelize.transaction(async (t) => {
+      const [[item]] = await sequelize.query(`
+        SELECT * FROM inventory_items WHERE id = :item_id AND school_id = :schoolId FOR UPDATE
+      `, { replacements: { item_id, schoolId }, transaction: t });
 
-    if (!item) return res.fail('Item not found.', [], 404);
+      if (!item) throw new Error('Item not found.');
 
-    const qty = parseFloat(quantity);
-    if (type === 'out' && parseFloat(item.quantity) < qty) {
-      return res.fail('Insufficient stock.', [], 400);
-    }
+      const qty = parseFloat(quantity);
+      if (type === 'out' && parseFloat(item.quantity) < qty) {
+        throw new Error('Insufficient stock.');
+      }
 
-    const [tRecord] = await sequelize.query(`
-      INSERT INTO inventory_transactions (
-        item_id, type, quantity, date, remarks, performed_by, created_at, updated_at
-      ) VALUES (
-        :item_id, :type, :qty, :date, :remarks, :performed_by, NOW(), NOW()
-      ) RETURNING *
-    `, { replacements: { 
-      item_id, type, qty, 
-      date: date || new Date().toISOString().split('T')[0], 
-      remarks, 
-      performed_by: req.user.id 
-    } });
+      const [tRecord] = await sequelize.query(`
+        INSERT INTO inventory_transactions (
+          item_id, type, quantity, date, remarks, performed_by, created_at, updated_at
+        ) VALUES (
+          :item_id, :type, :qty, :date, :remarks, :performed_by, NOW(), NOW()
+        ) RETURNING *
+      `, { 
+        replacements: { 
+          item_id, type, qty, 
+          date: date || new Date().toISOString().split('T')[0], 
+          remarks, 
+          performed_by: req.user.id 
+        },
+        transaction: t
+      });
 
-    const newQty = type === 'in' ? parseFloat(item.quantity) + qty : parseFloat(item.quantity) - qty;
-    
-    await sequelize.query(`
-      UPDATE inventory_items SET quantity = :newQty, updated_at = NOW() WHERE id = :item_id
-    `, { replacements: { newQty, item_id } });
+      const newQty = type === 'in' ? parseFloat(item.quantity) + qty : parseFloat(item.quantity) - qty;
+      
+      await sequelize.query(`
+        UPDATE inventory_items SET quantity = :newQty, updated_at = NOW() WHERE id = :item_id
+      `, { 
+        replacements: { newQty, item_id },
+        transaction: t
+      });
 
-    res.ok(tRecord[0], 'Transaction recorded.', 201);
-  } catch (err) { next(err); }
+      return tRecord[0];
+    });
+
+    res.ok(result, 'Transaction recorded.', 201);
+  } catch (err) { 
+    if (err.message === 'Item not found.') return res.fail(err.message, [], 404);
+    if (err.message === 'Insufficient stock.') return res.fail(err.message, [], 400);
+    next(err); 
+  }
 };

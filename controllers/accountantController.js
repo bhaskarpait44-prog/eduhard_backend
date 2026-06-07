@@ -670,58 +670,61 @@ exports.collectFees = async (req, res, next) => {
     let remaining = paymentAmount;
     const applied = [];
 
-    for (const invoice of invoices) {
-      if (remaining <= 0) break;
-      const balance = toNumber(invoice.amount_due) + toNumber(invoice.late_fee_amount) - toNumber(invoice.concession_amount) - toNumber(invoice.amount_paid);
-      if (balance <= 0) continue;
+    await sequelize.transaction(async (t) => {
+      for (const invoice of invoices) {
+        if (remaining <= 0) break;
+        const balance = toNumber(invoice.amount_due) + toNumber(invoice.late_fee_amount) - toNumber(invoice.concession_amount) - toNumber(invoice.amount_paid);
+        if (balance <= 0) continue;
 
-      const allocation = Math.min(remaining, balance);
-      const result = await feeManager.applyPayment(invoice.id, {
-        amount: allocation,
-        paymentDate: payment_date,
-        paymentMode: payment_mode,
-        transactionRef: reference || null,
-        receivedBy: req.user.id,
-        upiId: upi_id || null,
-      });
+        const allocation = Math.min(remaining, balance);
+        const result = await feeManager.applyPayment(invoice.id, {
+          amount: allocation,
+          paymentDate: payment_date,
+          paymentMode: payment_mode,
+          transactionRef: reference || null,
+          receivedBy: req.user.id,
+          upiId: upi_id || null,
+        }, { transaction: t });
 
-      if (payment_mode === 'cheque') {
-        await sequelize.query(`
-          INSERT INTO cheque_payments
-            (payment_id, cheque_number, bank_name, branch_name, cheque_date, received_date, status, created_at, updated_at)
-          VALUES
-            (:paymentId, :chequeNumber, :bankName, :branchName, :chequeDate, :receivedDate, 'pending', NOW(), NOW());
-        `, {
-          replacements: {
-            paymentId: result.paymentId,
-            chequeNumber: cheque_number || reference || `CHQ-${result.paymentId}`,
-            bankName: bank_name || 'Bank not provided',
-            branchName: branch_name || null,
-            chequeDate: cheque_date || payment_date,
-            receivedDate: payment_date,
-          },
-        }).catch(() => {});
+        if (payment_mode === 'cheque') {
+          await sequelize.query(`
+            INSERT INTO cheque_payments
+              (payment_id, cheque_number, bank_name, branch_name, cheque_date, received_date, status, created_at, updated_at)
+            VALUES
+              (:paymentId, :chequeNumber, :bankName, :branchName, :chequeDate, :receivedDate, 'pending', NOW(), NOW());
+          `, {
+            replacements: {
+              paymentId: result.paymentId,
+              chequeNumber: cheque_number || reference || `CHQ-${result.paymentId}`,
+              bankName: bank_name || 'Bank not provided',
+              branchName: branch_name || null,
+              chequeDate: cheque_date || payment_date,
+              receivedDate: payment_date,
+            },
+            transaction: t,
+          });
+        }
+
+        await writeFinancialAudit(
+          req,
+          'fee_payments',
+          result.paymentId,
+          'collection',
+          `${allocation} via ${payment_mode}`,
+          remarks || `Collected for invoice ${invoice.id}`
+        );
+
+        applied.push({
+          payment_id: result.paymentId,
+          invoice_id: invoice.id,
+          fee_name: invoice.fee_name,
+          amount_applied: allocation,
+          new_status: result.newStatus,
+          receipt_no: buildReceiptNo(result.paymentId, payment_date),
+        });
+        remaining = Number((remaining - allocation).toFixed(2));
       }
-
-      await writeFinancialAudit(
-        req,
-        'fee_payments',
-        result.paymentId,
-        'collection',
-        `${allocation} via ${payment_mode}`,
-        remarks || `Collected for invoice ${invoice.id}`
-      );
-
-      applied.push({
-        payment_id: result.paymentId,
-        invoice_id: invoice.id,
-        fee_name: invoice.fee_name,
-        amount_applied: allocation,
-        new_status: result.newStatus,
-        receipt_no: buildReceiptNo(result.paymentId, payment_date),
-      });
-      remaining = Number((remaining - allocation).toFixed(2));
-    }
+    });
 
     res.ok({
       student_id,
@@ -946,21 +949,76 @@ exports.getStudentStatementPdf = async (req, res, next) => {
     const school = await getSchoolProfile(req.user.school_id);
 
     streamPdf(res, `${payload.student.admission_no}-fee-statement.pdf`, (doc) => {
-      doc.fontSize(18).text(school.name, { align: 'center' });
-      doc.fontSize(12).text('Student Fee Statement', { align: 'center' });
+      // ── Header ─────────────────────────────────────────────────────────────
+      doc.fontSize(18).font('Helvetica-Bold').text(school.name, { align: 'center' });
+      doc.fontSize(10).font('Helvetica').text(school.address || '', { align: 'center' });
       doc.moveDown();
-      doc.fontSize(11).text(`Student: ${payload.student.name}`);
+      doc.fontSize(14).font('Helvetica-Bold').text('FEE STATEMENT', { align: 'center', underline: true });
+      doc.moveDown();
+
+      // ── Student Details ───────────────────────────────────────────────────
+      doc.fontSize(11).font('Helvetica-Bold').text('Student Information');
+      doc.font('Helvetica').fontSize(10);
+      doc.text(`Name: ${payload.student.name}`);
       doc.text(`Admission No: ${payload.student.admission_no}`);
       doc.text(`Class: ${payload.student.class_name || '-'} ${payload.student.section_name ? `Section ${payload.student.section_name}` : ''}`);
       doc.text(`Session: ${payload.student.session_name}`);
       doc.moveDown();
-      payload.invoices.slice(0, 18).forEach((invoice) => {
-        doc.text(`${invoice.fee_name} | Due ${invoice.due_date} | Due ${toNumber(invoice.amount_due).toFixed(2)} | Paid ${toNumber(invoice.amount_paid).toFixed(2)} | Balance ${toNumber(invoice.balance).toFixed(2)}`);
-      });
+
+      // ── Summary Table ─────────────────────────────────────────────────────
+      doc.fontSize(11).font('Helvetica-Bold').text('Financial Summary');
+      doc.moveDown(0.5);
+      const startX = 50;
+      let currentY = doc.y;
+      
+      const drawSummaryRow = (label, value) => {
+        doc.font('Helvetica').text(label, startX, currentY);
+        doc.font('Helvetica-Bold').text(`INR ${toNumber(value).toFixed(2)}`, startX + 150, currentY, { align: 'right', width: 100 });
+        currentY += 15;
+      };
+
+      drawSummaryRow('Total Fee (Net):', payload.summary.total_fee + payload.summary.late_fee - payload.summary.concession);
+      drawSummaryRow('Total Paid:', payload.summary.total_paid);
+      drawSummaryRow('Balance Due:', payload.summary.balance);
+      doc.y = currentY + 10;
       doc.moveDown();
-      doc.text(`Total Fee: INR ${payload.summary.total_fee.toFixed(2)}`);
-      doc.text(`Total Paid: INR ${payload.summary.total_paid.toFixed(2)}`);
-      doc.text(`Balance: INR ${payload.summary.balance.toFixed(2)}`);
+
+      // ── Invoices Table ─────────────────────────────────────────────────────
+      doc.fontSize(11).font('Helvetica-Bold').text('Invoice Details');
+      doc.moveDown(0.5);
+
+      const tableTop = doc.y;
+      const colX = [50, 200, 280, 360, 440];
+
+      // Header row
+      doc.fontSize(9).font('Helvetica-Bold');
+      doc.text('Fee Name', colX[0], tableTop);
+      doc.text('Due Date', colX[1], tableTop);
+      doc.text('Amount', colX[2], tableTop, { align: 'right', width: 70 });
+      doc.text('Paid', colX[3], tableTop, { align: 'right', width: 70 });
+      doc.text('Balance', colX[4], tableTop, { align: 'right', width: 70 });
+      
+      doc.moveTo(50, tableTop + 12).lineTo(540, tableTop + 12).stroke();
+      
+      let rowY = tableTop + 20;
+      doc.font('Helvetica').fontSize(9);
+
+      payload.invoices.forEach((invoice) => {
+        if (rowY > 750) {
+          doc.addPage();
+          rowY = 50;
+        }
+
+        doc.text(invoice.fee_name, colX[0], rowY, { width: 140 });
+        doc.text(String(invoice.due_date), colX[1], rowY);
+        doc.text(toNumber(invoice.amount_due).toFixed(2), colX[2], rowY, { align: 'right', width: 70 });
+        doc.text(toNumber(invoice.amount_paid).toFixed(2), colX[3], rowY, { align: 'right', width: 70 });
+        doc.text(toNumber(invoice.balance).toFixed(2), colX[4], rowY, { align: 'right', width: 70 });
+        
+        rowY += 20;
+      });
+
+      doc.fontSize(8).font('Helvetica-Oblique').text(`Generated on ${new Date().toLocaleString()}`, 50, rowY + 20);
     });
   } catch (err) { next(err); }
 };
@@ -1001,22 +1059,30 @@ exports.updateFeeStructure = async (req, res, next) => {
 exports.copyFeeStructureFromSession = async (req, res, next) => {
   try {
     const { from_session_id, to_session_id, class_id } = req.body;
-    await sequelize.query(`DELETE FROM fee_structures WHERE session_id = :toSessionId AND class_id = :classId;`, {
-      replacements: { toSessionId: to_session_id, classId: class_id },
+
+    const rows = await sequelize.transaction(async (t) => {
+      await sequelize.query(`DELETE FROM fee_structures WHERE session_id = :toSessionId AND class_id = :classId;`, {
+        replacements: { toSessionId: to_session_id, classId: class_id },
+        transaction: t,
+      });
+
+      const [inserted] = await sequelize.query(`
+        INSERT INTO fee_structures (session_id, class_id, name, amount, frequency, due_day, is_active, created_at, updated_at)
+        SELECT :toSessionId, class_id, name, amount, frequency, due_day, is_active, NOW(), NOW()
+        FROM fee_structures
+        WHERE session_id = :fromSessionId AND class_id = :classId
+        RETURNING id;
+      `, {
+        replacements: {
+          fromSessionId: from_session_id,
+          toSessionId: to_session_id,
+          class_id: class_id,
+        },
+        transaction: t,
+      });
+      return inserted;
     });
-    const [rows] = await sequelize.query(`
-      INSERT INTO fee_structures (session_id, class_id, name, amount, frequency, due_day, is_active, created_at, updated_at)
-      SELECT :toSessionId, class_id, name, amount, frequency, due_day, is_active, NOW(), NOW()
-      FROM fee_structures
-      WHERE session_id = :fromSessionId AND class_id = :classId
-      RETURNING id;
-    `, {
-      replacements: {
-        fromSessionId: from_session_id,
-        toSessionId: to_session_id,
-        classId: class_id,
-      },
-    });
+
     res.ok({ copied_count: rows.length }, 'Fee structure copied from previous session.');
   } catch (err) { next(err); }
 };
@@ -1253,13 +1319,19 @@ exports.applyConcession = async (req, res, next) => {
     } = req.body;
 
     const [[invoice]] = await sequelize.query(`
-      SELECT id, amount_due, concession_amount
-      FROM fee_invoices
-      WHERE id = :invoiceId
+      SELECT fi.id, fi.amount_due, fi.concession_amount, fi.status, s.school_id
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE fi.id = :invoiceId
       LIMIT 1;
     `, { replacements: { invoiceId: invoice_id } });
 
     if (!invoice) return res.fail('Invoice not found.', [], 404);
+    if (invoice.school_id !== req.user.school_id) return res.fail('Unauthorized access to invoice.', [], 403);
+    if (['paid', 'waived'].includes(invoice.status)) {
+      return res.fail(`Cannot apply concession to an invoice that is already ${invoice.status}.`, [], 422);
+    }
 
     const originalAmount = toNumber(invoice.amount_due);
     let concessionAmount = 0;
@@ -1428,25 +1500,32 @@ exports.getCarryForwardEligible = async (req, res, next) => {
 exports.carryForwardSingle = async (req, res, next) => {
   try {
     const { student_id, from_session_id, to_session_id } = req.body;
-    const result = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id);
-    for (const row of result.details || []) {
-      await sequelize.query(`
-        INSERT INTO fee_carry_forwards
-          (old_session_id, new_session_id, student_id, old_invoice_id, amount, carried_by, carried_at, notes, created_at, updated_at)
-        VALUES
-          (:oldSessionId, :newSessionId, :studentId, :oldInvoiceId, :amount, :carriedBy, NOW(), :notes, NOW(), NOW());
-      `, {
-        replacements: {
-          oldSessionId: from_session_id,
-          newSessionId: to_session_id,
-          studentId: student_id,
-          oldInvoiceId: row.originalInvoiceId,
-          amount: row.balanceCarried,
-          carriedBy: req.user.id,
-          notes: `Auto carry forward to ${result.toSession}`,
-        },
-      }).catch(() => {});
-    }
+    
+    const result = await sequelize.transaction(async (t) => {
+      const carryResult = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id, { transaction: t });
+      
+      for (const row of carryResult.details || []) {
+        await sequelize.query(`
+          INSERT INTO fee_carry_forwards
+            (old_session_id, new_session_id, student_id, old_invoice_id, amount, carried_by, carried_at, notes, created_at, updated_at)
+          VALUES
+            (:oldSessionId, :newSessionId, :studentId, :oldInvoiceId, :amount, :carriedBy, NOW(), :notes, NOW(), NOW());
+        `, {
+          replacements: {
+            oldSessionId: from_session_id,
+            newSessionId: to_session_id,
+            studentId: student_id,
+            oldInvoiceId: row.originalInvoiceId,
+            amount: row.balanceCarried,
+            carriedBy: req.user.id,
+            notes: `Auto carry forward to ${carryResult.toSession}`,
+          },
+          transaction: t,
+        });
+      }
+      return carryResult;
+    });
+
     res.ok(result, 'Carry forward completed.');
   } catch (err) { next(err); }
 };
@@ -1455,9 +1534,39 @@ exports.carryForwardBulk = async (req, res, next) => {
   try {
     const { student_ids = [], from_session_id, to_session_id } = req.body;
     const results = [];
+    
     for (const studentId of student_ids) {
-      results.push(await feeManager.carryForwardFees(studentId, from_session_id, to_session_id));
+      try {
+        const studentResult = await sequelize.transaction(async (t) => {
+          const carryResult = await feeManager.carryForwardFees(studentId, from_session_id, to_session_id, { transaction: t });
+          
+          for (const row of carryResult.details || []) {
+            await sequelize.query(`
+              INSERT INTO fee_carry_forwards
+                (old_session_id, new_session_id, student_id, old_invoice_id, amount, carried_by, carried_at, notes, created_at, updated_at)
+              VALUES
+                (:oldSessionId, :newSessionId, :studentId, :oldInvoiceId, :amount, :carriedBy, NOW(), :notes, NOW(), NOW());
+            `, {
+              replacements: {
+                oldSessionId: from_session_id,
+                newSessionId: to_session_id,
+                studentId: studentId,
+                oldInvoiceId: row.originalInvoiceId,
+                amount: row.balanceCarried,
+                carriedBy: req.user.id,
+                notes: `Bulk carry forward to ${carryResult.toSession}`,
+              },
+              transaction: t,
+            });
+          }
+          return carryResult;
+        });
+        results.push({ student_id: studentId, status: 'success', data: studentResult });
+      } catch (err) {
+        results.push({ student_id: studentId, status: 'error', message: err.message });
+      }
     }
+    
     res.ok({ results, processed: results.length }, 'Bulk carry forward completed.');
   } catch (err) { next(err); }
 };

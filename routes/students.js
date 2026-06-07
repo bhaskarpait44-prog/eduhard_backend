@@ -3,7 +3,10 @@
 const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
-const { requireAdmin, requireAdminOrTeacher, requireRole } = require('../middlewares/auth');
+const { authenticate, requireAdmin, requireAdminOrTeacher, requireRole } = require('../middlewares/auth');
+
+router.use(authenticate);
+
 const { requirePermission } = require('../middlewares/checkPermission');
 const ctrl     = require('../controllers/studentController');
 const { cache } = require('../middlewares/cache');
@@ -17,7 +20,10 @@ const storage = multer.diskStorage({
     cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
   }
 });
-const upload = multer({ storage });
+const upload = multer({ 
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB Limit per file
+});
 
 // ── Bulk Import ──────────────────────────────────────────────────────────
 router.get('/import/template', requirePermission('students.create'), ctrl.downloadAdmissionTemplate);
@@ -25,13 +31,28 @@ router.post('/import/preview',  requirePermission('students.create'), ctrl.previ
 router.post('/import/confirm',  requirePermission('students.create'), ctrl.confirmAdmission);
 router.get('/import/:jobId/status', requirePermission('students.create'), ctrl.getAdmissionStatus);
 
-router.post('/',                  requireAdmin, [
+router.post('/',                  requireAdmin, upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'birth_certificate', maxCount: 1 },
+  { name: 'transfer_certificate', maxCount: 1 },
+  { name: 'marksheet', maxCount: 1 },
+  { name: 'admit_card', maxCount: 1 },
+  { name: 'pass_certificate', maxCount: 1 },
+  { name: 'registration_certificate', maxCount: 1 },
+  { name: 'character_certificate', maxCount: 1 },
+  { name: 'prc', maxCount: 1 },
+  { name: 'caste_certificate', maxCount: 1 },
+  { name: 'blood_group_doc', maxCount: 1 },
+  { name: 'aadhar_student', maxCount: 1 },
+  { name: 'aadhar_father', maxCount: 1 },
+  { name: 'aadhar_mother', maxCount: 1 }
+]), [
   body('admission_no').notEmpty(),
   body('first_name').notEmpty(),
   body('last_name').notEmpty(),
   body('date_of_birth').isDate(),
   body('gender').isIn(['male', 'female', 'other']),
-  body('profile.email').isEmail().withMessage('A valid student email is required'),
+  // body('profile.email').isEmail().withMessage('A valid student email is required'), // Disabled because it might be in JSON string in FormData
 ], validate, ctrl.admit);
 
 router.get('/',                   requireRole('admin', 'teacher', 'receptionist', 'librarian', 'accountant'), cache(300), ctrl.list);
@@ -83,6 +104,10 @@ router.delete('/:id',             requireAdmin, [
 router.get('/:id/history',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getHistory);
+
+router.get('/:id/admission-form', requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
+  param('id').isInt(),
+], validate, ctrl.downloadAdmissionForm);
 
 // ── Documents ─────────────────────────────────────────────────────────────
 router.get('/:id/documents',      requireRole('admin', 'teacher', 'receptionist', 'librarian'), [

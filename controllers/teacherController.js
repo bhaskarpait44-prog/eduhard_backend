@@ -27,18 +27,23 @@ async function audit(tableName, recordId, changes, req) {
   const rows = (Array.isArray(changes) ? changes : [changes]).map((change) => ({
     table_name: tableName,
     record_id: recordId,
+    school_id: req.user?.school_id || null, // Direct school_id logging
     field_name: change.field,
     old_value: change.oldValue != null ? String(change.oldValue) : null,
     new_value: change.newValue != null ? String(change.newValue) : null,
     changed_by: req.user?.id || null,
     reason: change.reason || null,
     ip_address: req.ip || null,
-    device_info: (req.headers['user-agent'] || '').slice(0, 299),
+    device_info: (req.headers['user-agent'] || '').substring(0, 299),
     created_at: new Date(),
   }));
 
   if (rows.length > 0) {
-    await sequelize.getQueryInterface().bulkInsert('audit_logs', rows);
+    try {
+      await sequelize.getQueryInterface().bulkInsert('audit_logs', rows);
+    } catch (e) {
+      console.error(`[TeacherAudit] Error logging ${tableName}:${recordId}`, e.message);
+    }
   }
 }
 
@@ -1807,7 +1812,7 @@ exports.marksEntry = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-async function saveOneMark(req, payload) {
+async function saveOneMark(req, payload, context = null, transaction = null) {
   const {
     exam_id,
     enrollment_id,
@@ -1820,7 +1825,8 @@ async function saveOneMark(req, payload) {
     class_id,
     section_id,
   } = payload;
-  const { scope } = await getTeacherContext(req);
+
+  const { scope } = context || await getTeacherContext(req);
   assertMarksAccess(scope, Number(class_id), Number(section_id), Number(subject_id));
 
   const [[exam]] = await sequelize.query(`
@@ -1828,7 +1834,7 @@ async function saveOneMark(req, payload) {
     FROM exams
     WHERE id = :examId
     LIMIT 1;
-  `, { replacements: { examId: exam_id } });
+  `, { replacements: { examId: exam_id }, transaction });
 
   if (!exam) {
     const error = new Error('Exam not found.');
@@ -1853,7 +1859,7 @@ async function saveOneMark(req, payload) {
     FROM enrollments
     WHERE id = :enrollmentId
     LIMIT 1;
-  `, { replacements: { enrollmentId: enrollment_id } });
+  `, { replacements: { enrollmentId: enrollment_id }, transaction });
 
   if (!enrollment) {
     const error = new Error('Enrollment not found.');
@@ -1893,7 +1899,7 @@ async function saveOneMark(req, payload) {
     WHERE es.exam_id = :examId
       AND es.subject_id = :subjectId
     LIMIT 1;
-  `, { replacements: { examId: exam_id, subjectId: subject_id } });
+  `, { replacements: { examId: exam_id, subjectId: subject_id }, transaction });
 
   if (!subject) {
     const error = new Error('Subject not found.');
@@ -2001,6 +2007,7 @@ async function saveOneMark(req, payload) {
       enteredBy: req.user.id,
       reason,
     },
+    transaction,
   });
 
   await audit('exam_results', Number(exam_id), {
@@ -2010,7 +2017,8 @@ async function saveOneMark(req, payload) {
     reason: reason || 'Teacher marks save',
   }, req);
 
-  await syncExamStatus(Number(exam_id));
+  // Status sync handled by caller if bulk
+  if (!context) await syncExamStatus(Number(exam_id));
 
   return {
     exam_id: Number(exam_id),
@@ -2035,10 +2043,25 @@ exports.saveMark = async (req, res, next) => {
 exports.bulkSaveMarks = async (req, res, next) => {
   try {
     const { entries = [] } = req.body;
+    if (entries.length === 0) return res.ok({ saved: [] }, 'No marks to save.');
+
+    const context = await getTeacherContext(req);
     const saved = [];
-    for (const entry of entries) {
-      saved.push(await saveOneMark(req, entry));
+    const examIdsToSync = new Set();
+
+    await sequelize.transaction(async (t) => {
+      for (const entry of entries) {
+        const result = await saveOneMark(req, entry, context, t);
+        saved.push(result);
+        examIdsToSync.add(Number(entry.exam_id));
+      }
+    });
+
+    // Bulk sync exam status after all marks are saved
+    for (const examId of examIdsToSync) {
+      await syncExamStatus(examId);
     }
+
     res.ok({ saved }, `${saved.length} mark row(s) saved.`);
   } catch (err) { next(err); }
 };

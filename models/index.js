@@ -43,6 +43,7 @@ const StudentDocument    = require('./StudentDocument');
 const StudentHealthIncident = require('./StudentHealthIncident');
 const StudentHealthProfile = require('./StudentHealthProfile');
 const StudentProfile     = require('./StudentProfile');
+const StudentPreviousAcademicRecord = require('./StudentPreviousAcademicRecord');
 const StudentResult      = require('./StudentResult');
 const StudentSubject     = require('./StudentSubject');
 const StudentVaccination = require('./StudentVaccination');
@@ -103,6 +104,9 @@ Enrollment.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
 Student.hasMany(StudentProfile, { foreignKey: 'student_id', as: 'profiles' });
 StudentProfile.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+
+Student.hasMany(StudentPreviousAcademicRecord, { foreignKey: 'student_id', as: 'previous_academic_records' });
+StudentPreviousAcademicRecord.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
 Enrollment.hasMany(Attendance, { foreignKey: 'enrollment_id', as: 'attendance' });
 Attendance.belongsTo(Enrollment, { foreignKey: 'enrollment_id', as: 'enrollment' });
@@ -198,6 +202,7 @@ const db = {
   StudentHealthIncident,
   StudentHealthProfile,
   StudentProfile,
+  StudentPreviousAcademicRecord,
   StudentResult,
   StudentSubject,
   StudentVaccination,

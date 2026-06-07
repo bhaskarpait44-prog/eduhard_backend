@@ -203,15 +203,21 @@ exports.list = async (req, res, next) => {
 // ── POST /api/students ────────────────────────────────────────────────────────
 exports.admit = async (req, res, next) => {
   try {
-    const { 
+    let { 
       admission_no, first_name, last_name, date_of_birth, gender, 
       profile, password, parent_password 
     } = req.body;
+    
+    // If multipart/form-data used, profile might be a JSON string
+    if (typeof profile === 'string') {
+      try { profile = JSON.parse(profile); } catch (e) { /* ignore */ }
+    }
+
     const schoolId = req.user.school_id;
     const studentEmail = profile?.email?.trim().toLowerCase();
 
     // Parent details from profile
-    const parentEmail = (profile?.father_email || profile?.mother_email || profile?.email)?.trim().toLowerCase();
+    const parentEmail = (profile?.father_email || profile?.mother_email || profile?.email || profile?.parent_email)?.trim().toLowerCase();
     const parentName = profile?.father_name || profile?.mother_name || `${last_name} Family`;
     const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.phone;
 
@@ -249,7 +255,7 @@ exports.admit = async (req, res, next) => {
 
       if (emailInUse) throw Object.assign(new Error('Student email already exists.'), { status: 409 });
 
-      // 2. Handle Parent User Account
+      // 2. Handle Parent User Account (Logic remains same)
       let parentUserId;
       let parentAccountCreated = false;
       const [[existingParentUser]] = await sequelize.query(`
@@ -314,6 +320,32 @@ exports.admit = async (req, res, next) => {
         },
         transaction: t,
       });
+
+      // 5. Save Documents if any
+      if (req.files && Object.keys(req.files).length > 0) {
+        for (const [fieldname, fileArr] of Object.entries(req.files)) {
+          const file = fileArr[0];
+          await sequelize.query(`
+            INSERT INTO student_documents (
+              student_id, name, document_type, file_path, file_type, file_size, uploaded_by, created_at, updated_at
+            )
+            VALUES (
+              :student_id, :name, :document_type, :file_path, :file_type, :file_size, :uploaded_by, NOW(), NOW()
+            )
+          `, {
+            replacements: {
+              student_id: student.id,
+              name: file.originalname,
+              document_type: fieldname,
+              file_path: file.path.replace(/\\/g, '/'),
+              file_type: file.mimetype,
+              file_size: file.size,
+              uploaded_by: req.user.id
+            },
+            transaction: t
+          });
+        }
+      }
 
       return { student, parentAccountCreated, generatedParentPassword, parentEmail };
     });
@@ -723,23 +755,80 @@ exports.confirmAdmission = async (req, res, next) => {
           });
 
           // 4. Create Profile (v1)
+          const profileData = {
+            father_name: row.father_name || null,
+            mother_name: row.mother_name || null,
+            phone: row.guardian_phone || null,
+            address: row.address || null,
+            blood_group: row.blood_group || null,
+            religion: row.religion || null,
+            caste: row.caste || null,
+            previous_school: row.previous_school || null,
+            parent_email: (row.guardian_email || row.email || '').trim().toLowerCase() || null
+          };
+
           await profileVersioning.create({
             studentId: student.id,
-            data: {
-              father_name: row.father_name || null,
-              mother_name: row.mother_name || null,
-              phone: row.guardian_phone || null,
-              address: row.address || null,
-              blood_group: row.blood_group || null,
-              religion: row.religion || null,
-              caste: row.caste || null,
-              previous_school: row.previous_school || null,
-            },
+            data: profileData,
             changedBy: req.user.id,
             changeReason: 'Bulk admission import',
           }, { transaction: t });
 
-          // 5. Create Enrollment
+          // 5. Handle Parent User and Family
+          const parentEmail = profileData.parent_email;
+          if (parentEmail) {
+            let parentUserId;
+            const [[existingParent]] = await sequelize.query(
+              `SELECT id FROM users WHERE LOWER(email) = LOWER(:email) AND school_id = :schoolId LIMIT 1`,
+              { replacements: { email: parentEmail, schoolId }, transaction: t }
+            );
+
+            if (existingParent) {
+              parentUserId = existingParent.id;
+            } else {
+              const parentName = profileData.father_name || profileData.mother_name || `${row.last_name} Family`;
+              const [[newParent]] = await sequelize.query(`
+                INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+                VALUES (:schoolId, :name, :email, :hash, 'parent', true, NOW(), NOW())
+                RETURNING id;
+              `, {
+                replacements: { schoolId, name: parentName, email: parentEmail, hash: await bcrypt.hash(generateStudentPassword(), 12) },
+                transaction: t
+              });
+              parentUserId = newParent.id;
+            }
+
+            let familyId;
+            const [[existingFamily]] = await sequelize.query(
+              `SELECT id FROM families WHERE user_id = :parentUserId AND school_id = :schoolId LIMIT 1`,
+              { replacements: { parentUserId, schoolId }, transaction: t }
+            );
+
+            if (existingFamily) {
+              familyId = existingFamily.id;
+            } else {
+              const familyName = profileData.father_name || profileData.mother_name || `${row.last_name} Family`;
+              const [[newFamily]] = await sequelize.query(`
+                INSERT INTO families (school_id, user_id, family_name, primary_contact, phone, email, created_at, updated_at)
+                VALUES (:schoolId, :parentUserId, :familyName, :primaryContact, :phone, :email, NOW(), NOW())
+                RETURNING id;
+              `, {
+                replacements: { 
+                  schoolId, parentUserId, familyName, 
+                  primaryContact: familyName, phone: profileData.phone, email: parentEmail 
+                },
+                transaction: t
+              });
+              familyId = newFamily.id;
+            }
+
+            await sequelize.query(`UPDATE students SET family_id = :familyId WHERE id = :studentId`, {
+              replacements: { familyId, studentId: student.id },
+              transaction: t
+            });
+          }
+
+          // 6. Create Enrollment
           const classId = classMap.get(row.admission_class.trim().toLowerCase());
           const sectionId = sectionMap.get(`${row.admission_class.trim().toLowerCase()}|${row.section.trim().toLowerCase()}`);
 
@@ -845,11 +934,24 @@ exports.getById = async (req, res, next) => {
       : 'c.name';
 
     const [[student]] = await sequelize.query(`
-      SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender,
+      SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
              s.status, s.created_at, s.family_id, s.transport_stop_id,
-             sp.address, sp.city, sp.state, sp.pincode, sp.phone, sp.email,
+             sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
+             sp.email AS email,
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
-             sp.parent_email,
+             sp.mother_email AS mother_email,
+             sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
+             sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
+             sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
+             sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
+             sp.parent_email AS parent_email, 
+             sp.whatsapp_no,
+             sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
+             sp.identification_marks, sp.pen_no, sp.apaar_id,
+             sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
+             sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
+             sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
+             sp.village, sp.police_station, sp.post_office, sp.district,
              sp.blood_group, sp.medical_notes, sp.photo_path,
              ts.name AS transport_stop, tr.name AS transport_route
       FROM students s
@@ -918,12 +1020,21 @@ exports.getById = async (req, res, next) => {
       is_online = val === '1';
     }
 
+    // Fetch documents
+    const [documents] = await sequelize.query(`
+      SELECT id, name, document_type, file_path, file_size, created_at
+      FROM student_documents
+      WHERE student_id = :id
+      ORDER BY created_at DESC;
+    `, { replacements: { id } });
+
     res.ok({ 
       ...student, 
       is_online, 
       current_enrollment: enrollment || null,
       siblings,
-      library_issues: libraryIssues
+      library_issues: libraryIssues,
+      documents
     }, 'Student retrieved.');
   } catch (err) { next(err); }
 };
@@ -999,27 +1110,93 @@ exports.updateIdentity = async (req, res, next) => {
 exports.updateProfile = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { change_reason, ...newData } = req.body;
+    const { 
+      change_reason, 
+      first_name, last_name, admission_no, date_of_birth, gender, aadhar_no,
+      ...newData 
+    } = req.body;
 
     const [[student]] = await sequelize.query(`
-      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
+      SELECT * FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!student) return res.fail('Student not found.', [], 404);
 
-    const result = await profileVersioning.update({
-      studentId    : parseInt(id),
-      newData,
-      changedBy    : req.user.id,
-      changeReason : change_reason,
-      ipAddress    : req.ip,
-      deviceInfo   : req.headers['user-agent'],
+    const result = await sequelize.transaction(async (t) => {
+      // 1. Update Students table if identity fields provided
+      const identityUpdates = {};
+      if (first_name)    identityUpdates.first_name    = first_name;
+      if (last_name)     identityUpdates.last_name     = last_name;
+      if (admission_no)  identityUpdates.admission_no  = admission_no;
+      if (date_of_birth) identityUpdates.date_of_birth = date_of_birth;
+      if (gender)        identityUpdates.gender        = gender;
+      if (aadhar_no !== undefined) identityUpdates.aadhar_no = aadhar_no;
+
+      if (Object.keys(identityUpdates).length > 0) {
+        // Check admission_no uniqueness if changed
+        if (admission_no && admission_no !== student.admission_no) {
+          const [[existing]] = await sequelize.query(`
+            SELECT id FROM students WHERE school_id = :schoolId AND admission_no = :admission_no AND id <> :id LIMIT 1;
+          `, { replacements: { schoolId: req.user.school_id, admission_no, id }, transaction: t });
+          if (existing) throw Object.assign(new Error('Admission number already exists.'), { status: 409 });
+        }
+
+        const setClauses = Object.keys(identityUpdates).map(k => `${k} = :${k}`).join(', ');
+        await sequelize.query(`
+          UPDATE students SET ${setClauses}, updated_at = NOW() WHERE id = :id;
+        `, { replacements: { ...identityUpdates, id }, transaction: t });
+      }
+
+      // 2. Update Student Profile (Versioned)
+      // Note: profileVersioning.update handles its own internal transaction if none provided,
+      // but we should pass the transaction if we want atomicity. 
+      // (Assuming profileVersioning.update supports passing transaction)
+      return await profileVersioning.update({
+        studentId    : parseInt(id),
+        newData,
+        changedBy    : req.user.id,
+        changeReason : change_reason,
+        ipAddress    : req.ip,
+        deviceInfo   : req.headers['user-agent'],
+        transaction  : t
+      });
     });
 
+    // 3. Fetch full updated record (same logic as getById)
+    const [[updatedStudent]] = await sequelize.query(`
+      SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
+             s.status, s.created_at, s.family_id, s.transport_stop_id,
+             sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
+             sp.email AS email,
+             sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
+             sp.mother_email AS mother_email,
+             sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
+             sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
+             sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
+             sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
+             sp.parent_email AS parent_email, 
+             sp.whatsapp_no,
+             sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
+             sp.identification_marks, sp.pen_no, sp.apaar_id,
+             sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
+             sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
+             sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
+             sp.village, sp.police_station, sp.post_office, sp.district,
+             sp.blood_group, sp.medical_notes, sp.photo_path
+      FROM students s
+      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE s.id = :id AND s.is_deleted = false;
+    `, { replacements: { id }, transaction: result.transaction });
+
+    // Fetch related data to ensure complete sync
+    const [documents] = await sequelize.query(`
+      SELECT id, name, document_type, file_path, file_size, created_at FROM student_documents WHERE student_id = :id;
+    `, { replacements: { id } });
+
     res.ok({
-      new_version : result.newVersion,
-      old_version : { id: result.oldVersion.id, valid_from: result.oldVersion.valid_from, valid_to: result.oldVersion.valid_to },
-    }, 'Profile updated. New version created.');
+      ...updatedStudent,
+      documents
+    }, 'Student profile and identity updated. New version created.');
 
     // Invalidate student list and detail cache
     invalidateCache(req.user.school_id, '/api/students*');
@@ -1266,6 +1443,64 @@ exports.getHistory = async (req, res, next) => {
       profile_history    : profileHistory,
       result_history     : results,
     }, 'Student history retrieved.');
+  } catch (err) { next(err); }
+};
+
+const pdfGen           = require('../utils/pdfGenerator');
+
+// ── GET /api/students/:id/admission-form ─────────────────────────────────────
+exports.downloadAdmissionForm = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // 1. Fetch Student and current Profile
+    const [[student]] = await sequelize.query(`
+      SELECT s.*, sp.photo_path
+      FROM students s
+      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      WHERE s.id = :id AND s.school_id = :schoolId AND s.is_deleted = false;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
+
+    const [[profile]] = await sequelize.query(`
+      SELECT * FROM student_profiles WHERE student_id = :id AND is_current = true;
+    `, { replacements: { id } });
+
+    // 2. Fetch School and Session info
+    const [[school]] = await sequelize.query(`SELECT * FROM schools WHERE id = :schoolId;`, { replacements: { schoolId } });
+    
+    // Get latest enrollment
+    const [[enrollment]] = await sequelize.query(`
+      SELECT e.*, c.name AS class_name, sec.name AS section_name, sess.name AS session_name
+      FROM enrollments e
+      JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      JOIN sessions sess ON sess.id = e.session_id
+      WHERE e.student_id = :id
+      ORDER BY e.joined_date DESC, e.id DESC
+      LIMIT 1;
+    `, { replacements: { id } });
+
+    // Fetch Academic Records
+    const [academicRecords] = await sequelize.query(`
+      SELECT * FROM student_previous_academic_records WHERE student_id = :id ORDER BY created_at ASC;
+    `, { replacements: { id } });
+
+    // 3. Generate PDF
+    const pdfBuffer = await pdfGen.generateAdmissionForm({
+      school,
+      student,
+      profile: profile || {},
+      enrollment: enrollment || {},
+      session: { name: enrollment?.session_name || 'N/A' },
+      academicRecords
+    });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=AdmissionForm_${student.admission_no}.pdf`);
+    res.send(pdfBuffer);
   } catch (err) { next(err); }
 };
 

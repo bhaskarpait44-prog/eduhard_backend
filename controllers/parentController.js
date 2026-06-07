@@ -117,9 +117,9 @@ exports.getWardHomework = async (req, res, next) => {
     const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
-    // Verify ownership
+    // Verify ownership and get active enrollment
     const [[isValid]] = await sequelize.query(`
-      SELECT s.id, e.id AS enrollment_id
+      SELECT s.id, e.id AS enrollment_id, e.class_id, e.section_id
       FROM students s 
       JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
       LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
@@ -127,16 +127,18 @@ exports.getWardHomework = async (req, res, next) => {
     `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
+    if (!isValid.enrollment_id) return res.ok([], 'Student is not currently enrolled in an active section.');
 
     const [homework] = await sequelize.query(`
       SELECT h.*, s.name AS subject_name, u.name AS teacher_name
       FROM homework h
       JOIN subjects s ON s.id = h.subject_id
       JOIN users u ON u.id = h.created_by
-      WHERE h.class_id = (SELECT class_id FROM enrollments WHERE id = :enrollment_id)
-        AND h.section_id = (SELECT section_id FROM enrollments WHERE id = :enrollment_id)
+      WHERE h.class_id = :classId
+        AND h.section_id = :sectionId
+        AND h.status = 'active'
       ORDER BY h.due_date DESC;
-    `, { replacements: { enrollment_id: isValid.enrollment_id } });
+    `, { replacements: { classId: isValid.class_id, sectionId: isValid.section_id } });
 
     res.ok(homework);
   } catch (err) { next(err); }
@@ -170,9 +172,11 @@ exports.getWardCalendar = async (req, res, next) => {
         AND ae.session_id = :sessionId
         AND ae.is_published = true
         AND (
+          -- Global events for parents
           ae.audience IN ('everyone', 'parents')
-          OR (ae.audience = 'students')
-          OR (ae.target_class_id IS NULL OR ae.target_class_id = :classId)
+          OR 
+          -- Events targeted at students (which parents should see) AND matching class if restricted
+          (ae.audience = 'students' AND (ae.target_class_id IS NULL OR ae.target_class_id = :classId))
         )
     `;
     const replacements = { 

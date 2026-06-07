@@ -119,10 +119,53 @@ const profileVersioning = {
         mother_name       : oldVersion.mother_name,
         mother_phone      : oldVersion.mother_phone,
         mother_email      : oldVersion.mother_email,
+        parent_email      : oldVersion.parent_email,
         emergency_contact : oldVersion.emergency_contact,
         blood_group       : oldVersion.blood_group,
         medical_notes     : oldVersion.medical_notes,
         photo_path        : oldVersion.photo_path,
+
+        // Carry forward SVA expansion fields
+        village: oldVersion.village,
+        police_station: oldVersion.police_station,
+        post_office: oldVersion.post_office,
+        district: oldVersion.district,
+        whatsapp_no: oldVersion.whatsapp_no,
+        nationality: oldVersion.nationality,
+        religion: oldVersion.religion,
+        caste: oldVersion.caste,
+        mother_tongue: oldVersion.mother_tongue,
+        identification_marks: oldVersion.identification_marks,
+        is_hostel: oldVersion.is_hostel,
+        medium: oldVersion.medium,
+        pen_no: oldVersion.pen_no,
+        apaar_id: oldVersion.apaar_id,
+        prev_attendance_days: oldVersion.prev_attendance_days,
+        distance_km: oldVersion.distance_km,
+        father_qualification: oldVersion.father_qualification,
+        father_aadhar: oldVersion.father_aadhar,
+        father_annual_income: oldVersion.father_annual_income,
+        mother_qualification: oldVersion.mother_qualification,
+        mother_aadhar: oldVersion.mother_aadhar,
+        mother_annual_income: oldVersion.mother_annual_income,
+        guardian_name: oldVersion.guardian_name,
+        guardian_relation: oldVersion.guardian_relation,
+        guardian_phone: oldVersion.guardian_phone,
+        guardian_occupation: oldVersion.guardian_occupation,
+        guardian_qualification: oldVersion.guardian_qualification,
+        guardian_aadhar: oldVersion.guardian_aadhar,
+        guardian_annual_income: oldVersion.guardian_annual_income,
+
+        // Carry forward permanent address fields
+        is_permanent_same: oldVersion.is_permanent_same,
+        perm_address: oldVersion.perm_address,
+        perm_village: oldVersion.perm_village,
+        perm_police_station: oldVersion.perm_police_station,
+        perm_post_office: oldVersion.perm_post_office,
+        perm_district: oldVersion.perm_district,
+        perm_state: oldVersion.perm_state,
+        perm_pincode: oldVersion.perm_pincode,
+
         // Overlay with incoming changes
         ...sanitizedNewData,
         // Versioning metadata
@@ -145,8 +188,16 @@ const profileVersioning = {
       const watchedFields = [
         'address','city','state','pincode','phone','email',
         'father_name','father_phone','father_occupation',
-        'mother_name','mother_phone','mother_email',
+        'mother_name','mother_phone','mother_email','parent_email',
         'emergency_contact','blood_group','medical_notes','photo_path',
+        'village', 'police_station', 'post_office', 'district', 'whatsapp_no',
+        'nationality', 'religion', 'caste', 'mother_tongue', 'identification_marks',
+        'is_hostel', 'medium', 'pen_no', 'apaar_id', 'prev_attendance_days', 'distance_km',
+        'father_qualification', 'father_aadhar', 'father_annual_income',
+        'mother_qualification', 'mother_aadhar', 'mother_annual_income',
+        'guardian_name', 'guardian_relation', 'guardian_phone', 'guardian_occupation',
+        'guardian_qualification', 'guardian_aadhar', 'guardian_annual_income',
+        'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_state', 'perm_pincode'
       ];
 
       const auditRows = [];

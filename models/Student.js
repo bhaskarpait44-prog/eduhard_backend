@@ -11,6 +11,7 @@ const Student = sequelize.define('Student', {
   last_name     : { type: DataTypes.STRING(100), allowNull: false },
   date_of_birth : { type: DataTypes.DATEONLY, allowNull: false },
   gender                 : { type: DataTypes.ENUM('male', 'female', 'other'), allowNull: false },
+  aadhar_no              : { type: DataTypes.STRING(20), allowNull: true },
   family_id              : { type: DataTypes.INTEGER, allowNull: true },
   transport_stop_id      : { type: DataTypes.INTEGER, allowNull: true },
   is_deleted             : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
