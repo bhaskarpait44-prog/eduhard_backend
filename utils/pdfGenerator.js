@@ -211,67 +211,98 @@ async function generateAdmissionForm(data) {
 
   return new Promise((resolve, reject) => {
     try {
-      const doc = new PDFDocument({ margin: 50, size: 'A4' });
+      const doc = new PDFDocument({ 
+        margin: 40, 
+        size: 'A4',
+        info: {
+          Title: `Admission Form - ${student.admission_no}`,
+          Author: school.name || 'School Management System'
+        }
+      });
       const chunks = [];
 
       doc.on('data', chunk => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', err => reject(err));
 
+      // --- Helper for drawing lines ---
+      const drawLine = (y, color = '#eee') => {
+        doc.moveTo(40, y).lineTo(555, y).strokeColor(color).lineWidth(1).stroke();
+      };
+
+      // --- Page Border ---
+      doc.rect(20, 20, 555, 802).strokeColor('#2c3e50').lineWidth(1).stroke();
+
       // --- Header ---
-      drawSchoolHeader(doc, school, 'ADMISSION FORM', `Session: ${session.name || 'N/A'}`);
+      const schoolName = (school.name || 'SCHOOL MANAGEMENT SYSTEM').toUpperCase();
+      doc.fillColor('#1a237e').fontSize(20).font('Helvetica-Bold').text(schoolName, { align: 'center' });
+      doc.fillColor('#444').fontSize(9).font('Helvetica').text(school.address || '', { align: 'center' });
+      doc.text(`${school.phone ? 'Tel: ' + school.phone : ''}${school.email ? ' | Email: ' + school.email : ''}`, { align: 'center' });
+      
+      doc.moveDown(1);
+      doc.fillColor('#1a237e').fontSize(14).font('Helvetica-Bold').text('ADMISSION FORM', { align: 'center', characterSpacing: 2 });
+      doc.fillColor('#666').fontSize(10).font('Helvetica').text(`Academic Session: ${session.name || 'N/A'}`, { align: 'center' });
+      doc.moveDown(1);
+      drawLine(doc.y, '#1a237e');
+      doc.moveDown(1);
 
-      // --- Student Info ---
-      doc.font('Helvetica-Bold').fontSize(12).text('STUDENT PROFILE', { underline: true });
+      // --- Photo Box ---
+      const photoX = 475;
+      const photoY = 110;
+      doc.rect(photoX, photoY, 80, 95).strokeColor('#ccc').stroke();
+      doc.fontSize(8).fillColor('#999').text('PASSPORT\nPHOTO', photoX, photoY + 35, { width: 80, align: 'center' });
+
+      // --- Section: Student Information ---
+      doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text('1. STUDENT INFORMATION', 40);
       doc.moveDown(0.5);
+      
+      const col1 = 45, col2 = 260;
+      let y = doc.y;
 
-      doc.font('Helvetica').fontSize(10);
-      const colA = 50, colB = 300;
-      let curY = doc.y;
-
-      const fields = [
-        { label: 'Name of pupil', value: `${student.first_name} ${student.last_name}`.toUpperCase() },
+      const infoFields = [
+        { label: 'Full Name', value: `${student.first_name} ${student.last_name}`.toUpperCase() },
         { label: 'Admission No', value: student.admission_no },
-        { label: 'Date of Birth', value: student.date_of_birth },
+        { label: 'Date of Birth', value: student.date_of_birth ? new Date(student.date_of_birth).toLocaleDateString() : 'N/A' },
+        { label: 'Gender', value: (student.gender || 'N/A').toUpperCase() },
         { label: 'Aadhar No', value: student.aadhar_no || 'N/A' },
-        { label: 'Gender', value: student.gender?.toUpperCase() },
         { label: 'Nationality', value: profile.nationality || 'Indian' },
         { label: 'Religion', value: profile.religion || 'N/A' },
         { label: 'Caste', value: profile.caste || 'N/A' },
         { label: 'Mother Tongue', value: profile.mother_tongue || 'N/A' },
         { label: 'Blood Group', value: profile.blood_group || 'N/A' },
-        { label: 'Class', value: enrollment.class_name },
-        { label: 'Section', value: enrollment.section_name || 'N/A' },
-        { label: 'Stream', value: enrollment.stream?.toUpperCase() || 'REGULAR' },
-        { label: 'Medium', value: profile.medium || 'English' },
-        { label: 'APAAR ID', value: profile.apaar_id || 'N/A' },
-        { label: 'PEN No', value: profile.pen_no || 'N/A' },
+        { label: 'Class Admitted', value: enrollment.class_name || 'N/A' },
+        { label: 'Section/Stream', value: `${enrollment.section_name || 'N/A'} / ${enrollment.stream?.toUpperCase() || 'REGULAR'}` },
       ];
 
-      fields.forEach((f, i) => {
-        const x = i % 2 === 0 ? colA : colB;
-        doc.font('Helvetica-Bold').text(`${f.label}: `, x, curY, { continued: true })
-           .font('Helvetica').text(f.value || 'N/A');
-        if (i % 2 !== 0) curY += 18;
+      doc.fontSize(10).fillColor('#333');
+      infoFields.forEach((f, i) => {
+        const x = i % 2 === 0 ? col1 : col2;
+        const labelWidth = 100;
+        doc.font('Helvetica-Bold').text(`${f.label}:`, x, y, { width: labelWidth });
+        doc.font('Helvetica').text(String(f.value || 'N/A'), x + labelWidth, y, { width: 140 });
+        if (i % 2 !== 0 || i === infoFields.length - 1) y += 18;
       });
 
-      doc.moveDown(1.5);
+      doc.y = y + 10;
+      drawLine(doc.y);
+      doc.moveDown(1);
 
-      // --- Address Info ---
-      doc.font('Helvetica-Bold').fontSize(12).text('RESIDENTIAL ADDRESS', { underline: true });
+      // --- Section: Contact & Address ---
+      doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text('2. ADDRESS & CONTACT DETAILS');
       doc.moveDown(0.5);
-
+      
       const addrY = doc.y;
-      doc.fontSize(9);
+      doc.fontSize(9).fillColor('#333');
       
       // Current
-      doc.font('Helvetica-Bold').text('CURRENT ADDRESS', colA, addrY);
-      doc.font('Helvetica').text(profile.address || 'N/A', colA, addrY + 15, { width: 230 });
-      doc.text(`P.S.: ${profile.police_station || 'N/A'} | P.O.: ${profile.post_office || 'N/A'}`, colA, addrY + 45);
-      doc.text(`${profile.district || 'N/A'}, ${profile.state || 'N/A'} - ${profile.pincode || 'N/A'}`, colA, addrY + 60);
+      doc.font('Helvetica-Bold').text('RESIDENTIAL ADDRESS', col1, addrY);
+      doc.font('Helvetica').text(profile.address || 'N/A', col1, addrY + 15, { width: 200 });
+      doc.text(`P.S.: ${profile.police_station || 'N/A'} | P.O.: ${profile.post_office || 'N/A'}`, col1, addrY + 45);
+      doc.text(`${profile.district || 'N/A'}, ${profile.state || 'N/A'} - ${profile.pincode || 'N/A'}`, col1, addrY + 58);
+      doc.text(`Mobile: ${student.phone || 'N/A'}`, col1, addrY + 71);
 
       // Permanent
-      doc.font('Helvetica-Bold').text('PERMANENT ADDRESS', colB, addrY);
+      doc.font('Helvetica-Bold').text('PERMANENT ADDRESS', col2, addrY);
       const pAddr = profile.is_permanent_same ? profile.address : profile.perm_address;
       const pPS = profile.is_permanent_same ? profile.police_station : profile.perm_police_station;
       const pPO = profile.is_permanent_same ? profile.post_office : profile.perm_post_office;
@@ -279,71 +310,103 @@ async function generateAdmissionForm(data) {
       const pState = profile.is_permanent_same ? profile.state : profile.perm_state;
       const pPin = profile.is_permanent_same ? profile.pincode : profile.perm_pincode;
 
-      doc.font('Helvetica').text(pAddr || 'N/A', colB, addrY + 15, { width: 230 });
-      doc.text(`P.S.: ${pPS || 'N/A'} | P.O.: ${pPO || 'N/A'}`, colB, addrY + 45);
-      doc.text(`${pDist || 'N/A'}, ${pState || 'N/A'} - ${pPin || 'N/A'}`, colB, addrY + 60);
+      doc.font('Helvetica').text(pAddr || 'N/A', col2, addrY + 15, { width: 200 });
+      doc.text(`P.S.: ${pPS || 'N/A'} | P.O.: ${pPO || 'N/A'}`, col2, addrY + 45);
+      doc.text(`${pDist || 'N/A'}, ${pState || 'N/A'} - ${pPin || 'N/A'}`, col2, addrY + 58);
 
-      doc.y = addrY + 80;
-      doc.moveDown(1.5);
+      doc.y = addrY + 90;
+      drawLine(doc.y);
+      doc.moveDown(1);
 
-      // --- Parents Info ---
-      doc.font('Helvetica-Bold').fontSize(12).text("PARENTS' / GUARDIAN'S PROFILE", { underline: true });
+      // --- Section: Parents Info ---
+      doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text("3. PARENTS' / GUARDIAN'S PROFILE");
       doc.moveDown(0.5);
       
-      const parentFields = [
-        ['PARTICULAR', 'MOTHER', 'FATHER', 'GUARDIAN'],
-        ['Name', profile.mother_name || 'N/A', profile.father_name || 'N/A', profile.guardian_name || 'N/A'],
-        ['Qualification', profile.mother_qualification || 'N/A', profile.father_qualification || 'N/A', profile.guardian_qualification || 'N/A'],
-        ['Mobile No.', profile.mother_phone || 'N/A', profile.father_phone || 'N/A', profile.guardian_phone || 'N/A'],
-        ['Aadhar No.', profile.mother_aadhar || 'N/A', profile.father_aadhar || 'N/A', profile.guardian_aadhar || 'N/A'],
-        ['Annual Income', profile.mother_annual_income || 'N/A', profile.father_annual_income || 'N/A', profile.guardian_annual_income || 'N/A'],
-      ];
-
-      const cellWidth = 125;
-      let tableY = doc.y;
-      parentFields.forEach((row, rowIndex) => {
-        row.forEach((cell, colIndex) => {
-          doc.font(rowIndex === 0 ? 'Helvetica-Bold' : 'Helvetica').fontSize(9);
-          doc.text(cell, colA + (colIndex * cellWidth), tableY, { width: cellWidth, align: 'left' });
-        });
-        tableY += 20;
-        doc.moveTo(colA, tableY - 5).lineTo(545, tableY - 5).strokeColor('#eee').stroke();
+      const parentTableTop = doc.y;
+      const tableHeaderColor = '#f5f5f5';
+      const cellWidth = 128;
+      
+      // Header BG
+      doc.rect(40, parentTableTop, cellWidth * 4, 20).fill(tableHeaderColor);
+      doc.fillColor('#1a237e').font('Helvetica-Bold').fontSize(9);
+      ['PARTICULAR', 'MOTHER', 'FATHER', 'GUARDIAN'].forEach((h, i) => {
+        doc.text(h, 40 + (i * cellWidth), parentTableTop + 6, { width: cellWidth, align: 'center' });
       });
 
-      doc.moveDown(1.5);
+      const parentFields = [
+        ['Name', profile.mother_name, profile.father_name, profile.guardian_name],
+        ['Qualification', profile.mother_qualification, profile.father_qualification, profile.guardian_qualification],
+        ['Mobile No.', profile.mother_phone, profile.father_phone, profile.guardian_phone],
+        ['Annual Income', '—', profile.father_annual_income, profile.guardian_annual_income],
+      ];
 
-      // --- Academic Records ---
-      if (academicRecords.length > 0) {
-        doc.font('Helvetica-Bold').fontSize(12).text('PREVIOUS ACADEMIC RECORD', { underline: true });
+      let rowY = parentTableTop + 20;
+      doc.fillColor('#333').font('Helvetica').fontSize(9);
+      parentFields.forEach((row) => {
+        row.forEach((cell, i) => {
+          doc.font(i === 0 ? 'Helvetica-Bold' : 'Helvetica');
+          doc.text(String(cell || 'N/A'), 40 + (i * cellWidth), rowY + 6, { width: cellWidth, align: 'center' });
+        });
+        rowY += 20;
+        doc.moveTo(40, rowY).lineTo(552, rowY).strokeColor('#eee').stroke();
+      });
+
+      doc.y = rowY + 10;
+      doc.moveDown(1);
+
+      // --- Section: Academic History ---
+      if (academicRecords && academicRecords.length > 0) {
+        doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text('4. PREVIOUS ACADEMIC RECORD');
         doc.moveDown(0.5);
         
-        const headerY = doc.y;
-        doc.fontSize(9).font('Helvetica-Bold');
-        doc.text('School & Location', colA, headerY, { width: 180 });
-        doc.text('Class', colA + 200, headerY, { width: 50 });
-        doc.text('Year', colA + 270, headerY, { width: 60 });
-        doc.text('Percentage/Grade', colA + 350, headerY, { width: 100 });
+        const histTop = doc.y;
+        doc.rect(40, histTop, 512, 18).fill('#f9f9f9');
+        doc.fillColor('#1a237e').fontSize(8).font('Helvetica-Bold');
+        doc.text('SCHOOL & LOCATION', 45, histTop + 5, { width: 200 });
+        doc.text('CLASS', 250, histTop + 5, { width: 50 });
+        doc.text('YEAR', 310, histTop + 5, { width: 50 });
+        doc.text('PERCENTAGE / GRADE', 370, histTop + 5, { width: 100 });
         
-        let recY = headerY + 15;
-        doc.font('Helvetica');
+        let ry = histTop + 18;
+        doc.fillColor('#333').font('Helvetica');
         academicRecords.forEach(rec => {
-          doc.text(rec.school_name, colA, recY, { width: 180 });
-          doc.text(rec.class_name, colA + 200, recY);
-          doc.text(rec.year_of_study || 'N/A', colA + 270, recY);
-          doc.text(rec.percentage_grade || 'N/A', colA + 350, recY);
-          recY += 15;
+          doc.text(String(rec.school_name || 'N/A'), 45, ry + 5, { width: 200 });
+          doc.text(String(rec.class_name || 'N/A'), 250, ry + 5);
+          doc.text(String(rec.year_of_study || 'N/A'), 310, ry + 5);
+          doc.text(String(rec.percentage_grade || 'N/A'), 370, ry + 5);
+          ry += 18;
+          doc.moveTo(40, ry).lineTo(552, ry).strokeColor('#eee').stroke();
         });
-        doc.moveDown(2);
+        doc.y = ry + 10;
       }
 
-      // --- Footer ---
-      doc.moveDown(3);
-      const sigY = doc.y;
-      doc.moveTo(50, sigY).lineTo(150, sigY).stroke();
-      doc.text('Signature of Parents/Guardian', 50, sigY + 5, { width: 150 });
+      // --- Section: Declaration ---
+      doc.moveDown(1);
+      doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text('5. DECLARATION');
+      doc.fontSize(8.5).font('Helvetica').fillColor('#555').text(
+        "I hereby declare that the information furnished above is true and correct to the best of my knowledge and belief. I understand that the admission of my ward is subject to the rules and regulations of the school.",
+        { align: 'justify', lineGap: 2 }
+      );
 
-      doc.moveTo(400, sigY).lineTo(545, sigY).stroke();
-      doc.text('Principal / Director Signature', 400, sigY + 5, { width: 145, align: 'right' });
+      // --- Signatures ---
+      doc.moveDown(4);
+      const sigY = doc.y;
+      doc.strokeColor('#2c3e50').lineWidth(0.5);
+      
+      doc.moveTo(40, sigY).lineTo(160, sigY).stroke();
+      doc.fontSize(9).font('Helvetica-Bold').fillColor('#333').text('Parent/Guardian Signature', 40, sigY + 5, { width: 120, align: 'center' });
+
+      doc.moveTo(225, sigY).lineTo(345, sigY).stroke();
+      doc.text('Clerk/Accountant', 225, sigY + 5, { width: 120, align: 'center' });
+
+      doc.moveTo(410, sigY).lineTo(530, sigY).stroke();
+      doc.text('Principal Signature', 410, sigY + 5, { width: 120, align: 'center' });
+
+      // --- Footer ---
+      doc.fontSize(7).fillColor('#999').text(
+        `Generated on ${new Date().toLocaleString()} | Educational Management System`,
+        20, 810, { align: 'center', width: 555 }
+      );
 
       doc.end();
     } catch (err) { reject(err); }

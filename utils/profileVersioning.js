@@ -29,7 +29,7 @@ const profileVersioning = {
    * Create the very first profile version for a student.
    * Called once after admission is created.
    */
-  async create({ studentId, data, changedBy, changeReason }) {
+  async create({ studentId, data, changedBy, changeReason, transaction = null }) {
     const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
     // Sanitize data: convert empty strings to null for optional/enum fields
@@ -38,17 +38,19 @@ const profileVersioning = {
       sanitizedData[key] = data[key] === '' ? null : data[key];
     });
 
-    const profile = await StudentProfile.create({
-      student_id    : studentId,
-      ...sanitizedData,
-      valid_from    : today,
-      valid_to      : null,
-      is_current    : true,
-      changed_by    : changedBy   || null,
-      change_reason : changeReason || 'Initial profile created',
-    });
+    const work = async (t) => {
+      return await StudentProfile.create({
+        student_id    : studentId,
+        ...sanitizedData,
+        valid_from    : today,
+        valid_to      : null,
+        is_current    : true,
+        changed_by    : changedBy   || null,
+        change_reason : changeReason || 'Initial profile created',
+      }, { transaction: t });
+    };
 
-    return profile;
+    return transaction ? work(transaction) : sequelize.transaction(work);
   },
 
   /**
@@ -57,7 +59,7 @@ const profileVersioning = {
    *
    * @returns {{ oldVersion: StudentProfile, newVersion: StudentProfile }}
    */
-  async update({ studentId, newData, changedBy, changeReason, ipAddress, deviceInfo }) {
+  async update({ studentId, newData, changedBy, changeReason, ipAddress, deviceInfo, transaction = null }) {
 
     // Validate reason before touching the DB
     if (!changeReason || changeReason.trim().length < 10) {
@@ -72,7 +74,7 @@ const profileVersioning = {
       sanitizedNewData[key] = newData[key] === '' ? null : newData[key];
     });
 
-    const result = await sequelize.transaction(async (t) => {
+    const work = async (t) => {
 
       // ── Fetch current version ────────────────────────────────────────
       const oldVersion = await StudentProfile.scope('allVersions').findOne({
@@ -230,9 +232,9 @@ const profileVersioning = {
       }
 
       return { oldVersion, newVersion };
-    });
+    };
 
-    return result;
+    return transaction ? work(transaction) : sequelize.transaction(work);
   },
 
   /**

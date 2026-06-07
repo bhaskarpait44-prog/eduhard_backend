@@ -59,8 +59,8 @@ exports.createApplication = async (req, res, next) => {
       ...rest 
     } = student_data;
     
-    // Validate required fields
-    if (!first_name || !last_name || !email || !class_id) {
+    // Validate required fields (email is now optional)
+    if (!first_name || !last_name || !class_id) {
       return res.fail('Missing required fields.', [], 422);
     }
 

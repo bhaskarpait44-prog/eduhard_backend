@@ -31,6 +31,8 @@ router.post('/import/preview',  requirePermission('students.create'), ctrl.previ
 router.post('/import/confirm',  requirePermission('students.create'), ctrl.confirmAdmission);
 router.get('/import/:jobId/status', requirePermission('students.create'), ctrl.getAdmissionStatus);
 
+router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
+
 router.post('/',                  requireAdmin, upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'birth_certificate', maxCount: 1 },
@@ -56,8 +58,6 @@ router.post('/',                  requireAdmin, upload.fields([
 ], validate, ctrl.admit);
 
 router.get('/',                   requireRole('admin', 'teacher', 'receptionist', 'librarian', 'accountant'), cache(300), ctrl.list);
-
-router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
 
 router.get('/:id',                requireRole('admin', 'teacher', 'receptionist', 'librarian'), cache(600), [
   param('id').isInt(),

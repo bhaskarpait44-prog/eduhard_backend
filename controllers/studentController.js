@@ -221,9 +221,6 @@ exports.admit = async (req, res, next) => {
     const parentName = profile?.father_name || profile?.mother_name || `${last_name} Family`;
     const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.phone;
 
-    if (!studentEmail) {
-      return res.fail('Student email is required at admission.', [], 422);
-    }
     if (!parentEmail) {
       return res.fail('Parent email is required for account creation.', [], 422);
     }
@@ -242,18 +239,20 @@ exports.admit = async (req, res, next) => {
 
       if (existing) throw Object.assign(new Error('Admission number already exists.'), { status: 409 });
 
-      const [[emailInUse]] = await sequelize.query(`
-        SELECT sp.id
-        FROM student_profiles sp
-        JOIN students s ON s.id = sp.student_id
-        WHERE s.school_id = :schoolId
-          AND s.is_deleted = false
-          AND sp.is_current = true
-          AND LOWER(sp.email) = LOWER(:email)
-        LIMIT 1;
-      `, { replacements: { schoolId, email: studentEmail }, transaction: t });
+      if (studentEmail) {
+        const [[emailInUse]] = await sequelize.query(`
+          SELECT sp.id
+          FROM student_profiles sp
+          JOIN students s ON s.id = sp.student_id
+          WHERE s.school_id = :schoolId
+            AND s.is_deleted = false
+            AND sp.is_current = true
+            AND LOWER(sp.email) = LOWER(:email)
+          LIMIT 1;
+        `, { replacements: { schoolId, email: studentEmail }, transaction: t });
 
-      if (emailInUse) throw Object.assign(new Error('Student email already exists.'), { status: 409 });
+        if (emailInUse) throw Object.assign(new Error('Student email already exists.'), { status: 409 });
+      }
 
       // 2. Handle Parent User Account (Logic remains same)
       let parentUserId;
@@ -1148,10 +1147,7 @@ exports.updateProfile = async (req, res, next) => {
       }
 
       // 2. Update Student Profile (Versioned)
-      // Note: profileVersioning.update handles its own internal transaction if none provided,
-      // but we should pass the transaction if we want atomicity. 
-      // (Assuming profileVersioning.update supports passing transaction)
-      return await profileVersioning.update({
+      await profileVersioning.update({
         studentId    : parseInt(id),
         newData,
         changedBy    : req.user.id,
@@ -1160,41 +1156,43 @@ exports.updateProfile = async (req, res, next) => {
         deviceInfo   : req.headers['user-agent'],
         transaction  : t
       });
+
+      // 3. Fetch full updated record (same logic as getById)
+      const [[updated]] = await sequelize.query(`
+        SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
+               s.status, s.created_at, s.family_id, s.transport_stop_id,
+               sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
+               sp.email AS email,
+               sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
+               sp.mother_email AS mother_email,
+               sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
+               sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
+               sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
+               sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
+               sp.parent_email AS parent_email, 
+               sp.whatsapp_no,
+               sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
+               sp.identification_marks, sp.pen_no, sp.apaar_id,
+               sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
+               sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
+               sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
+               sp.village, sp.police_station, sp.post_office, sp.district,
+               sp.blood_group, sp.medical_notes, sp.photo_path
+        FROM students s
+        LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+        WHERE s.id = :id AND s.is_deleted = false;
+      `, { replacements: { id }, transaction: t });
+
+      return updated;
     });
 
-    // 3. Fetch full updated record (same logic as getById)
-    const [[updatedStudent]] = await sequelize.query(`
-      SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
-             s.status, s.created_at, s.family_id, s.transport_stop_id,
-             sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
-             sp.email AS email,
-             sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
-             sp.mother_email AS mother_email,
-             sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
-             sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
-             sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
-             sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
-             sp.parent_email AS parent_email, 
-             sp.whatsapp_no,
-             sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
-             sp.identification_marks, sp.pen_no, sp.apaar_id,
-             sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
-             sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
-             sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
-             sp.village, sp.police_station, sp.post_office, sp.district,
-             sp.blood_group, sp.medical_notes, sp.photo_path
-      FROM students s
-      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
-      WHERE s.id = :id AND s.is_deleted = false;
-    `, { replacements: { id }, transaction: result.transaction });
-
-    // Fetch related data to ensure complete sync
+    // 4. Fetch related data to ensure complete sync
     const [documents] = await sequelize.query(`
       SELECT id, name, document_type, file_path, file_size, created_at FROM student_documents WHERE student_id = :id;
     `, { replacements: { id } });
 
     res.ok({
-      ...updatedStudent,
+      ...result,
       documents
     }, 'Student profile and identity updated. New version created.');
 
