@@ -34,6 +34,10 @@ router.patch('/:id/lock', requireAdmin, [
   param('id').isInt().withMessage('Session id must be integer'),
 ], validate, ctrl.lock);
 
+router.patch('/:id/unlock', requireAdmin, [
+  param('id').isInt().withMessage('Session id must be integer'),
+], validate, ctrl.unlock);
+
 router.patch('/:id/archive', requireAdmin, [
   param('id').isInt().withMessage('Session id must be integer'),
 ], validate, ctrl.archive);

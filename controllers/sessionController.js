@@ -1,7 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
-const { retroactiveHoliday } = require('../utils/attendanceCalculator');
+const { retroactiveHoliday, _internal } = require('../utils/attendanceCalculator');
 const { invalidateCache } = require('../middlewares/cache');
 
 // ── POST /api/sessions ───────────────────────────────────────────────────────
@@ -196,12 +196,13 @@ exports.activate = async (req, res, next) => {
     const sessionData = await sequelize.transaction(async (t) => {
       // 1. Verify target session exists and belongs to this school
       const [[target]] = await sequelize.query(`
-        SELECT id, status FROM sessions WHERE id = :id AND school_id = :schoolId LIMIT 1;
+        SELECT id, name, status FROM sessions WHERE id = :id AND school_id = :schoolId LIMIT 1;
       `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
       if (!target) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
-      if (target.status !== 'upcoming') {
-        throw { name: 'CustomError', message: `Cannot activate a session that is ${target.status}. Only upcoming sessions can be activated.`, status: 400 };
+      const validStatuses = ['upcoming', 'locked'];
+      if (!validStatuses.includes(target.status)) {
+        throw { name: 'CustomError', message: `Cannot activate a session that is ${target.status}. Only ${validStatuses.join(' or ')} sessions can be activated.`, status: 400 };
       }
 
       // 2. Only one session can be current per school
@@ -225,7 +226,7 @@ exports.activate = async (req, res, next) => {
         `, { replacements: {
           id: current.id,
           userId: req.user.id,
-          reason: `Session automatically closed upon activation of "${id}"`,
+          reason: `Session "${current.name}" automatically closed upon activation of "${target.name}"`,
           ip: req.ip || null,
           device: (req.headers['user-agent'] || '').slice(0, 299)
         }, transaction: t });
@@ -246,7 +247,7 @@ exports.activate = async (req, res, next) => {
       `, { replacements: {
         id,
         userId: req.user.id,
-        reason: `Session activated by admin`,
+        reason: `Session "${target.name}" activated by admin`,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
@@ -333,15 +334,17 @@ exports.addHoliday = async (req, res, next) => {
       await sequelize.query(`
         INSERT INTO audit_logs
           (table_name, record_id, field_name, old_value, new_value,
-           changed_by, reason, created_at)
+           changed_by, reason, ip_address, device_info, created_at)
         VALUES
           ('session_holidays', :id, 'holiday_added', 'none', :date,
-           :userId, :reason, NOW());
+           :userId, :reason, :ip, :device, NOW());
       `, { replacements: {
         id: newHoliday.id,
         date: holiday_date,
         userId: req.user.id,
-        reason: `Holiday "${name}" added to session`
+        reason: `Holiday "${name}" added to session`,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
 
       return {
@@ -428,6 +431,55 @@ exports.lock = async (req, res, next) => {
     res.ok(session, `Session "${session.name}" has been locked and is no longer current.`);
     invalidateCache(schoolId, '/api/sessions*');
     invalidateCache(schoolId, '/api/dashboard*');
+  } catch (err) {
+    if (err.name === 'CustomError') {
+      return res.fail(err.message, [], err.status || 400);
+    }
+    next(err);
+  }
+};
+
+exports.unlock = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const session = await sequelize.transaction(async (t) => {
+      const [[current]] = await sequelize.query(`
+        SELECT id, status, name FROM sessions WHERE id = :id AND school_id = :schoolId;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      if (!current) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
+      if (current.status !== 'locked') {
+        throw { name: 'CustomError', message: `Cannot unlock a session that is ${current.status}. Only locked sessions can be unlocked.`, status: 400 };
+      }
+
+      const [[updatedSession]] = await sequelize.query(`
+        UPDATE sessions SET is_locked = false, status = 'upcoming', updated_at = NOW()
+        WHERE id = :id AND school_id = :schoolId
+        RETURNING id, name, status, is_locked, is_current;
+      `, { replacements: { id, schoolId }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('sessions', :id, 'status', 'locked', 'upcoming',
+           :userId, :reason, :ip, :device, NOW());
+      `, { replacements: {
+        id: updatedSession.id,
+        userId: req.user.id,
+        reason: `Session unlocked by admin`,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
+
+      return updatedSession;
+    });
+
+    res.ok(session, `Session "${session.name}" has been unlocked and set to upcoming status.`);
+    invalidateCache(schoolId, '/api/sessions*');
   } catch (err) {
     if (err.name === 'CustomError') {
       return res.fail(err.message, [], err.status || 400);
@@ -596,11 +648,16 @@ exports.updateWorkingDays = async (req, res, next) => {
       await sequelize.query(`
         INSERT INTO audit_logs
           (table_name, record_id, field_name, old_value, new_value,
-           changed_by, reason, created_at)
+           changed_by, reason, ip_address, device_info, created_at)
         VALUES
           ('sessions', :id, 'working_days', 'previous_config', 'new_config',
-           :userId, 'Working days updated mid-session', NOW());
-      `, { replacements: { id, userId: req.user.id }, transaction: t });
+           :userId, 'Working days updated mid-session', :ip, :device, NOW());
+      `, { replacements: { 
+        id, 
+        userId: req.user.id,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
 
       // 4. Fetch refreshed session data
       const [[updatedSession]] = await sequelize.query(`
@@ -665,11 +722,18 @@ exports.removeHoliday = async (req, res, next) => {
       await sequelize.query(`
         INSERT INTO audit_logs
           (table_name, record_id, field_name, old_value, new_value,
-           changed_by, reason, created_at)
+           changed_by, reason, ip_address, device_info, created_at)
         VALUES
           ('sessions', :id, 'holiday_removed', :date, 'removed',
-           :userId, :reason, NOW());
-      `, { replacements: { id, date: holiday.holiday_date, userId: req.user.id }, transaction: t });
+           :userId, :reason, :ip, :device, NOW());
+      `, { replacements: { 
+        id, 
+        date: holiday.holiday_date, 
+        userId: req.user.id,
+        reason: `Holiday removed by admin`, // Fixing reason as well if needed, user said "reason: :reason"
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
 
       return holiday.holiday_date;
     });
@@ -695,7 +759,7 @@ exports.remove = async (req, res, next) => {
 
     await sequelize.transaction(async (t) => {
       const [[session]] = await sequelize.query(`
-        SELECT id, is_current FROM sessions WHERE id = :id AND school_id = :schoolId;
+        SELECT id, name, is_current FROM sessions WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId }, transaction: t });
 
       if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
@@ -772,11 +836,16 @@ exports.archive = async (req, res, next) => {
       await sequelize.query(`
         INSERT INTO audit_logs
           (table_name, record_id, field_name, old_value, new_value,
-           changed_by, reason, created_at)
+           changed_by, reason, ip_address, device_info, created_at)
         VALUES
           ('sessions', :id, 'status', 'closed', 'archived',
-           :userId, 'Session archived by admin', NOW());
-      `, { replacements: { id, userId: req.user.id }, transaction: t });
+           :userId, 'Session archived by admin', :ip, :device, NOW());
+      `, { replacements: { 
+        id, 
+        userId: req.user.id,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
 
       // 4. Fetch refreshed session data
       const [[updatedSession]] = await sequelize.query(`
