@@ -128,7 +128,13 @@ const apiLimiter = robustLimiter(300, 15 * 60 * 1000, 'Too many requests from th
  */
 const authLimiter = robustLimiter(20, 15 * 60 * 1000, 'Too many login attempts, please try again after 15 minutes.', 'auth');
 
+/**
+ * Public admission application rate limiter: 5 submissions per hour
+ */
+const applicationLimiter = robustLimiter(5, 60 * 60 * 1000, 'Too many applications submitted from this IP. Please try again after an hour.', 'application');
+
 module.exports = {
   apiLimiter,
   authLimiter,
+  applicationLimiter,
 };

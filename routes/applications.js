@@ -25,7 +25,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  limits: { fileSize: 3 * 1024 * 1024 }, // 3MB limit
   fileFilter: (req, file, cb) => {
     const allowedTypes = /jpeg|jpg|png|pdf/;
     const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
@@ -35,8 +35,10 @@ const upload = multer({
   }
 });
 
+const { applicationLimiter } = require('../middlewares/rateLimiter');
+
 // Public route
-router.post('/', upload.fields([
+router.post('/', applicationLimiter, upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'birth_certificate', maxCount: 1 },
   { name: 'transfer_certificate', maxCount: 1 },
@@ -56,8 +58,12 @@ router.post('/', upload.fields([
 // Admin routes
 router.use(authenticate, requireAdmin);
 
+router.get('/next-admission-no', adminCtrl.getNextAdmissionNumber);
+
+router.get('/:id/documents/:key', adminCtrl.streamDocument);
+
 router.get('/', [
-  query('status').optional().isIn(['pending', 'approved', 'rejected']),
+  query('status').optional().isIn(['pending', 'approved', 'rejected', 'admitted']),
   query('page').optional().isInt({ min: 1 }),
   query('perPage').optional().isInt({ min: 1, max: 100 }),
 ], validate, adminCtrl.list);
@@ -65,6 +71,13 @@ router.get('/', [
 router.get('/:id', [
   param('id').isInt(),
 ], validate, adminCtrl.getById);
+
+router.post('/:id/admit', [
+  param('id').isInt(),
+  body('admission_no').notEmpty(),
+  body('section_id').isInt(),
+  body('roll_number').optional(),
+], validate, adminCtrl.admitStudent);
 
 router.post('/:id/email', [
   param('id').isInt(),
@@ -75,8 +88,7 @@ router.post('/:id/email', [
 router.patch('/:id/status', [
   param('id').isInt(),
   body('status').isIn(['approved', 'rejected']),
-  body('admission_no').if(body('status').equals('approved')).notEmpty().withMessage('Admission number required for approval'),
-  body('section_id').if(body('status').equals('approved')).isInt().withMessage('Section ID required for approval'),
+  body('remarks').optional().isString(),
 ], validate, adminCtrl.updateStatus);
 
 module.exports = router;
