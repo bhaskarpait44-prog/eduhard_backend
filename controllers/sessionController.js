@@ -233,7 +233,7 @@ exports.activate = async (req, res, next) => {
       }
 
       await sequelize.query(`
-        UPDATE sessions SET is_current = true, status = 'active', updated_at = NOW()
+        UPDATE sessions SET is_current = true, status = 'active', is_locked = false, updated_at = NOW()
         WHERE id = :id AND school_id = :schoolId;
       `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
@@ -910,7 +910,6 @@ exports.getStats = async (req, res, next) => {
       SELECT joined_date FROM enrollments WHERE session_id = :id AND status = 'active';
     `, { replacements: { id } });
 
-    const { _internal } = require('../utils/attendanceCalculator');
     const today = new Date().toISOString().split('T')[0];
     const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
     const allDates = _internal.getDateRange(sessionInfo.start_date, calcUpTo);
