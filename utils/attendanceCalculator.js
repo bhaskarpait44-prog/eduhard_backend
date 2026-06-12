@@ -356,6 +356,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       await sequelize.query(`
         UPDATE attendance
         SET
+          previous_status = status,
           status          = 'holiday',
           override_reason = :overrideReason,
           marked_by       = :declaredBy,

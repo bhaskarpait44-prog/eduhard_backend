@@ -405,7 +405,7 @@ exports.lock = async (req, res, next) => {
       }
 
       const [[updatedSession]] = await sequelize.query(`
-        UPDATE sessions SET is_locked = true, status = 'locked', is_current = false, updated_at = NOW()
+        UPDATE sessions SET is_locked = true, status = 'locked', updated_at = NOW()
         WHERE id = :id AND school_id = :schoolId
         RETURNING id, name, status, is_locked, is_current;
       `, { replacements: { id, schoolId }, transaction: t });
@@ -428,7 +428,7 @@ exports.lock = async (req, res, next) => {
       return updatedSession;
     });
 
-    res.ok(session, `Session "${session.name}" has been locked and is no longer current.`);
+    res.ok(session, `Session "${session.name}" has been locked.`);
     invalidateCache(schoolId, '/api/sessions*');
     invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) {
@@ -455,7 +455,7 @@ exports.unlock = async (req, res, next) => {
       }
 
       const [[updatedSession]] = await sequelize.query(`
-        UPDATE sessions SET is_locked = false, status = 'upcoming', updated_at = NOW()
+        UPDATE sessions SET is_locked = false, status = 'active', updated_at = NOW()
         WHERE id = :id AND school_id = :schoolId
         RETURNING id, name, status, is_locked, is_current;
       `, { replacements: { id, schoolId }, transaction: t });
@@ -465,7 +465,7 @@ exports.unlock = async (req, res, next) => {
           (table_name, record_id, field_name, old_value, new_value,
            changed_by, reason, ip_address, device_info, created_at)
         VALUES
-          ('sessions', :id, 'status', 'locked', 'upcoming',
+          ('sessions', :id, 'status', 'locked', 'active',
            :userId, :reason, :ip, :device, NOW());
       `, { replacements: {
         id: updatedSession.id,
@@ -478,7 +478,7 @@ exports.unlock = async (req, res, next) => {
       return updatedSession;
     });
 
-    res.ok(session, `Session "${session.name}" has been unlocked and set to upcoming status.`);
+    res.ok(session, `Session "${session.name}" has been unlocked and restored to active status.`);
     invalidateCache(schoolId, '/api/sessions*');
   } catch (err) {
     if (err.name === 'CustomError') {
@@ -710,11 +710,26 @@ exports.removeHoliday = async (req, res, next) => {
         transaction: t
       });
 
-      // 3. Reverse retroactive attendance (Delete 'holiday' records for this date)
+      // 3. Reverse retroactive attendance
+      // Restore from previous_status if it exists, otherwise delete the 'holiday' record
+      await sequelize.query(`
+        UPDATE attendance
+        SET 
+          status = previous_status,
+          previous_status = NULL,
+          override_reason = 'Holiday removed; original status restored.',
+          updated_at = NOW()
+        WHERE date = :date
+          AND status = 'holiday'
+          AND previous_status IS NOT NULL
+          AND enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id);
+      `, { replacements: { date: holiday.holiday_date, id }, transaction: t });
+
       await sequelize.query(`
         DELETE FROM attendance
         WHERE date = :date
           AND status = 'holiday'
+          AND previous_status IS NULL
           AND enrollment_id IN (SELECT id FROM enrollments WHERE session_id = :id);
       `, { replacements: { date: holiday.holiday_date, id }, transaction: t });
 
@@ -907,7 +922,7 @@ exports.getStats = async (req, res, next) => {
     `, { replacements: { id, today: new Date().toISOString().split('T')[0] } });
 
     const [enrollmentRows] = await sequelize.query(`
-      SELECT joined_date FROM enrollments WHERE session_id = :id AND status = 'active';
+      SELECT joined_date, left_date FROM enrollments WHERE session_id = :id;
     `, { replacements: { id } });
 
     const today = new Date().toISOString().split('T')[0];
@@ -926,10 +941,13 @@ exports.getStats = async (req, res, next) => {
 
     let totalExpectedRecords = 0;
     enrollmentRows.forEach(e => {
-      // Binary search or simple find index for first date >= joined_date
-      // For simplicity and safety, we'll use a simple loop or filter here as the numbers are manageable
       const joinedDateOnly = (e.joined_date || '').slice(0, 10);
-      const studentWorkingDays = workingDates.filter(d => d >= joinedDateOnly).length;
+      const leftDateOnly = e.left_date ? (e.left_date || '').slice(0, 10) : null;
+      
+      const studentWorkingDays = workingDates.filter(d => 
+        d >= joinedDateOnly && (!leftDateOnly || d <= leftDateOnly)
+      ).length;
+      
       totalExpectedRecords += studentWorkingDays;
     });
 
@@ -942,6 +960,7 @@ exports.getStats = async (req, res, next) => {
         AND a.status != 'holiday'
         AND a.date >= e.joined_date
         AND a.date <= :calcUpTo
+        AND (e.left_date IS NULL OR a.date <= e.left_date)
     `, { replacements: { id, calcUpTo } });
 
     const avgRate = totalExpectedRecords > 0 

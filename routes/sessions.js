@@ -7,19 +7,19 @@ const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
 const ctrl     = require('../controllers/sessionController');
 
 router.post('/',                requireAdmin, [
-  body('name').notEmpty().withMessage('Session name required'),
+  body('name').notEmpty().withMessage('Session name required').isLength({ max: 100 }).withMessage('Session name cannot exceed 100 characters'),
   body('start_date').isDate().withMessage('Valid start_date required (YYYY-MM-DD)'),
   body('end_date').isDate().withMessage('Valid end_date required (YYYY-MM-DD)'),
   body('working_days').isObject().withMessage('working_days object required'),
 ], validate, ctrl.create);
 
 router.get('/',                            requireAdminOrTeacher, ctrl.list);
-router.get('/current',                     ctrl.getCurrent);
+router.get('/current',                     requireAdminOrTeacher, ctrl.getCurrent);
 router.get('/:id',               requireAdminOrTeacher, [param('id').isInt()], validate, ctrl.getById);
 
 router.patch('/:id', requireAdmin, [
   param('id').isInt(),
-  body('name').notEmpty().withMessage('Session name required'),
+  body('name').notEmpty().withMessage('Session name required').isLength({ max: 100 }).withMessage('Session name cannot exceed 100 characters'),
   body('start_date').isDate().withMessage('Valid start_date required'),
   body('end_date').isDate().withMessage('Valid end_date required'),
 ], validate, ctrl.update);
@@ -51,12 +51,12 @@ router.patch('/:id/working-days', requireAdmin, [
   body('working_days').isObject().withMessage('working_days object required'),
 ], validate, ctrl.updateWorkingDays);
 
-router.get('/:id/holidays',      [param('id').isInt()], validate, ctrl.getHolidays);
+router.get('/:id/holidays',      requireAdminOrTeacher, [param('id').isInt()], validate, ctrl.getHolidays);
 
 router.post('/:id/holidays',  requireAdmin, [
   param('id').isInt(),
   body('holiday_date').isDate().withMessage('Valid holiday_date required'),
-  body('name').notEmpty().withMessage('Holiday name required'),
+  body('name').notEmpty().withMessage('Holiday name required').isLength({ max: 150 }).withMessage('Holiday name cannot exceed 150 characters'),
   body('type').isIn(['national', 'regional', 'school']).withMessage('Invalid holiday type'),
 ], validate, ctrl.addHoliday);
 

@@ -18,6 +18,7 @@ const Attendance = sequelize.define('Attendance', {
   marked_by       : { type: DataTypes.INTEGER, allowNull: true },
   marked_at       : { type: DataTypes.DATE, allowNull: false },
   override_reason : { type: DataTypes.STRING(500), allowNull: true },
+  previous_status : { type: DataTypes.STRING(20), allowNull: true },
 }, {
   tableName   : 'attendance',
   underscored : true,
