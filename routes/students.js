@@ -13,6 +13,13 @@ const { cache } = require('../middlewares/cache');
 const multer   = require('multer');
 const path     = require('path');
 
+const fs = require('fs');
+
+const uploadDir = 'uploads/students/documents';
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/students/documents'),
   filename: (req, file, cb) => {
