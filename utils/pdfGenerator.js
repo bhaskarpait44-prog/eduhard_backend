@@ -1,6 +1,8 @@
 'use strict';
 
 const PDFDocument = require('pdfkit');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Reusable helper to draw school header on PDF
@@ -249,8 +251,43 @@ async function generateAdmissionForm(data) {
       // --- Photo Box ---
       const photoX = 475;
       const photoY = 110;
-      doc.rect(photoX, photoY, 80, 95).strokeColor('#ccc').stroke();
-      doc.fontSize(8).fillColor('#999').text('PASSPORT\nPHOTO', photoX, photoY + 35, { width: 80, align: 'center' });
+      const photoW = 80;
+      const photoH = 95;
+      
+      const { photoBuffer } = data;
+
+      doc.rect(photoX, photoY, photoW, photoH).strokeColor('#ccc').stroke();
+
+      if (photoBuffer) {
+        try {
+          doc.image(photoBuffer, photoX + 2, photoY + 2, {
+            fit: [photoW - 4, photoH - 4],
+            align: 'center',
+            valign: 'center'
+          });
+        } catch (e) {
+          console.error('Error drawing student photo buffer on PDF:', e);
+          doc.fontSize(8).fillColor('#999').text('PHOTO\nERROR', photoX, photoY + 35, { width: photoW, align: 'center' });
+        }
+      } else if (student.photo_path) {
+        const fullPath = path.resolve(process.cwd(), student.photo_path);
+        if (fs.existsSync(fullPath)) {
+          try {
+            doc.image(fullPath, photoX + 2, photoY + 2, {
+              fit: [photoW - 4, photoH - 4],
+              align: 'center',
+              valign: 'center'
+            });
+          } catch (e) {
+            console.error('Error drawing student photo path on PDF:', e);
+            doc.fontSize(8).fillColor('#999').text('PHOTO\nERROR', photoX, photoY + 35, { width: photoW, align: 'center' });
+          }
+        } else {
+          doc.fontSize(8).fillColor('#999').text('PASSPORT\nPHOTO', photoX, photoY + 35, { width: photoW, align: 'center' });
+        }
+      } else {
+        doc.fontSize(8).fillColor('#999').text('PASSPORT\nPHOTO', photoX, photoY + 35, { width: photoW, align: 'center' });
+      }
 
       // --- Section: Student Information ---
       doc.fillColor('#1a237e').fontSize(11).font('Helvetica-Bold').text('1. STUDENT INFORMATION', 40);

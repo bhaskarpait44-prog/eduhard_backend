@@ -101,6 +101,24 @@ router.delete('/:id',             requireAdmin, [
   body('reason').optional({ nullable: true }).trim().isLength({ min: 10 }).withMessage('reason must be at least 10 characters'),
 ], validate, ctrl.remove);
 
+// ── Results ───────────────────────────────────────────────────────────────
+router.get('/:id/results', requirePermission('results.view'), [
+  param('id').isInt(),
+], validate, ctrl.getStudentResults);
+
+router.get('/:id/results/:examId', requirePermission('results.view'), [
+  param('id').isInt(),
+  param('examId').isInt(),
+], validate, ctrl.getStudentResultByExam);
+
+router.get('/:id/timetable', requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
+  param('id').isInt(),
+], validate, ctrl.getStudentTimetable);
+
+router.get('/:id/summary', requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
+  param('id').isInt(),
+], validate, ctrl.getStudentSummary);
+
 router.get('/:id/history',        requireRole('admin', 'teacher', 'receptionist', 'librarian'), [
   param('id').isInt(),
 ], validate, ctrl.getHistory);

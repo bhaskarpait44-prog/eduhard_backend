@@ -7,6 +7,7 @@ const auditLogger      = require('../utils/auditLogger');
 const profileVersioning = require('../utils/profileVersioning');
 const { generateStudentPassword } = require('../utils/studentCredentials');
 const { invalidateCache } = require('../middlewares/cache');
+const { getAttendancePercent } = require('../utils/attendanceCalculator');
 
 // ── GET /api/students ────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
@@ -68,6 +69,9 @@ exports.list = async (req, res, next) => {
         OR s.last_name ILIKE :search
         OR s.admission_no ILIKE :search
         OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
+        OR p.phone ILIKE :search
+        OR p.father_phone ILIKE :search
+        OR p.mother_phone ILIKE :search
       )
       AND (
         (:class_id IS NULL AND :section_id IS NULL AND :session_id IS NULL)
@@ -80,6 +84,7 @@ exports.list = async (req, res, next) => {
     const [[{ total }]] = await sequelize.query(`
       SELECT COUNT(DISTINCT s.id)::int AS total
       FROM students s
+      LEFT JOIN student_profiles p ON p.student_id = s.id AND p.is_current = true
       LEFT JOIN LATERAL (
         SELECT
           en.id,
@@ -120,6 +125,7 @@ exports.list = async (req, res, next) => {
         e.section_name AS section,
         e.session_name AS session
       FROM students s
+      LEFT JOIN student_profiles p ON p.student_id = s.id AND p.is_current = true
       LEFT JOIN LATERAL (
         SELECT
           en.id,
@@ -321,9 +327,16 @@ exports.admit = async (req, res, next) => {
       });
 
       // 5. Save Documents if any
+      let uploadedPhotoPath = null;
       if (req.files && Object.keys(req.files).length > 0) {
         for (const [fieldname, fileArr] of Object.entries(req.files)) {
           const file = fileArr[0];
+          const filePath = file.path.replace(/\\/g, '/');
+          
+          if (fieldname === 'photo') {
+            uploadedPhotoPath = filePath;
+          }
+
           await sequelize.query(`
             INSERT INTO student_documents (
               student_id, name, document_type, file_path, file_type, file_size, uploaded_by, created_at, updated_at
@@ -336,7 +349,7 @@ exports.admit = async (req, res, next) => {
               student_id: student.id,
               name: file.originalname,
               document_type: fieldname,
-              file_path: file.path.replace(/\\/g, '/'),
+              file_path: filePath,
               file_type: file.mimetype,
               file_size: file.size,
               uploaded_by: req.user.id
@@ -346,18 +359,23 @@ exports.admit = async (req, res, next) => {
         }
       }
 
+      // 6. Create initial profile version
+      if (profile) {
+        await profileVersioning.create({
+          studentId    : student.id,
+          data         : { 
+            ...profile, 
+            email: studentEmail,
+            photo_path: uploadedPhotoPath 
+          },
+          changedBy    : req.user.id,
+          changeReason : 'Initial profile created on admission',
+          transaction  : t
+        });
+      }
+
       return { student, parentAccountCreated, generatedParentPassword, parentEmail };
     });
-
-    // Create initial profile version if profile data provided
-    if (profile) {
-      await profileVersioning.create({
-        studentId    : result.student.id,
-        data         : { ...profile, email: studentEmail },
-        changedBy    : req.user.id,
-        changeReason : 'Initial profile created on admission',
-      });
-    }
 
     res.ok({
       ...result.student,
@@ -1445,6 +1463,7 @@ exports.getHistory = async (req, res, next) => {
 };
 
 const pdfGen           = require('../utils/pdfGenerator');
+const { convertWebPToPng } = require('../utils/puppeteerPdf');
 
 // ── GET /api/students/:id/admission-form ─────────────────────────────────────
 exports.downloadAdmissionForm = async (req, res, next) => {
@@ -1486,6 +1505,13 @@ exports.downloadAdmissionForm = async (req, res, next) => {
       SELECT * FROM student_previous_academic_records WHERE student_id = :id ORDER BY created_at ASC;
     `, { replacements: { id } });
 
+    // Handle WebP conversion if needed
+    let photoBuffer = null;
+    if (student.photo_path && student.photo_path.toLowerCase().endsWith('.webp')) {
+      console.log('[PDF] Converting WebP photo for PDF...');
+      photoBuffer = await convertWebPToPng(student.photo_path);
+    }
+
     // 3. Generate PDF
     const pdfBuffer = await pdfGen.generateAdmissionForm({
       school,
@@ -1493,7 +1519,8 @@ exports.downloadAdmissionForm = async (req, res, next) => {
       profile: profile || {},
       enrollment: enrollment || {},
       session: { name: enrollment?.session_name || 'N/A' },
-      academicRecords
+      academicRecords,
+      photoBuffer
     });
 
     res.setHeader('Content-Type', 'application/pdf');
@@ -1561,5 +1588,285 @@ exports.deleteDocument = async (req, res, next) => {
     await sequelize.query(`DELETE FROM student_documents WHERE id = :docId;`, { replacements: { docId } });
     // In a real app, also delete the file from storage
     res.ok({}, 'Document deleted.');
+  } catch (err) { next(err); }
+};
+
+// ── Results (Admin facing) ────────────────────────────────────────────────
+
+const roundNumber = (value, digits = 2) => Number(Number(value || 0).toFixed(digits));
+
+function gradeColor(grade) {
+  if (grade === 'A+') return 'dark_green';
+  if (grade === 'A') return 'green';
+  if (grade === 'B') return 'teal';
+  if (grade === 'C') return 'blue';
+  if (grade === 'D') return 'amber';
+  return 'red';
+}
+
+async function getFeeSummaryForAdmin(enrollmentId) {
+  const [[summary]] = await sequelize.query(`
+    SELECT
+      COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) AS total_pending
+    FROM fee_invoices fi
+    WHERE fi.enrollment_id = :enrollmentId;
+  `, { replacements: { enrollmentId } });
+
+  return {
+    total_pending: roundNumber(summary?.total_pending),
+  };
+}
+
+exports.getStudentResults = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Get current enrollment for the student
+    const [[student]] = await sequelize.query(`
+      SELECT 
+        s.id, e.id AS enrollment_id, e.session_id, e.class_id
+      FROM students s
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :id AND s.school_id = :schoolId
+      ORDER BY e.joined_date DESC LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found or access denied.', [], 404);
+    if (!student.enrollment_id) return res.ok({ exams: [] });
+
+    const feeSummary = await getFeeSummaryForAdmin(student.enrollment_id);
+    const [[sr]] = await sequelize.query(`
+      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
+    `, { replacements: { enrollmentId: student.enrollment_id } });
+    
+    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        ex.id, ex.name, ex.exam_type, ex.start_date, ex.end_date, ex.status,
+        CASE
+          WHEN EXISTS (
+            SELECT 1 FROM exam_results er
+            WHERE er.exam_id = ex.id AND er.enrollment_id = :enrollmentId
+          ) THEN 'published'
+          WHEN ex.start_date > CURRENT_DATE THEN 'upcoming'
+          ELSE 'awaiting'
+        END AS student_status
+      FROM exams ex
+      WHERE ex.session_id = :sessionId AND ex.class_id = :classId
+      ORDER BY ex.start_date DESC, ex.id DESC;
+    `, {
+      replacements: {
+        enrollmentId: student.enrollment_id,
+        sessionId: student.session_id,
+        classId: student.class_id,
+      },
+    });
+
+    res.ok({ exams: rows, is_withheld: isWithheld, total_pending: feeSummary.total_pending });
+  } catch (err) { next(err); }
+};
+
+exports.getStudentResultByExam = async (req, res, next) => {
+  try {
+    const { id, examId } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [[student]] = await sequelize.query(`
+      SELECT 
+        s.id, e.id AS enrollment_id, e.session_id, e.class_id
+      FROM students s
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :id AND s.school_id = :schoolId
+      ORDER BY e.joined_date DESC LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student || !student.enrollment_id) return res.fail('Student or active enrollment not found.', [], 404);
+
+    const [[exam]] = await sequelize.query(`
+      SELECT id, name, exam_type, start_date, end_date, status
+      FROM exams
+      WHERE id = :examId AND session_id = :sessionId AND class_id = :classId
+      LIMIT 1;
+    `, {
+      replacements: {
+        examId,
+        sessionId: student.session_id,
+        classId: student.class_id,
+      },
+    });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        sub.id AS subject_id, sub.name AS subject_name, sub.code AS subject_code, sub.subject_type,
+        sub.combined_total_marks, sub.combined_passing_marks,
+        er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained,
+        er.is_absent, er.grade, er.is_pass
+      FROM subjects sub
+      LEFT JOIN exam_results er ON er.subject_id = sub.id AND er.exam_id = :examId AND er.enrollment_id = :enrollmentId
+      WHERE sub.class_id = :classId AND sub.is_deleted = false
+      ORDER BY sub.order_number ASC, sub.name ASC;
+    `, {
+      replacements: {
+        examId,
+        enrollmentId: student.enrollment_id,
+        classId: student.class_id,
+      },
+    });
+
+    const subjects = rows.map((row) => {
+      const total_obtained = row.is_absent
+        ? null
+        : Number(row.marks_obtained ?? (Number(row.theory_marks_obtained || 0) + Number(row.practical_marks_obtained || 0)));
+      const max_marks = Number(row.combined_total_marks || 0);
+      return {
+        ...row,
+        total_obtained,
+        percentage: total_obtained == null || max_marks === 0 ? null : roundNumber((total_obtained / max_marks) * 100),
+        status: row.is_absent ? 'absent' : row.is_pass ? 'pass' : 'fail',
+      };
+    });
+
+    const totalObtained = subjects.filter((row) => row.total_obtained != null).reduce((sum, row) => sum + Number(row.total_obtained || 0), 0);
+    const totalMax = subjects.reduce((sum, row) => sum + Number(row.combined_total_marks || 0), 0);
+    const overall = totalMax > 0 ? roundNumber((totalObtained / totalMax) * 100) : 0;
+
+    let overallGrade = 'F';
+    if (overall >= 90) overallGrade = 'A+';
+    else if (overall >= 80) overallGrade = 'A';
+    else if (overall >= 70) overallGrade = 'B';
+    else if (overall >= 60) overallGrade = 'C';
+    else if (overall >= 50) overallGrade = 'D';
+
+    const failedSubjects = subjects.filter((row) => row.status === 'fail').map((row) => row.subject_name);
+    const result_status = failedSubjects.length === 0 ? 'pass' : failedSubjects.length <= 2 ? 'compartment' : 'fail';
+
+    res.ok({
+      exam,
+      summary: { percentage: overall, grade: overallGrade, grade_color: gradeColor(overallGrade), result_status },
+      subjects,
+    });
+  } catch (err) { next(err); }
+};
+
+exports.getStudentTimetable = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [[student]] = await sequelize.query(`
+      SELECT 
+        s.id, e.id AS enrollment_id, e.session_id, e.class_id, e.section_id
+      FROM students s
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :id AND s.school_id = :schoolId
+      ORDER BY e.joined_date DESC LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student || !student.enrollment_id) return res.ok({ timetable: [] });
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        ts.id, ts.day_of_week, ts.period_number, ts.start_time, ts.end_time, ts.room_number,
+        sub.name AS subject_name, sub.code AS subject_code,
+        CONCAT(teacher.first_name, ' ', teacher.last_name) AS teacher_name
+      FROM timetable_slots ts
+      JOIN subjects sub ON sub.id = ts.subject_id
+      JOIN teachers teacher ON teacher.id = ts.teacher_id
+      WHERE ts.session_id = :sessionId
+        AND ts.class_id = :classId
+        AND ts.section_id = :sectionId
+        AND ts.is_active = true
+      ORDER BY
+        ARRAY_POSITION(ARRAY['monday','tuesday','wednesday','thursday','friday','saturday'], ts.day_of_week::text),
+        ts.period_number ASC;
+    `, {
+      replacements: {
+        sessionId: student.session_id,
+        classId: student.class_id,
+        section_id: student.section_id,
+      },
+    });
+
+    res.ok({ timetable: rows });
+  } catch (err) { next(err); }
+};
+
+exports.getStudentSummary = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // 1. Basic Student & Enrollment Info
+    const [[student]] = await sequelize.query(`
+      SELECT 
+        s.id, e.id AS enrollment_id, e.session_id, e.class_id, e.section_id
+      FROM students s
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :id AND s.school_id = :schoolId
+      ORDER BY e.joined_date DESC LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
+
+    const enrollmentId = student.enrollment_id;
+
+    // 2. Attendance Stats
+    let attendance = { percentage: 0, status: 'N/A' };
+    if (enrollmentId) {
+      const stats = await getAttendancePercent(enrollmentId);
+      attendance = { percentage: stats.percentage, status: stats.grade };
+    }
+
+    // 3. Fee Pending
+    let fees = { total_pending: 0 };
+    if (enrollmentId) {
+      fees = await getFeeSummaryForAdmin(enrollmentId);
+    }
+
+    // 4. Latest Exam Result
+    let latestResult = { percentage: 0, status: 'N/A' };
+    if (enrollmentId) {
+      const [[resRow]] = await sequelize.query(`
+        SELECT percentage, result, grade
+        FROM student_results
+        WHERE enrollment_id = :enrollmentId
+        ORDER BY created_at DESC LIMIT 1;
+      `, { replacements: { enrollmentId } });
+      if (resRow) {
+        latestResult = { percentage: resRow.percentage, status: resRow.result || resRow.grade };
+      }
+    }
+
+    // 5. Recent Remark
+    const [[remark]] = await sequelize.query(`
+      SELECT r.remark_text, CONCAT(t.first_name, ' ', t.last_name) AS teacher_name
+      FROM student_remarks r
+      JOIN teachers t ON t.id = r.teacher_id
+      WHERE r.student_id = :id AND r.is_deleted = false
+      ORDER BY r.created_at DESC LIMIT 1;
+    `, { replacements: { id } });
+
+    // 6. Next Event (from academic calendar)
+    const [[nextEvent]] = await sequelize.query(`
+      SELECT title, start_date, start_time
+      FROM academic_events
+      WHERE school_id = :schoolId 
+        AND is_published = true 
+        AND start_date >= CURRENT_DATE
+        AND (audience = 'everyone' OR (audience = 'class' AND target_class_id = :classId))
+      ORDER BY start_date ASC, start_time ASC LIMIT 1;
+    `, { replacements: { schoolId, classId: student.class_id } });
+
+    res.ok({
+      attendance,
+      fees,
+      academic: latestResult,
+      remark: remark || null,
+      next_event: nextEvent || null
+    });
   } catch (err) { next(err); }
 };

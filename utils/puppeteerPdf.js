@@ -34,4 +34,49 @@ async function renderPdf(html) {
   }
 }
 
-module.exports = { renderPdf }
+/**
+ * Converts a WebP image to PNG buffer using Puppeteer.
+ * Useful because PDFKit doesn't support WebP.
+ */
+async function convertWebPToPng(filePath) {
+  let browser;
+  try {
+    const puppeteer = require('puppeteer');
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    });
+    const page = await browser.newPage();
+    
+    // Use file:// protocol for local files
+    const absolutePath = require('path').resolve(filePath);
+    const fileUrl = `file://${absolutePath.replace(/\\/g, '/')}`;
+    
+    await page.goto(fileUrl);
+    
+    // Get image dimensions to set viewport
+    const dimensions = await page.evaluate(() => {
+      const img = document.querySelector('img');
+      return {
+        width: img.naturalWidth || 800,
+        height: img.naturalHeight || 600
+      };
+    });
+
+    await page.setViewport(dimensions);
+    
+    const buffer = await page.screenshot({
+      type: 'png',
+      omitBackground: true
+    });
+
+    return buffer;
+  } catch (err) {
+    console.error('[Puppeteer Image Conversion Error]', err);
+    return null;
+  } finally {
+    if (browser) await browser.close();
+  }
+}
+
+module.exports = { renderPdf, convertWebPToPng }

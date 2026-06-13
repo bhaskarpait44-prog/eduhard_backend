@@ -69,6 +69,7 @@ const StudentProfile = sequelize.define('StudentProfile', {
   perm_police_station  : { type: DataTypes.STRING(150), allowNull: true },
   perm_post_office     : { type: DataTypes.STRING(150), allowNull: true },
   perm_district        : { type: DataTypes.STRING(100), allowNull: true },
+  perm_city            : { type: DataTypes.STRING(100), allowNull: true },
   perm_state           : { type: DataTypes.STRING(100), allowNull: true },
   perm_pincode         : { type: DataTypes.STRING(10), allowNull: true },
 
@@ -121,7 +122,7 @@ const StudentProfile = sequelize.define('StudentProfile', {
         'mother_qualification', 'mother_aadhar', 'mother_annual_income',
         'guardian_name', 'guardian_relation', 'guardian_phone', 'guardian_occupation',
         'guardian_qualification', 'guardian_aadhar', 'guardian_annual_income',
-        'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_state', 'perm_pincode'
+        'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_city', 'perm_state', 'perm_pincode'
       ];
       const changed = dataFields.filter(f => instance.changed(f));
       if (changed.length > 0) {

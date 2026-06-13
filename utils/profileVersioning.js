@@ -165,6 +165,7 @@ const profileVersioning = {
         perm_police_station: oldVersion.perm_police_station,
         perm_post_office: oldVersion.perm_post_office,
         perm_district: oldVersion.perm_district,
+        perm_city: oldVersion.perm_city,
         perm_state: oldVersion.perm_state,
         perm_pincode: oldVersion.perm_pincode,
 
@@ -199,7 +200,7 @@ const profileVersioning = {
         'mother_qualification', 'mother_aadhar', 'mother_annual_income',
         'guardian_name', 'guardian_relation', 'guardian_phone', 'guardian_occupation',
         'guardian_qualification', 'guardian_aadhar', 'guardian_annual_income',
-        'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_state', 'perm_pincode'
+        'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_city', 'perm_state', 'perm_pincode'
       ];
 
       const auditRows = [];
