@@ -262,10 +262,14 @@ const profileVersioning = {
    * Get the full version history for a student, newest first.
    */
   async getHistory(studentId) {
-    return StudentProfile.scope('allVersions').findAll({
-      where   : { student_id: studentId },
-      order   : [['valid_from', 'DESC'], ['id', 'DESC']],
-    });
+    const [history] = await sequelize.query(`
+      SELECT sp.*, u.name AS changed_by_name
+      FROM student_profiles sp
+      LEFT JOIN users u ON u.id = sp.changed_by
+      WHERE sp.student_id = :studentId
+      ORDER BY sp.valid_from DESC, sp.id DESC
+    `, { replacements: { studentId } });
+    return history;
   },
 };
 

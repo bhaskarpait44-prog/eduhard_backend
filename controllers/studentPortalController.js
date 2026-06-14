@@ -99,6 +99,8 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
   SELECT
     s.id,
     s.school_id,
+    s.status,
+    s.is_active,
     COALESCE(sch.upi_name, sch.name) AS school_name,
     sch.upi_id AS school_upi_id,      s.admission_no,
       s.first_name,
@@ -1985,6 +1987,8 @@ exports.profile = async (req, res, next) => {
         first_name: context.student.first_name,
         last_name: context.student.last_name,
         full_name: getStudentName(context.student),
+        status: context.student.status,
+        is_active: context.student.is_active,
         date_of_birth: context.student.date_of_birth,
         gender: context.student.gender,
         photo_path: context.student.photo_path,

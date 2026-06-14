@@ -211,9 +211,9 @@ exports.list = async (req, res, next) => {
 // ── POST /api/students ────────────────────────────────────────────────────────
 exports.admit = async (req, res, next) => {
   try {
-    let { 
-      admission_no, first_name, last_name, date_of_birth, gender, 
-      profile, password, parent_password 
+    let {
+      admission_no, first_name, last_name, date_of_birth, gender, aadhar_no,
+      profile, password, parent_password
     } = req.body;
     
     // If multipart/form-data used, profile might be a JSON string
@@ -311,19 +311,19 @@ exports.admit = async (req, res, next) => {
       const [[student]] = await sequelize.query(`
         INSERT INTO students (
           school_id, family_id, admission_no, first_name, last_name, 
-          date_of_birth, gender, password_hash, is_active, 
+          date_of_birth, gender, aadhar_no, password_hash, is_active, 
           last_password_change, is_deleted, created_at, updated_at
         )
         VALUES (
           :schoolId, :familyId, :admission_no, :first_name, :last_name, 
-          :date_of_birth, :gender, :studentHash, true, 
+          :date_of_birth, :gender, :aadhar_no, :studentHash, true, 
           NOW(), false, NOW(), NOW()
         )
-        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
+        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, aadhar_no, status;
       `, {
         replacements: {
           schoolId, familyId, admission_no, first_name, last_name, 
-          date_of_birth, gender, studentHash,
+          date_of_birth, gender, aadhar_no, studentHash,
         },
         transaction: t,
       });
@@ -551,6 +551,7 @@ exports.downloadAdmissionTemplate = async (req, res, next) => {
         { key: 'last_name',       label: 'Last Name *',       example: 'Sharma' },
         { key: 'date_of_birth',   label: 'DOB (YYYY-MM-DD) *', example: '2015-05-15' },
         { key: 'gender',          label: 'Gender *',          example: 'male' },
+        { key: 'aadhar_no',       label: 'Aadhar No',         example: '123456789012' },
         { key: 'admission_class', label: 'Admission Class *', example: 'Class 1' },
         { key: 'section',         label: 'Section *',         example: 'A' },
         { key: 'admission_date',  label: 'Admission Date *',  example: '2024-04-01' },
@@ -756,19 +757,20 @@ exports.confirmAdmission = async (req, res, next) => {
           const [[student]] = await sequelize.query(`
             INSERT INTO students (
               school_id, admission_no, first_name, last_name, 
-              date_of_birth, gender, password_hash, is_active, 
+              date_of_birth, gender, aadhar_no, password_hash, is_active, 
               last_password_change, is_deleted, created_at, updated_at
             )
             VALUES (
               :schoolId, :admNo, :firstName, :lastName, 
-              :dob, :gender, :hash, true, 
+              :dob, :gender, :aadhar_no, :hash, true, 
               NOW(), false, NOW(), NOW()
             )
             RETURNING id;
           `, {
             replacements: {
               schoolId, admNo, firstName: row.first_name.trim(), lastName: row.last_name.trim(),
-              dob: row.date_of_birth, gender: row.gender.trim().toLowerCase(), hash,
+              dob: row.date_of_birth, gender: row.gender.trim().toLowerCase(), 
+              aadhar_no: row.aadhar_no || null, hash,
             },
             transaction: t,
           });
@@ -954,7 +956,7 @@ exports.getById = async (req, res, next) => {
 
     const [[student]] = await sequelize.query(`
       SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
-             s.status, s.created_at, s.family_id, s.transport_stop_id,
+             s.status, s.is_active, s.created_at, s.family_id, s.transport_stop_id,
              sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
              sp.email AS email,
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
@@ -1062,10 +1064,10 @@ exports.getById = async (req, res, next) => {
 exports.updateIdentity = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { admission_no, first_name, last_name, date_of_birth, gender, reason } = req.body;
+    const { admission_no, first_name, last_name, date_of_birth, gender, aadhar_no, reason } = req.body;
 
     const [[student]] = await sequelize.query(`
-      SELECT id, admission_no, first_name, last_name, date_of_birth, gender
+      SELECT id, admission_no, first_name, last_name, date_of_birth, gender, aadhar_no
       FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
@@ -1091,6 +1093,7 @@ exports.updateIdentity = async (req, res, next) => {
     if (last_name)     updates.last_name     = last_name;
     if (date_of_birth) updates.date_of_birth = date_of_birth;
     if (gender)        updates.gender        = gender;
+    if (aadhar_no !== undefined) updates.aadhar_no = aadhar_no;
 
     if (Object.keys(updates).length === 0) {
       return res.fail('No fields provided to update.');
@@ -1109,7 +1112,7 @@ exports.updateIdentity = async (req, res, next) => {
       const [[resRow]] = await sequelize.query(`
         UPDATE students SET ${setClauses}, updated_at = NOW()
         WHERE id = :id
-        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, status;
+        RETURNING id, admission_no, first_name, last_name, date_of_birth, gender, aadhar_no, is_active, status;
       `, { replacements: { ...updates, id }, transaction: t });
 
       return resRow;
@@ -1180,7 +1183,7 @@ exports.updateProfile = async (req, res, next) => {
       // 3. Fetch full updated record (same logic as getById)
       const [[updated]] = await sequelize.query(`
         SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
-               s.status, s.created_at, s.family_id, s.transport_stop_id,
+               s.status, s.is_active, s.created_at, s.family_id, s.transport_stop_id,
                sp.address, sp.city, sp.state, sp.pincode, sp.phone, 
                sp.email AS email,
                sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
