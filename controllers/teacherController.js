@@ -490,7 +490,7 @@ async function enrichAssignment(assignment, session) {
   const [[below75]] = await sequelize.query(`
     SELECT COUNT(*) AS cnt
     FROM (
-      SELECT e.id, ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS pct
+      SELECT e.id, ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS pct
       FROM enrollments e
       LEFT JOIN attendance a ON a.enrollment_id = e.id
       WHERE e.session_id = :sessionId
@@ -821,7 +821,7 @@ exports.dashboard = async (req, res, next) => {
         SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
         ROUND(
           (SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) + SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) * 0.5)
-          / NULLIF(COUNT(a.id), 0) * 100,
+          / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100,
           2
         ) AS percentage
       FROM teacher_scopes ts
@@ -994,7 +994,7 @@ exports.pendingTasks = async (req, res, next) => {
           FROM (
             SELECT
               e.id,
-              ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS attendance_pct
+              ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_pct
             FROM enrollments e
             LEFT JOIN attendance a ON a.enrollment_id = e.id
             WHERE e.session_id = :sessionId
@@ -1431,7 +1431,7 @@ exports.attendanceRegister = async (req, res, next) => {
           ) FILTER (WHERE a.id IS NOT NULL),
           '[]'::json
         ) AS records,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS attendance_percentage
+        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_percentage
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       LEFT JOIN attendance a
@@ -1481,7 +1481,7 @@ exports.attendanceSummaryReport = async (req, res, next) => {
         SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
         SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) AS late,
         SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) AS half_day,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS percentage
+        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS percentage
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date BETWEEN :fromDate AND :toDate
@@ -1522,7 +1522,7 @@ exports.attendanceBelowThresholdReport = async (req, res, next) => {
           s.id AS student_id,
           s.first_name,
           s.last_name,
-          ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS percentage,
+          ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS percentage,
           COUNT(a.id) AS total_days
         FROM enrollments e
         JOIN students s ON s.id = e.student_id
@@ -2224,10 +2224,10 @@ exports.studentList = async (req, res, next) => {
         c.name AS class_name,
         sec.name AS section_name,
         sp.photo_path,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS attendance_percentage,
+        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_percentage,
         latest_result.percentage AS last_result_percentage,
         CASE
-          WHEN ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) < 75 THEN 'warning'
+          WHEN ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) < 75 THEN 'warning'
           ELSE 'good'
         END AS attendance_status,
         (

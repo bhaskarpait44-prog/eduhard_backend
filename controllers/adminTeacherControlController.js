@@ -703,6 +703,7 @@ exports.updateHomework = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
+    const schoolId = req.user.school_id;
     if (!['active', 'completed', 'cancelled'].includes(status)) {
       return res.fail('Invalid homework status.', [], 422);
     }
@@ -1425,6 +1426,7 @@ exports.updateAttendance = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status, reason } = req.body;
+    const schoolId = req.user.school_id;
     requireFields(req.body, ['status', 'reason']);
 
     const [[record]] = await sequelize.query(`
@@ -1506,6 +1508,7 @@ exports.updateMark = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { marks_obtained, is_absent = false, reason } = req.body;
+    const schoolId = req.user.school_id;
     requireFields(req.body, ['reason']);
 
     const [[record]] = await sequelize.query(`

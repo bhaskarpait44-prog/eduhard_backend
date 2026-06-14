@@ -38,7 +38,9 @@ async function resolveSessionId({ requestedSessionId, schoolId, allowLocked = fa
     `, { replacements: { sessionId: requestedSessionId, schoolId } });
     if (session) {
       if (session.is_locked && !allowLocked) {
-        throw new Error('Session is locked. Cannot mark attendance.');
+        const error = new Error('Session is locked. Cannot mark attendance.');
+        error.status = 422;
+        throw error;
       }
       sessionId = session.id;
     }
@@ -46,7 +48,9 @@ async function resolveSessionId({ requestedSessionId, schoolId, allowLocked = fa
     const session = await getCurrentSessionForSchool(schoolId);
     if (session) {
       if (session.is_locked && !allowLocked) {
-        throw new Error('Current session is locked. Cannot mark attendance.');
+        const error = new Error('Current session is locked. Cannot mark attendance.');
+        error.status = 422;
+        throw error;
       }
       sessionId = session.id;
     }
@@ -691,6 +695,21 @@ exports.override = async (req, res, next) => {
     const { id } = req.params;
     const { status, override_reason } = req.body;
 
+    // 1. Fetch current status for audit log
+    const [[current]] = await sequelize.query(`
+      SELECT id, status FROM attendance
+      WHERE id = :id
+        AND enrollment_id IN (
+          SELECT e.id FROM enrollments e
+          JOIN sessions sess ON sess.id = e.session_id
+          WHERE sess.school_id = :schoolId
+        )
+      LIMIT 1;
+    `, { replacements: { id, schoolId: req.user.school_id } });
+
+    if (!current) return res.fail('Attendance record not found or access denied.', [], 404);
+
+    // 2. Perform update
     const [[updated]] = await sequelize.query(`
       UPDATE attendance SET
         status          = :status,
@@ -699,20 +718,14 @@ exports.override = async (req, res, next) => {
         marked_at       = NOW(),
         updated_at      = NOW()
       WHERE id = :id
-        AND enrollment_id IN (
-          SELECT e.id FROM enrollments e
-          JOIN sessions sess ON sess.id = e.session_id
-          WHERE sess.school_id = :schoolId
-        )
       RETURNING id, enrollment_id, date, status, override_reason;
-    `, { replacements: { status, reason: override_reason, markedBy: req.user.id, id, schoolId: req.user.school_id } });
+    `, { replacements: { status, reason: override_reason, markedBy: req.user.id, id } });
 
-    if (!updated) return res.fail('Attendance record not found.', [], 404);
-
+    // 3. Log real previous status
     await writeAuditLog(sequelize, {
       tableName: 'attendance',
       recordId: updated.id,
-      changes: { field: 'status', oldValue: 'manual_override', newValue: status },
+      changes: { field: 'status', oldValue: current.status, newValue: status },
       changedBy: req.user.id,
       reason: `Manual override: ${override_reason}`,
       ipAddress: req.ip,

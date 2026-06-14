@@ -715,7 +715,7 @@ exports.removeHoliday = async (req, res, next) => {
       await sequelize.query(`
         UPDATE attendance
         SET 
-          status = previous_status,
+          status = previous_status::enum_attendance_status,
           previous_status = NULL,
           override_reason = 'Holiday removed; original status restored.',
           updated_at = NOW()
