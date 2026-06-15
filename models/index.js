@@ -53,6 +53,8 @@ const Teacher            = require('./Teacher');
 const TransportRoute     = require('./TransportRoute');
 const TransportStop      = require('./TransportStop');
 const User               = require('./User');
+const AlumniProfile      = require('./AlumniProfile');
+const AlumniEvent        = require('./AlumniEvent');
 
 // ── Associations ─────────────────────────────────────────────────────────────
 
@@ -158,6 +160,12 @@ Teacher.hasMany(Certificate, { foreignKey: 'teacher_id', as: 'certificates' });
 Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuerUser', constraints: false });
 Certificate.belongsTo(Teacher, { foreignKey: 'issued_by', as: 'issuerTeacher', constraints: false });
 
+// Alumni
+Student.hasOne(AlumniProfile, { foreignKey: 'student_id', as: 'alumniProfile' });
+AlumniProfile.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+AlumniProfile.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+AlumniEvent.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+
 const db = {
   sequelize,
   AcademicEvent,
@@ -212,6 +220,8 @@ const db = {
   TransportRoute,
   TransportStop,
   User,
+  AlumniProfile,
+  AlumniEvent,
 };
 
 module.exports = db;

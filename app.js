@@ -150,6 +150,7 @@ app.use('/api/feedback', require('./routes/feedback'));
 app.use('/api/parent', require('./routes/parent'));
 app.use('/api/staff-attendance', require('./routes/staffAttendance'));
 app.use('/api/student-leaving', require('./routes/studentLeaving'));
+app.use('/api/alumni', require('./routes/alumni'));
 
 app.use((req, res) =>
   res.fail(`Route ${req.method} ${req.path} not found.`, [], 404)
