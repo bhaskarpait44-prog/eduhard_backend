@@ -317,6 +317,7 @@ exports.getById = async (req, res, next) => {
           as       : 'subjects',
           where    : { is_deleted: false },
           required : false,
+          separate : true,
           order    : [['order_number', 'ASC']],
         },
       ],
@@ -510,6 +511,11 @@ exports.toggleActive = async (req, res, next) => {
 exports.getSections = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify class belongs to school
+    const cls = await Class.findOne({ where: { id, school_id: schoolId } });
+    if (!cls) return res.fail('Class not found.', [], 404);
 
     const [sections] = await sequelize.query(`
       SELECT
@@ -984,8 +990,10 @@ exports.createSection = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, capacity, class_teacher_id } = req.body;
+    const schoolId = req.user.school_id;
 
-    const cls = await Class.findByPk(id);
+    // Verify class belongs to school
+    const cls = await Class.findOne({ where: { id, school_id: schoolId } });
     if (!cls) return res.fail('Class not found.', [], 404);
 
     const existing = await Section.findOne({ where: { class_id: id, name } });
@@ -997,7 +1005,7 @@ exports.createSection = async (req, res, next) => {
       capacity,
       class_teacher_id: class_teacher_id || null
     });
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(section, 'Section added successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -1009,12 +1017,22 @@ exports.updateSection = async (req, res, next) => {
   try {
     const { id, sectionId } = req.params;
     const { name, capacity, is_active, class_teacher_id } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify class belongs to school
+    const cls = await Class.findOne({ where: { id, school_id: schoolId } });
+    if (!cls) return res.fail('Class not found.', [], 404);
 
     const section = await Section.findOne({ where: { id: sectionId, class_id: id } });
     if (!section) return res.fail('Section not found.', [], 404);
 
-    await section.update({ name, capacity, is_active, class_teacher_id: class_teacher_id || null });
-    invalidateCache(req.user.school_id, '/api/classes*');
+    const updates = { name, capacity, is_active };
+    if (Object.prototype.hasOwnProperty.call(req.body, 'class_teacher_id')) {
+      updates.class_teacher_id = class_teacher_id || null;
+    }
+
+    await section.update(updates);
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok(section, 'Section updated successfully.');
   } catch (err) { next(err); }
 };
@@ -1026,6 +1044,11 @@ exports.updateSection = async (req, res, next) => {
 exports.deleteSection = async (req, res, next) => {
   try {
     const { id, sectionId } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify class belongs to school
+    const cls = await Class.findOne({ where: { id, school_id: schoolId } });
+    if (!cls) return res.fail('Class not found.', [], 404);
 
     const section = await Section.findOne({ where: { id: sectionId, class_id: id } });
     if (!section) return res.fail('Section not found.', [], 404);
@@ -1042,7 +1065,7 @@ exports.deleteSection = async (req, res, next) => {
     }
 
     await section.update({ is_deleted: true });
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateCache(schoolId, '/api/classes*');
     return res.ok({}, 'Section deleted successfully.');
   } catch (err) { next(err); }
 };

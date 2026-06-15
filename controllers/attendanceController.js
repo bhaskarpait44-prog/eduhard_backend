@@ -938,7 +938,8 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       SELECT 
         s.first_name, s.last_name, s.admission_no, 
         c.name AS class_name, sec.name AS section_name,
-        sp.photo_path
+        sp.photo_path,
+        e.session_id
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       JOIN classes c ON c.id = e.class_id
@@ -949,27 +950,15 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
 
     if (!student) return res.fail('Student enrollment record not found or access denied.', [], 404);
 
-    // Helper: formatINR with Rs. (Shared PDF Rule)
-    const formatINR = (amount) =>
-      'Rs.' + Number(amount || 0).toLocaleString('en-IN', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2,
-      });
-
     const [records] = await sequelize.query(`
       SELECT date, status FROM attendance 
       WHERE enrollment_id = :enrollmentId AND date BETWEEN :fromDate AND :toDate
       ORDER BY date ASC
     `, { replacements: { enrollmentId: enrollment_id, fromDate: from_date, toDate: to_date } });
 
-    if (!records || records.length === 0) {
-      return res.fail('No attendance records found for the selected date range.');
-    }
-
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
-    // Override bottom margin specifically for the footer safety
-    doc.page.margins.bottom = 10;
+    doc.page.margins.bottom = 20;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_${student.first_name}.pdf"`);
@@ -979,17 +968,13 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       const pageWidth = doc.page.width;
       const margin = 40;
       const contentWidth = pageWidth - (margin * 2);
-      
-      // Header Background (Not full bleed for better printing)
       doc.rect(margin, 20, contentWidth, 80).fill('#1e40af');
-      
       doc.fillColor('white').font('Helvetica-Bold').fontSize(16).text(school.name.toUpperCase(), margin + 15, 35);
       doc.font('Helvetica-Bold').fontSize(12).text('STUDENT ATTENDANCE RECORD', margin + 15, 62);
       doc.fontSize(7).text(`Generated on: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
     };
 
     drawHeader();
-    doc.y = 120;
 
     // Student Info Card
     doc.fillColor('#f8fafc').rect(40, 110, 515, 100).fill().stroke('#e2e8f0');
@@ -998,52 +983,56 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     doc.text(`Class: ${student.class_name} (${student.section_name})`, 60, 160);
     doc.text(`Period: ${from_date} to ${to_date}`, 60, 175);
 
-    // Stats Ring
-    const stats = await getAttendancePercent(parseInt(enrollment_id));
-    const pct = parseFloat(stats.percentage || 0);
+    // Calculate Stats for Period
+    const months = {};
+    let totalWorking = 0;
+    let totalEffective = 0;
+
+    records.forEach(r => {
+      const m = new Date(r.date).toLocaleString('default', { month: 'long', year: 'numeric' });
+      if (!months[m]) months[m] = { present: 0, absent: 0, late: 0, half_day: 0, working: 0 };
+      if (r.status !== 'holiday') {
+        months[m].working++;
+        totalWorking++;
+      }
+      if (r.status === 'present') { months[m].present++; totalEffective += 1; }
+      else if (r.status === 'late') { months[m].late++; totalEffective += 1; }
+      else if (r.status === 'absent') { months[m].absent++; }
+      else if (r.status === 'half_day') { months[m].half_day++; totalEffective += 0.5; }
+    });
+
+    const periodPct = totalWorking > 0 ? (totalEffective / totalWorking) * 100 : 0;
+
+    // Stats Ring (Period Specific)
     const ringX = 480, ringY = 160, radius = 36;
-    
     doc.save();
     doc.lineWidth(8).strokeColor('#f1f5f9').circle(ringX, ringY, radius).stroke();
-    
     let ringColor = '#15803d';
-    if (pct < 75) ringColor = '#b91c1c';
-    else if (pct < 90) ringColor = '#b45309';
+    if (periodPct < 75) ringColor = '#b91c1c';
+    else if (periodPct < 90) ringColor = '#b45309';
 
-    const endAngle = (pct / 100) * 360;
-    // PDFKit uses degrees for arcs, 0 is at 3 o'clock, clockwise.
-    // To start at 12 o'clock, start at -90.
-    doc.lineWidth(8).strokeColor(ringColor)
-       .arc(ringX, ringY, radius, -90, (endAngle - 90))
-       .stroke();
+    const endAngle = (periodPct / 100) * 360;
+    doc.lineWidth(8).strokeColor(ringColor).arc(ringX, ringY, radius, -90, (endAngle - 90)).stroke();
     doc.restore();
-
-    doc.fillColor('#1e293b').font('Helvetica-Bold').fontSize(16).text(`${pct.toFixed(0)}%`, ringX - 30, ringY - 8, { width: 60, align: 'center' });
+    doc.fillColor('#1e293b').font('Helvetica-Bold').fontSize(16).text(`${periodPct.toFixed(0)}%`, ringX - 30, ringY - 8, { width: 60, align: 'center' });
 
     // Monthly Breakdown Table
     doc.y = 230;
     doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Monthly Breakdown', 40, doc.y);
     doc.moveDown(0.5);
 
-    const months = {};
-    records.forEach(r => {
-      const m = new Date(r.date).toLocaleString('default', { month: 'long', year: 'numeric' });
-      if (!months[m]) months[m] = { present: 0, absent: 0, late: 0, half_day: 0, working: 0 };
-      if (r.status !== 'holiday') months[m].working++;
-      if (r.status === 'present') months[m].present++;
-      else if (r.status === 'late') months[m].late++;
-      else if (r.status === 'absent') months[m].absent++;
-      else if (r.status === 'half_day') months[m].half_day++;
-    });
-
     const mCols = [140, 60, 60, 60, 60, 75, 60];
     const mHeaders = ['Month', 'P', 'A', 'L', 'HD', 'Working', '%'];
+    const tableY = doc.y;
     
-    doc.fillColor('#dbeafe').rect(40, doc.y, 515, 20).fill();
+    doc.fillColor('#dbeafe').rect(40, tableY, 515, 20).fill();
     doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
     let mx = 40;
-    mHeaders.forEach((h, i) => { doc.text(h, mx + 5, doc.y + 6, { width: mCols[i] - 10, align: i > 0 ? 'right' : 'left' }); mx += mCols[i]; });
-    doc.y += 20;
+    mHeaders.forEach((h, i) => { 
+      doc.text(h, mx + 5, tableY + 6, { width: mCols[i] - 10, align: i > 0 ? 'right' : 'left', lineBreak: false }); 
+      mx += mCols[i]; 
+    });
+    doc.y = tableY + 20;
 
     Object.entries(months).forEach(([name, data], i) => {
       const rowY = doc.y;
@@ -1054,70 +1043,73 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       const mPct = data.working > 0 ? ((effective / data.working) * 100).toFixed(1) : '0.0';
       
       let rx = 40;
-      doc.text(name, rx + 5, rowY + 6); rx += mCols[0];
-      doc.text(data.present, rx + 5, rowY + 6, { width: mCols[1] - 10, align: 'right' }); rx += mCols[1];
-      doc.text(data.absent, rx + 5, rowY + 6, { width: mCols[2] - 10, align: 'right' }); rx += mCols[2];
-      doc.text(data.late, rx + 5, rowY + 6, { width: mCols[3] - 10, align: 'right' }); rx += mCols[3];
-      doc.text(data.half_day, rx + 5, rowY + 6, { width: mCols[4] - 10, align: 'right' }); rx += mCols[4];
-      doc.text(data.working, rx + 5, rowY + 6, { width: mCols[5] - 10, align: 'right' }); rx += mCols[5];
-      doc.font('Helvetica-Bold').text(`${mPct}%`, rx + 5, rowY + 6, { width: mCols[6] - 10, align: 'right' });
-      doc.y += 20;
+      doc.text(name, rx + 5, rowY + 6, { lineBreak: false }); rx += mCols[0];
+      doc.text(data.present, rx + 5, rowY + 6, { width: mCols[1] - 10, align: 'right', lineBreak: false }); rx += mCols[1];
+      doc.text(data.absent, rx + 5, rowY + 6, { width: mCols[2] - 10, align: 'right', lineBreak: false }); rx += mCols[2];
+      doc.text(data.late, rx + 5, rowY + 6, { width: mCols[3] - 10, align: 'right', lineBreak: false }); rx += mCols[3];
+      doc.text(data.half_day, rx + 5, rowY + 6, { width: mCols[4] - 10, align: 'right', lineBreak: false }); rx += mCols[4];
+      doc.text(data.working, rx + 5, rowY + 6, { width: mCols[5] - 10, align: 'right', lineBreak: false }); rx += mCols[5];
+      doc.font('Helvetica-Bold').text(`${mPct}%`, rx + 5, rowY + 6, { width: mCols[6] - 10, align: 'right', lineBreak: false });
+      doc.y = rowY + 20;
     });
 
-    // Calendar Grid (Miniature squares)
+    // Attendance Calendar
     doc.moveDown(1.5);
-    doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Attendance Calendar', 40, doc.y);
+    const calendarSectionY = doc.y;
+    doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Attendance Calendar', 40, calendarSectionY);
     doc.moveDown(0.5);
 
     const monthList = [...new Set(records.map(r => new Date(r.date).toISOString().slice(0, 7)))];
     
     for (const mStr of monthList) {
-      if (doc.y > 650) doc.addPage() && drawHeader() && (doc.y = 120);
+      if (doc.y > 600) { doc.addPage(); drawHeader(); doc.y = 120; }
       
       const [y, m] = mStr.split('-').map(Number);
-      const mName = new Date(y, m - 1).toLocaleString('default', { month: 'long' });
+      const mName = new Date(y, m - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+      const currentMonthY = doc.y;
+
+      doc.fillColor('#475569').font('Helvetica-Bold').fontSize(10).text(mName, 40, currentMonthY);
+      doc.y = currentMonthY + 15;
       
-      doc.fillColor('#475569').font('Helvetica-Bold').fontSize(9).text(mName, 40, doc.y);
-      doc.moveDown(0.3);
-      
-      let gridX = 40;
-      const firstDay = new Date(y, m - 1, 1).getDay(); // 0=Sun
-      const adjustedFirstDay = firstDay === 0 ? 6 : firstDay - 1; // 0=Mon
+      const firstDay = new Date(y, m - 1, 1).getDay();
+      const adjustedFirstDay = firstDay === 0 ? 6 : firstDay - 1;
       const daysInMonth = new Date(y, m, 0).getDate();
       
       const dayHeaders = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-      doc.fontSize(7).font('Helvetica');
-      dayHeaders.forEach((h, i) => doc.text(h, gridX + i * 15, doc.y, { width: 15, align: 'center' }));
-      doc.y += 10;
-
-      let currentX = gridX + adjustedFirstDay * 15;
-      let currentY = doc.y;
+      doc.fontSize(8).font('Helvetica-Bold').fillColor('#64748b');
+      dayHeaders.forEach((h, i) => {
+        doc.text(h, 40 + i * 22, doc.y, { width: 22, align: 'center', lineBreak: false });
+      });
+      
+      doc.y += 15;
+      let gridX = 40, currentX = gridX + adjustedFirstDay * 22, currentY = doc.y;
 
       for (let d = 1; d <= daysInMonth; d++) {
         const dStr = `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
         const rec = records.find(r => r.date === dStr);
         
-        let color = '#f1f5f9'; // Not marked
+        let color = '#f1f5f9';
         if (rec) {
           if (rec.status === 'present') color = '#dcfce7';
           else if (rec.status === 'late') color = '#fef3c7';
           else if (rec.status === 'absent') color = '#fee2e2';
           else if (rec.status === 'half_day') color = '#dbeafe';
+          else if (rec.status === 'holiday') color = '#f1f5f9';
         }
         
-        doc.rect(currentX + 1.5, currentY + 1.5, 12, 12).fill(color);
+        doc.rect(currentX + 2, currentY + 2, 18, 18).fill(color);
+        doc.fillColor('#94a3b8').fontSize(6).font('Helvetica').text(d, currentX + 4, currentY + 4, { lineBreak: false });
         
         if ((adjustedFirstDay + d) % 7 === 0) {
           currentX = gridX;
-          currentY += 15;
+          currentY += 22;
         } else {
-          currentX += 15;
+          currentX += 22;
         }
       }
-      doc.y = currentY + 25;
+      doc.y = currentY + 35;
     }
 
-    // Legend
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);

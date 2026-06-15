@@ -221,11 +221,30 @@ exports.admit = async (req, res, next) => {
       try { profile = JSON.parse(profile); } catch (e) { /* ignore */ }
     }
 
-    const schoolId = req.user.school_id;
-    const studentEmail = profile?.email?.trim().toLowerCase();
+    // Server-side validation (mirrors frontend Zod rules)
+    if (!first_name?.trim() || first_name.trim().length < 2)
+      return res.fail('First name must be at least 2 characters.', [], 422);
+    if (!last_name?.trim())
+      return res.fail('Last name is required.', [], 422);
+    if (!date_of_birth || new Date(date_of_birth) >= new Date())
+      return res.fail('Date of birth must be in the past.', [], 422);
+    if (!['male', 'female', 'other'].includes(gender))
+      return res.fail('Gender must be male, female, or other.', [], 422);
+    if (!admission_no?.trim())
+      return res.fail('Admission number is required.', [], 422);
+    if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
+      return res.fail('Admission number contains invalid characters.', [], 422);
+    if (aadhar_no && !/^\d{12}$/.test(aadhar_no))
+      return res.fail('Aadhaar number must be exactly 12 digits.', [], 422);
 
-    // Parent details from profile
-    const parentEmail = (profile?.father_email || profile?.mother_email || profile?.email || profile?.parent_email)?.trim().toLowerCase();
+    // Prevent student email and parent email being identical
+    const studentEmail = profile?.email?.trim().toLowerCase();
+    const parentEmailCheck = (profile?.father_email || profile?.mother_email || profile?.email || profile?.parent_email)?.trim().toLowerCase();
+    if (studentEmail && parentEmailCheck && studentEmail === parentEmailCheck)
+      return res.fail('Student email and parent email cannot be the same address.', [], 422);
+
+    const schoolId = req.user.school_id;
+    const parentEmail = parentEmailCheck;
     const parentName = profile?.father_name || profile?.mother_name || `${last_name} Family`;
     const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.phone;
 
@@ -1138,6 +1157,20 @@ exports.updateProfile = async (req, res, next) => {
       ...newData 
     } = req.body;
 
+    if (!change_reason?.trim() || change_reason.trim().length < 5)
+      return res.fail('A reason for the update is required (minimum 5 characters).', [], 422);
+
+    // ── Validation Guards ─────────────────────────────────────────────
+    if (first_name !== undefined && !first_name?.trim()) return res.fail('First name is required.', [], 422);
+    if (last_name !== undefined && !last_name?.trim())  return res.fail('Last name is required.', [], 422);
+    if (date_of_birth !== undefined && (!date_of_birth || new Date(date_of_birth) > new Date()))
+      return res.fail('Date of birth must be in the past.', [], 422);
+    if (gender !== undefined && !['male', 'female', 'other'].includes(gender))
+      return res.fail('Gender must be male, female, or other.', [], 422);
+    if (aadhar_no && aadhar_no.trim() !== '' && !/^\d{12}$/.test(aadhar_no))
+      return res.fail('Aadhaar must be exactly 12 digits.', [], 422);
+    // ──────────────────────────────────────────────────────────────────
+
     const [[student]] = await sequelize.query(`
       SELECT * FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
     `, { replacements: { id, schoolId: req.user.school_id } });
@@ -1179,6 +1212,24 @@ exports.updateProfile = async (req, res, next) => {
         deviceInfo   : req.headers['user-agent'],
         transaction  : t
       });
+
+      // Sync parent login email in users table if parent_email was updated
+      if (newData.parent_email) {
+        const cleanEmail = newData.parent_email.trim().toLowerCase();
+        await sequelize.query(`
+          UPDATE users u
+          SET email = :newEmail, updated_at = NOW()
+          FROM families f
+          JOIN students s ON s.family_id = f.id
+          WHERE s.id = :studentId
+            AND s.school_id = :schoolId
+            AND f.user_id = u.id
+            AND u.role = 'parent';
+        `, {
+          replacements: { newEmail: cleanEmail, studentId: parseInt(id), schoolId: req.user.school_id },
+          transaction: t
+        });
+      }
 
       // 3. Fetch full updated record (same logic as getById)
       const [[updated]] = await sequelize.query(`

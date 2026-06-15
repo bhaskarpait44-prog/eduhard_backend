@@ -23,7 +23,13 @@ const createClassRules = [
     .isInt({ min: 1, max: 25 }).withMessage('Min age must be 1-25'),
   body('max_age')
     .optional({ nullable: true })
-    .isInt({ min: 1, max: 30 }).withMessage('Max age must be 1-30'),
+    .isInt({ min: 1, max: 30 }).withMessage('Max age must be 1-30')
+    .custom((value, { req }) => {
+      if (value && req.body.min_age && parseInt(value) <= parseInt(req.body.min_age)) {
+        throw new Error('Max age must be greater than min age');
+      }
+      return true;
+    }),
   body('description')
     .optional({ nullable: true })
     .trim()
@@ -54,7 +60,13 @@ const updateClassRules = [
     .isInt({ min: 1, max: 25 }).withMessage('Min age must be 1-25'),
   body('max_age')
     .optional({ nullable: true })
-    .isInt({ min: 1, max: 30 }).withMessage('Max age must be 1-30'),
+    .isInt({ min: 1, max: 30 }).withMessage('Max age must be 1-30')
+    .custom((value, { req }) => {
+      if (value && req.body.min_age && parseInt(value) <= parseInt(req.body.min_age)) {
+        throw new Error('Max age must be greater than min age');
+      }
+      return true;
+    }),
   body('description')
     .optional({ nullable: true })
     .trim()
