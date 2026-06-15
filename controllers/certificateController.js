@@ -360,6 +360,42 @@ const certificateController = {
       return res.fail('Failed to revoke certificate.');
     }
   },
+
+  async getSettings(req, res) {
+    try {
+      const { school_id } = req.user;
+      const school = await School.findByPk(school_id, {
+        attributes: ['name', 'address', 'phone', 'email', 'principal_name']
+      });
+      return res.ok(school);
+    } catch (error) {
+      console.error('[CertificateController.getSettings]', error);
+      return res.fail('Failed to fetch certificate settings.');
+    }
+  },
+
+  async updateSettings(req, res) {
+    try {
+      const { school_id } = req.user;
+      const { school_name, address, phone, email, principal_name } = req.body;
+      
+      const school = await School.findByPk(school_id);
+      if (!school) return res.fail('School not found.', [], 404);
+
+      await school.update({
+        name: school_name,
+        address,
+        phone,
+        email,
+        principal_name
+      });
+
+      return res.ok(school, 'Settings updated successfully.');
+    } catch (error) {
+      console.error('[CertificateController.updateSettings]', error);
+      return res.fail('Failed to update certificate settings.');
+    }
+  }
 };
 
 module.exports = certificateController;

@@ -56,7 +56,7 @@ exports.getAlumniDirectory = async (req, res, next) => {
       const year = parseInt(batch_year, 10);
       if (!isNaN(year)) {
         where[Op.and] = [
-          sequelize.where(sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM left_date')), year)
+          sequelize.where(sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM COALESCE(left_date, updated_at)')), year)
         ];
       }
     }
@@ -64,7 +64,7 @@ exports.getAlumniDirectory = async (req, res, next) => {
     const alumniWhere = {};
     if (occupation) alumniWhere.current_occupation = occupation;
     if (city) alumniWhere.current_city = { [Op.iLike]: `%${city}%` };
-    if (is_mentor !== undefined) alumniWhere.is_mentor_volunteer = is_mentor === 'true';
+    if (is_mentor === 'true') alumniWhere.is_mentor_volunteer = true;
 
     const include = [
       {
@@ -131,7 +131,12 @@ exports.getAlumniProfile = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const student = await Student.findOne({
-      where: { id, school_id: schoolId, is_deleted: false },
+      where: { 
+        id, 
+        school_id: schoolId, 
+        is_deleted: false,
+        status: { [Op.in]: ['left', 'graduated'] }
+      },
       include: [
         { model: AlumniProfile, as: 'alumniProfile' },
         {
@@ -173,14 +178,25 @@ exports.upsertAlumniProfile = async (req, res, next) => {
     const data = req.body;
 
     const student = await Student.findOne({
-      where: { id: student_id, school_id: schoolId, is_deleted: false }
+      where: { 
+        id: student_id, 
+        school_id: schoolId, 
+        is_deleted: false,
+        status: { [Op.in]: ['left', 'graduated'] }
+      }
     });
 
-    if (!student) return res.fail('Student not found.', [], 404);
+    if (!student) return res.fail('Student not found or not an alumni.', [], 404);
 
     const [profile, created] = await AlumniProfile.findOrCreate({
       where: { student_id, school_id: schoolId },
-      defaults: { ...data, school_id: schoolId, student_id, created_by: req.user.id }
+      defaults: { 
+        ...data, 
+        school_id: schoolId, 
+        student_id, 
+        created_by: req.user.id,
+        profile_updated_at: new Date()
+      }
     });
 
     if (!created) {
@@ -235,11 +251,11 @@ exports.getAlumniStats = async (req, res, next) => {
     const byBatchYear = await Student.findAll({
       where: { school_id: schoolId, status: { [Op.in]: ['left', 'graduated'] }, is_deleted: false },
       attributes: [
-        [sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM left_date')), 'batch_year'],
+        [sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM COALESCE(left_date, updated_at)')), 'batch_year'],
         [sequelize.fn('COUNT', sequelize.col('id')), 'count']
       ],
-      group: [sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM left_date'))],
-      order: [[sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM left_date')), 'DESC']],
+      group: [sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM COALESCE(left_date, updated_at)'))],
+      order: [[sequelize.fn('EXTRACT', sequelize.literal('YEAR FROM COALESCE(left_date, updated_at)')), 'DESC']],
       raw: true
     });
 
@@ -331,7 +347,7 @@ exports.downloadAlumniDirectoryPdf = async (req, res, next) => {
     const [alumni] = await sequelize.query(`
       SELECT 
         s.admission_no, s.first_name, s.last_name, 
-        EXTRACT(YEAR FROM s.left_date) as batch_year,
+        EXTRACT(YEAR FROM COALESCE(s.left_date, s.updated_at)) as batch_year,
         ap.current_occupation, ap.company_or_institution, ap.current_city, ap.contact_email
       FROM students s
       LEFT JOIN alumni_profiles ap ON ap.student_id = s.id
@@ -339,9 +355,9 @@ exports.downloadAlumniDirectoryPdf = async (req, res, next) => {
         AND s.status IN ('left', 'graduated')
         AND s.is_deleted = false
         AND (s.first_name ILIKE :search OR s.last_name ILIKE :search OR s.admission_no ILIKE :search)
-        AND (:batchYear IS NULL OR EXTRACT(YEAR FROM s.left_date) = :batchYear)
+        AND (:batchYear IS NULL OR EXTRACT(YEAR FROM COALESCE(s.left_date, s.updated_at)) = :batchYear)
         AND (:occupation IS NULL OR ap.current_occupation = :occupation)
-      ORDER BY s.left_date DESC
+      ORDER BY COALESCE(s.left_date, s.updated_at) DESC
     `, { replacements });
 
     const filename = safeFileName(`alumni-directory-${new Date().getTime()}`) + '.pdf';

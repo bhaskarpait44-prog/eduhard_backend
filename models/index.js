@@ -104,6 +104,15 @@ Class.hasMany(Subject, { foreignKey: 'class_id', as: 'subjects' });
 Student.hasMany(Enrollment, { foreignKey: 'student_id', as: 'enrollments' });
 Enrollment.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
+Enrollment.belongsTo(Class, { foreignKey: 'class_id', as: 'class' });
+Class.hasMany(Enrollment, { foreignKey: 'class_id', as: 'enrollments' });
+
+Enrollment.belongsTo(Section, { foreignKey: 'section_id', as: 'section' });
+Section.hasMany(Enrollment, { foreignKey: 'section_id', as: 'enrollments' });
+
+Enrollment.belongsTo(Session, { foreignKey: 'session_id', as: 'session' });
+Session.hasMany(Enrollment, { foreignKey: 'session_id', as: 'enrollments' });
+
 Student.hasMany(StudentProfile, { foreignKey: 'student_id', as: 'profiles' });
 StudentProfile.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 
@@ -154,11 +163,23 @@ LibraryReservation.belongsTo(LibraryBook, { foreignKey: 'book_id', as: 'book' })
 LibraryIssue.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
 
 // Certificates
+Certificate.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
+Student.hasMany(Certificate, { foreignKey: 'student_id', as: 'certificates' });
+
 Certificate.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
 Teacher.hasMany(Certificate, { foreignKey: 'teacher_id', as: 'certificates' });
 
+Certificate.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+School.hasMany(Certificate, { foreignKey: 'school_id', as: 'certificates' });
+
+Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
+
 Certificate.belongsTo(User, { foreignKey: 'issued_by', as: 'issuerUser', constraints: false });
 Certificate.belongsTo(Teacher, { foreignKey: 'issued_by', as: 'issuerTeacher', constraints: false });
+
+// Family
+Student.belongsTo(Family, { foreignKey: 'family_id', as: 'family' });
+Family.hasMany(Student, { foreignKey: 'family_id', as: 'students' });
 
 // Alumni
 Student.hasOne(AlumniProfile, { foreignKey: 'student_id', as: 'alumniProfile' });

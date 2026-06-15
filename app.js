@@ -107,6 +107,8 @@ app.use('/api/exams',
 );
 
 app.use('/api/analytics', require('./routes/analytics'));
+app.use('/api/ai-analysis', require('./routes/aiAnalysis'));
+app.use('/api/ai-insights-module', require('./routes/aiInsights'));
 app.use('/api/compliance', require('./routes/compliance'));
 app.use('/api/results',
   requirePermission('results.view'),
