@@ -60,6 +60,7 @@ const invalidateCache = async (schoolId, pattern = '*') => {
   const patterns = [pattern];
   if (pattern === '/api/dashboard*') {
     patterns.push('/api/ai-insights-module*');
+    patterns.push('/api/ai-analysis*');
   }
   
   try {

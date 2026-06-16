@@ -138,15 +138,17 @@ exports.getAttendanceTrend = async (req, res, next) => {
     const trend = await sequelize.query(`
       SELECT 
         TO_CHAR(d.date, 'DD Mon') AS label,
-        COALESCE((COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::float / NULLIF(COUNT(e.id), 0)) * 100, 0) AS value
+        COALESCE(
+          (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::float / NULLIF(COUNT(e.id), 0)) * 100, 
+          0
+        ) AS value
       FROM (
         SELECT GENERATE_SERIES(CURRENT_DATE - INTERVAL '1 day' * :days, CURRENT_DATE, '1 day')::date AS date
       ) d
-      CROSS JOIN schools s
-      LEFT JOIN enrollments e ON e.status = 'active'
-      LEFT JOIN classes c ON c.id = e.class_id AND c.school_id = s.id
+      CROSS JOIN (SELECT id FROM schools WHERE id = :schoolId) s
+      LEFT JOIN classes c ON c.school_id = s.id
+      LEFT JOIN enrollments e ON e.class_id = c.id AND e.status = 'active'
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = d.date
-      WHERE s.id = :schoolId
       GROUP BY d.date
       ORDER BY d.date ASC;
     `, { replacements: { schoolId, days: days - 1 }, type: sequelize.QueryTypes.SELECT });

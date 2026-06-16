@@ -18,6 +18,7 @@ const {
 const feeManager = require('../utils/feeManager');
 const feeController = require('./feeController');
 const { notifyClass, notifyAllStudents, sendNotification } = require('../utils/notification');
+const { invalidateCache } = require('../middlewares/cache');
 
 const PAYMENT_MODES = ['cash', 'online', 'cheque', 'dd', 'upi'];
 const CONCESSION_REASONS = [
@@ -742,6 +743,11 @@ exports.collectFees = async (req, res, next) => {
         upi_id: upi_id || null,
       },
     }, 'Fee collection completed.', 201);
+
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
   } catch (err) { next(err); }
 };
 
@@ -1371,6 +1377,11 @@ exports.applyConcession = async (req, res, next) => {
         final_amount: Number((originalAmount - concessionAmount).toFixed(2)),
       },
     }, 'Concession applied successfully.');
+
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
   } catch (err) { next(err); }
 };
 
@@ -1628,6 +1639,11 @@ exports.processRefund = async (req, res, next) => {
 
     await writeFinancialAudit(req, 'fee_refunds', refund.id, 'refund', amount, reason);
     res.ok(refund, 'Refund processed successfully.', 201);
+
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
   } catch (err) { next(err); }
 };
 
@@ -1676,6 +1692,10 @@ exports.clearCheque = async (req, res, next) => {
     if (!cheque) return res.fail('Cheque not found.', [], 404);
     await writeFinancialAudit(req, 'cheque_payments', cheque.id, 'status', 'cleared', 'Cheque cleared');
     res.ok(cheque, 'Cheque marked as cleared.');
+
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
   } catch (err) { next(err); }
 };
 
@@ -1697,6 +1717,10 @@ exports.bounceCheque = async (req, res, next) => {
     if (!cheque) return res.fail('Cheque not found.', [], 404);
     await writeFinancialAudit(req, 'cheque_payments', cheque.id, 'status', 'bounced', cheque.bounce_reason);
     res.ok(cheque, 'Cheque marked as bounced.');
+
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
   } catch (err) { next(err); }
 };
 
@@ -1786,6 +1810,11 @@ exports.confirmUpiRequest = async (req, res, next) => {
 
     res.ok({}, 'UPI payment confirmed successfully.');
 
+    invalidateCache(req.user.school_id, '/api/fees*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+    invalidateCache(req.user.school_id, '/api/accountant*');
+    invalidateCache(req.user.school_id, '/api/student*');
+
     // Notify student
     try {
       const [[studentInfo]] = await sequelize.query(`
@@ -1810,10 +1839,6 @@ exports.confirmUpiRequest = async (req, res, next) => {
     } catch (notifyErr) {
       console.error('[UPI-Notify-Student-Error]', notifyErr);
     }
-
-    invalidateCache(req.user.school_id, '/api/fees*');
-    invalidateCache(req.user.school_id, '/api/accountant*');
-    invalidateCache(req.user.school_id, '/api/student*');
   } catch (err) { next(err); }
 };
 

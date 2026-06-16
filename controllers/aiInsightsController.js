@@ -10,6 +10,19 @@ const aiEngine = require('../utils/aiEngine');
 exports.getDashboardInsights = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
+    
+    // 1. Resolve Session
+    let sessionId = req.query.session_id;
+    if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
+      const [[currentSession]] = await sequelize.query(`
+        SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+      `, { replacements: { schoolId } });
+      sessionId = currentSession?.id;
+    }
+
+    if (!sessionId) return res.fail('No active session found.');
+    sessionId = parseInt(sessionId);
+
     const today = new Date();
     const lastWeek = new Date();
     lastWeek.setDate(today.getDate() - 7);
@@ -17,7 +30,7 @@ exports.getDashboardInsights = async (req, res, next) => {
     const todayStr = today.toISOString().slice(0, 10);
     const lastWeekStr = lastWeek.toISOString().slice(0, 10);
 
-    // 1. Fetch Attendance Data (Today vs Last Week)
+    // 2. Fetch Attendance Data (Today vs Last Week)
     const [[attToday]] = await sequelize.query(`
       SELECT 
         COUNT(a.id)::int AS total,
@@ -25,8 +38,8 @@ exports.getDashboardInsights = async (req, res, next) => {
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
-      WHERE a.date = :todayStr AND s.school_id = :schoolId;
-    `, { replacements: { todayStr, schoolId } });
+      WHERE a.date = :todayStr AND s.school_id = :schoolId AND e.session_id = :sessionId;
+    `, { replacements: { todayStr, schoolId, sessionId } });
 
     const [[attLastWeek]] = await sequelize.query(`
       SELECT 
@@ -35,14 +48,14 @@ exports.getDashboardInsights = async (req, res, next) => {
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
-      WHERE a.date = :lastWeekStr AND s.school_id = :schoolId;
-    `, { replacements: { lastWeekStr, schoolId } });
+      WHERE a.date = :lastWeekStr AND s.school_id = :schoolId AND e.session_id = :sessionId;
+    `, { replacements: { lastWeekStr, schoolId, sessionId } });
 
     const attTodayPct = attToday.total > 0 ? (attToday.present / attToday.total) * 100 : 0;
     const attLastWeekPct = attLastWeek.total > 0 ? (attLastWeek.present / attLastWeek.total) * 100 : 0;
     const attTrend = aiEngine.calculateTrend(attTodayPct, attLastWeekPct);
 
-    // 2. Fetch Fee Collection (Current Month vs Last Month)
+    // 3. Fetch Fee Collection (Current Month vs Last Month)
     const [[feeStats]] = await sequelize.query(`
       SELECT 
         COALESCE(SUM(fp.amount), 0) AS collected,
@@ -51,9 +64,9 @@ exports.getDashboardInsights = async (req, res, next) => {
       JOIN enrollments e ON e.id = fi.enrollment_id
       JOIN students s ON s.id = e.student_id
       LEFT JOIN fee_payments fp ON fp.invoice_id = fi.id
-      WHERE s.school_id = :schoolId
+      WHERE s.school_id = :schoolId AND e.session_id = :sessionId
       AND DATE_TRUNC('month', fi.due_date::date) = DATE_TRUNC('month', CURRENT_DATE);
-    `, { replacements: { schoolId } });
+    `, { replacements: { schoolId, sessionId } });
 
     const [[prevFeeStats]] = await sequelize.query(`
       SELECT 
@@ -63,15 +76,15 @@ exports.getDashboardInsights = async (req, res, next) => {
       JOIN enrollments e ON e.id = fi.enrollment_id
       JOIN students s ON s.id = e.student_id
       LEFT JOIN fee_payments fp ON fp.invoice_id = fi.id
-      WHERE s.school_id = :schoolId
+      WHERE s.school_id = :schoolId AND e.session_id = :sessionId
       AND DATE_TRUNC('month', fi.due_date::date) = DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month');
-    `, { replacements: { schoolId } });
+    `, { replacements: { schoolId, sessionId } });
 
     const feeCollectionRatio = feeStats.expected > 0 ? feeStats.collected / feeStats.expected : 0;
     const prevFeeCollectionRatio = prevFeeStats.expected > 0 ? prevFeeStats.collected / prevFeeStats.expected : 0;
     const feeTrend = aiEngine.calculateTrend(feeCollectionRatio * 100, prevFeeCollectionRatio * 100);
 
-    // 3. Detect Anomalies in Class-wise Attendance
+    // 4. Detect Anomalies in Class-wise Attendance
     const classAttendance = await sequelize.query(`
       SELECT 
         c.name AS label,
@@ -79,13 +92,13 @@ exports.getDashboardInsights = async (req, res, next) => {
       FROM enrollments e
       JOIN classes c ON c.id = e.class_id
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :todayStr
-      WHERE e.status = 'active' AND c.school_id = :schoolId
+      WHERE e.status = 'active' AND c.school_id = :schoolId AND e.session_id = :sessionId
       GROUP BY c.id, c.name;
-    `, { replacements: { todayStr, schoolId }, type: sequelize.QueryTypes.SELECT });
+    `, { replacements: { todayStr, schoolId, sessionId }, type: sequelize.QueryTypes.SELECT });
 
     const anomalies = aiEngine.detectAnomalies(classAttendance.map(c => ({ label: c.label, value: Number(c.value) })));
 
-    // 4. Calculate High Risk Students Count
+    // 5. Calculate High Risk Students Count
     const [[{ highRiskCount }]] = await sequelize.query(`
       WITH student_metrics AS (
         SELECT 
@@ -100,38 +113,38 @@ exports.getDashboardInsights = async (req, res, next) => {
           COALESCE((SELECT AVG(er.marks_obtained * 100 / NULLIF(es.combined_total_marks, 0)) FROM exam_results er JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id WHERE er.enrollment_id = e.id), 75) AS avg_marks
         FROM enrollments e
         JOIN students s ON s.id = e.student_id
-        WHERE s.school_id = :schoolId AND e.status = 'active'
+        WHERE s.school_id = :schoolId AND e.status = 'active' AND e.session_id = :sessionId
       )
       SELECT COUNT(*)::int AS "highRiskCount"
       FROM student_metrics
       WHERE (CASE WHEN att_pct < 75 THEN (75 - att_pct) * (100.0/75.0) ELSE 0 END * 0.4) +
             (LEAST(fee_due_ratio * 100.0, 100.0) * 0.3) +
             (CASE WHEN avg_marks < 50 THEN (50 - avg_marks) * 2.0 ELSE 0 END * 0.3) > 40;
-    `, { replacements: { schoolId } });
+    `, { replacements: { schoolId, sessionId } });
 
-    // 5. Attendance Forecast
+    // 6. Attendance Forecast
     const attendanceHistory = await sequelize.query(`
       SELECT 
         (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::float / NULLIF(COUNT(e.id), 0)) * 100 AS value
       FROM enrollments e
       LEFT JOIN attendance a ON a.enrollment_id = e.id
       JOIN students s ON s.id = e.student_id
-      WHERE s.school_id = :schoolId AND e.status = 'active' AND a.date < CURRENT_DATE
+      WHERE s.school_id = :schoolId AND e.status = 'active' AND e.session_id = :sessionId AND a.date < CURRENT_DATE
       AND a.date >= CURRENT_DATE - INTERVAL '14 days'
       GROUP BY a.date
       ORDER BY a.date ASC;
-    `, { replacements: { schoolId }, type: sequelize.QueryTypes.SELECT });
+    `, { replacements: { schoolId, sessionId }, type: sequelize.QueryTypes.SELECT });
 
     const predictedAttendance = aiEngine.predictValue(attendanceHistory.map(h => ({ value: Number(h.value) })), attendanceHistory.length);
 
-    // 6. Recommendations
+    // 7. Recommendations
     const recommendations = aiEngine.generateRecommendations({
       attendanceTrend: attTrend,
       feeCollectionRatio: feeCollectionRatio,
       highRiskCount: highRiskCount
     });
 
-    // 7. Build Summary
+    // 8. Build Summary
     const summary = aiEngine.buildSummaryText({
       attendance: { today: attTodayPct, trend: attTrend },
       fees: { collectionRatio: feeCollectionRatio },
@@ -161,72 +174,96 @@ exports.getStudentRiskAnalysis = async (req, res, next) => {
     const limit = parseInt(req.query.limit) || 50;
     const offset = (page - 1) * limit;
 
-    // Comprehensive query to get raw risk data
+    // 1. Resolve Session
+    let sessionId = req.query.session_id;
+    if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
+      const [[currentSession]] = await sequelize.query(`
+        SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+      `, { replacements: { schoolId } });
+      sessionId = currentSession?.id;
+    }
+
+    if (!sessionId) return res.fail('No active session found.');
+    sessionId = parseInt(sessionId);
+
+    // 2. Comprehensive query to get raw risk data and calculate scores in SQL
     const students = await sequelize.query(`
+      WITH raw_data AS (
+        SELECT 
+          s.id,
+          s.first_name,
+          s.last_name,
+          s.admission_no,
+          c.name AS class_name,
+          -- Attendance %
+          COALESCE((SELECT (COUNT(*) FILTER (WHERE status IN ('present', 'late'))::float / NULLIF(COUNT(*), 0)) * 100 
+           FROM attendance WHERE enrollment_id = e.id), 100) AS att_pct,
+          -- Fee Due Ratio
+          COALESCE((
+            SELECT CASE WHEN SUM(amount_due + late_fee_amount - concession_amount) > 0 
+            THEN (SUM(amount_due + late_fee_amount - concession_amount) - (SELECT COALESCE(SUM(amount), 0) FROM fee_payments fp JOIN fee_invoices fi2 ON fi2.id = fp.invoice_id WHERE fi2.enrollment_id = e.id)) / SUM(amount_due + late_fee_amount - concession_amount)
+            ELSE 0 END
+            FROM fee_invoices WHERE enrollment_id = e.id
+          ), 0) AS fee_due_ratio,
+          -- Academic Avg
+          COALESCE((SELECT AVG(er.marks_obtained * 100 / NULLIF(es.combined_total_marks, 0)) 
+           FROM exam_results er 
+           JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id 
+           WHERE er.enrollment_id = e.id), 75) AS avg_marks
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        JOIN classes c ON c.id = e.class_id
+        WHERE s.school_id = :schoolId AND e.status = 'active' AND e.session_id = :sessionId
+      ),
+      scored_data AS (
+        SELECT 
+          *,
+          -- Breakdown scores
+          (CASE WHEN att_pct < 75 THEN (75 - att_pct) * (100.0/75.0) ELSE 0 END)::int AS att_risk,
+          (LEAST(fee_due_ratio * 100.0, 100.0))::int AS fee_risk,
+          (CASE WHEN avg_marks < 50 THEN (50 - avg_marks) * 2.0 ELSE 0 END)::int AS acad_risk
+        FROM raw_data
+      ),
+      final_scores AS (
+        SELECT 
+          *,
+          (att_risk * 0.4 + fee_risk * 0.3 + acad_risk * 0.3)::int AS risk_score
+        FROM scored_data
+      )
       SELECT 
-        s.id,
-        s.first_name,
-        s.last_name,
-        s.admission_no,
-        c.name AS class_name,
-        -- Attendance %
-        (SELECT (COUNT(*) FILTER (WHERE status IN ('present', 'late'))::float / NULLIF(COUNT(*), 0)) * 100 
-         FROM attendance WHERE enrollment_id = e.id) AS att_pct,
-        -- Fee Due Ratio
-        (SELECT COALESCE(SUM(amount_due + late_fee_amount - concession_amount), 0) 
-         FROM fee_invoices WHERE enrollment_id = e.id) AS total_due,
-        (SELECT COALESCE(SUM(amount), 0) 
-         FROM fee_payments fp JOIN fee_invoices fi ON fi.id = fp.invoice_id WHERE fi.enrollment_id = e.id) AS total_paid,
-        -- Academic Avg (Placeholder for latest exam)
-        (SELECT AVG(er.marks_obtained * 100 / NULLIF(es.combined_total_marks, 0)) 
-         FROM exam_results er 
-         JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id 
-         WHERE er.enrollment_id = e.id) AS avg_marks,
+        *,
         COUNT(*) OVER()::int AS total_count
-      FROM enrollments e
-      JOIN students s ON s.id = e.student_id
-      JOIN classes c ON c.id = e.class_id
-      WHERE s.school_id = :schoolId AND e.status = 'active'
-      ORDER BY s.id
+      FROM final_scores
+      WHERE risk_score > 20
+      ORDER BY risk_score DESC, id ASC
       LIMIT :limit OFFSET :offset;
-    `, { replacements: { schoolId, limit, offset }, type: sequelize.QueryTypes.SELECT });
+    `, { replacements: { schoolId, sessionId, limit, offset }, type: sequelize.QueryTypes.SELECT });
 
     const totalCount = students.length > 0 ? students[0].total_count : 0;
 
     const analyzedStudents = students.map(s => {
-      const attPct = Number(s.att_pct || 100);
-      const totalDue = Number(s.total_due || 0);
-      const totalPaid = Number(s.total_paid || 0);
-      const feeDueRatio = totalDue > 0 ? (totalDue - totalPaid) / totalDue : 0;
-      const avgMarks = Number(s.avg_marks || 75);
-
-      const risk = aiEngine.calculateStudentRisk({
-        attendancePct: attPct,
-        feeDueRatio: feeDueRatio,
-        avgMarks: avgMarks
-      });
-
       // Specific recommendation per student
       let recommendation = "Maintain current performance.";
-      if (risk.score > 70) recommendation = "Critical: Immediate parent-teacher meeting required.";
-      else if (risk.score > 40) recommendation = "Warning: Monitor attendance and dues.";
+      if (s.risk_score > 70) recommendation = "Critical: Immediate parent-teacher meeting required.";
+      else if (s.risk_score > 40) recommendation = "Warning: Monitor attendance and dues.";
 
       return {
         id: s.id,
         name: `${s.first_name} ${s.last_name}`,
         admission_no: s.admission_no,
         class_name: s.class_name,
-        riskScore: risk.score,
-        breakdown: risk.breakdown,
+        riskScore: s.risk_score,
+        breakdown: {
+          attendance: s.att_risk,
+          fees: s.fee_risk,
+          academics: s.acad_risk
+        },
         recommendation
       };
     });
 
-    // Sort by risk score descending (within this page, or we could sort in SQL if risk score was a column)
-    analyzedStudents.sort((a, b) => b.riskScore - a.riskScore);
-
     res.ok({
-      students: analyzedStudents.filter(s => s.riskScore > 20),
+      students: analyzedStudents,
       pagination: {
         total: totalCount,
         page,

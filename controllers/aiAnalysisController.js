@@ -12,12 +12,16 @@ exports.getDashboardSummary = async (req, res, next) => {
     const startOfWeekStr = startOfWeek.toISOString().slice(0, 10);
 
     // 1. Resolve Session
-    const [[currentSession]] = await sequelize.query(`
-      SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
-    `, { replacements: { schoolId } });
-    const sessionId = currentSession?.id;
+    let sessionId = req.query.session_id;
+    if (!sessionId || sessionId === 'null' || sessionId === 'undefined') {
+      const [[currentSession]] = await sequelize.query(`
+        SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+      `, { replacements: { schoolId } });
+      sessionId = currentSession?.id;
+    }
 
     if (!sessionId) return res.fail('No active session found.');
+    sessionId = parseInt(sessionId);
 
     // 2. Aggregate Data for AI
     const data = {};
@@ -31,8 +35,8 @@ exports.getDashboardSummary = async (req, res, next) => {
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
-      WHERE a.date = :today AND s.school_id = :schoolId;
-    `, { replacements: { today, schoolId } });
+      WHERE a.date = :today AND s.school_id = :schoolId AND e.session_id = :sessionId;
+    `, { replacements: { today, schoolId, sessionId } });
 
     const [[weeklyAttendance]] = await sequelize.query(`
       SELECT 
@@ -40,8 +44,8 @@ exports.getDashboardSummary = async (req, res, next) => {
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
-      WHERE a.date >= :startOfWeekStr AND s.school_id = :schoolId;
-    `, { replacements: { startOfWeekStr, schoolId } });
+      WHERE a.date >= :startOfWeekStr AND s.school_id = :schoolId AND e.session_id = :sessionId;
+    `, { replacements: { startOfWeekStr, schoolId, sessionId } });
 
     data.attendance = {
       today: {
