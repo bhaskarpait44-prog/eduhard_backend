@@ -40,7 +40,7 @@ exports.getDashboardSummary = async (req, res, next) => {
 
     const [[weeklyAttendance]] = await sequelize.query(`
       SELECT 
-        AVG(CASE WHEN status IN ('present', 'late') THEN 1 ELSE 0 END) * 100 AS avg_percentage
+        AVG(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) * 100 AS avg_percentage
       FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
@@ -49,6 +49,7 @@ exports.getDashboardSummary = async (req, res, next) => {
 
     data.attendance = {
       today: {
+        total_marked: attendanceStats.total_marked,
         present: attendanceStats.present,
         absent: attendanceStats.absent,
         percentage: attendanceStats.total_marked > 0 ? (attendanceStats.present / attendanceStats.total_marked) * 100 : 0
