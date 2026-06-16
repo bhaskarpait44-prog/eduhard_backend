@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const aiEngine = require('../utils/aiEngine');
 
 exports.getAdminStats = async (req, res, next) => {
   try {
@@ -45,7 +46,7 @@ exports.getAdminStats = async (req, res, next) => {
     const presentCount = Number(attendance.present || 0) + Number(attendance.half_day || 0) * 0.5;
     const attendancePercentage = totalStudents > 0 ? (presentCount / totalStudents) * 100 : 0;
 
-    // 4. Fee Collection (Monthly)
+    // 4. Fee Collection (Monthly Collection Ratio)
     const [[fees]] = await sequelize.query(`
       SELECT 
         COALESCE(SUM(fp.amount), 0) AS collected,
@@ -53,9 +54,9 @@ exports.getAdminStats = async (req, res, next) => {
       FROM fee_invoices fi
       JOIN enrollments e ON e.id = fi.enrollment_id
       JOIN students s ON s.id = e.student_id
-      LEFT JOIN fee_payments fp ON fp.invoice_id = fi.id 
-        AND DATE_TRUNC('month', fp.payment_date::date) = DATE_TRUNC('month', CURRENT_DATE)
-      WHERE e.session_id = :sessionId AND s.school_id = :schoolId;
+      LEFT JOIN fee_payments fp ON fp.invoice_id = fi.id
+      WHERE e.session_id = :sessionId AND s.school_id = :schoolId
+      AND DATE_TRUNC('month', fi.due_date::date) = DATE_TRUNC('month', CURRENT_DATE);
     `, { replacements: { sessionId, schoolId } });
 
     const collected = Number(fees.collected || 0);
@@ -72,12 +73,29 @@ exports.getAdminStats = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { sessionId } });
 
+    // 6. Attendance Forecast (Using aiEngine.predictValue)
+    const attendanceHistory = await sequelize.query(`
+      SELECT 
+        date,
+        (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::float / NULLIF(COUNT(e.id), 0)) * 100 AS percentage
+      FROM enrollments e
+      LEFT JOIN attendance a ON a.enrollment_id = e.id
+      WHERE e.session_id = :sessionId AND e.status = 'active' AND a.date < CURRENT_DATE
+      AND a.date >= CURRENT_DATE - INTERVAL '14 days'
+      GROUP BY date
+      ORDER BY date ASC;
+    `, { replacements: { sessionId }, type: sequelize.QueryTypes.SELECT });
+
+    const dataPoints = attendanceHistory.map(h => ({ value: Number(h.percentage) }));
+    const predictedAttendance = aiEngine.predictValue(dataPoints, dataPoints.length);
+
     res.ok({
       totalStudents: totalStudents,
       attendanceToday: {
         percentage: attendancePercentage,
         present: presentCount,
-        absent: attendance.absent || 0
+        absent: attendance.absent || 0,
+        forecast: predictedAttendance ? Number(predictedAttendance.toFixed(1)) : null
       },
       feeCollection: {
         collected: collected,
@@ -105,5 +123,34 @@ exports.getAdminStats = async (req, res, next) => {
         ORDER BY c.name;
       `, { replacements: { today, sessionId }, type: sequelize.QueryTypes.SELECT })
     });
+  } catch (err) { next(err); }
+};
+
+/**
+ * GET /api/dashboard/admin/attendance-trend
+ * Returns daily attendance percentages for the last N days.
+ */
+exports.getAttendanceTrend = async (req, res, next) => {
+  try {
+    const schoolId = req.user.school_id;
+    const days = parseInt(req.query.days) || 7;
+
+    const trend = await sequelize.query(`
+      SELECT 
+        TO_CHAR(d.date, 'DD Mon') AS label,
+        COALESCE((COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))::float / NULLIF(COUNT(e.id), 0)) * 100, 0) AS value
+      FROM (
+        SELECT GENERATE_SERIES(CURRENT_DATE - INTERVAL '1 day' * :days, CURRENT_DATE, '1 day')::date AS date
+      ) d
+      CROSS JOIN schools s
+      LEFT JOIN enrollments e ON e.status = 'active'
+      LEFT JOIN classes c ON c.id = e.class_id AND c.school_id = s.id
+      LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = d.date
+      WHERE s.id = :schoolId
+      GROUP BY d.date
+      ORDER BY d.date ASC;
+    `, { replacements: { schoolId, days: days - 1 }, type: sequelize.QueryTypes.SELECT });
+
+    res.ok(trend.map(t => ({ label: t.label, value: Number(Number(t.value).toFixed(1)) })));
   } catch (err) { next(err); }
 };

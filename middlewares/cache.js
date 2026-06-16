@@ -55,24 +55,27 @@ const invalidateCache = async (schoolId, pattern = '*') => {
   // Skip if Redis is not connected
   if (redis.status !== 'ready') return;
 
-  // Bug 10/11: Wipe all roles for the given school and pattern
-  const keyPattern = `cache:${schoolId}:*:${pattern}`;
+  // AI Insight Pattern Fix: Whenever dashboard is cleared, clear AI insights too
+  // This is because AI insights are used as part of the dashboard/analytics view.
+  const patterns = [pattern];
+  if (pattern === '/api/dashboard*') {
+    patterns.push('/api/ai-insights-module*');
+  }
   
   try {
-    // Bug 3 Fix: Use SCAN instead of KEYS to avoid blocking the event loop
-    let cursor = '0';
-    const keys = [];
-    
-    do {
-      const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', keyPattern, 'COUNT', 100);
-      cursor = nextCursor;
-      keys.push(...foundKeys);
-    } while (cursor !== '0');
-
-    if (keys.length > 0) {
-      await redis.del(...keys);
-      console.log(`[Cache] Invalidated ${keys.length} keys for school ${schoolId} matching ${pattern}`);
+    for (const p of patterns) {
+      const keyPattern = `cache:${schoolId}:*:${p}`;
+      let cursor = '0';
+      
+      do {
+        const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', keyPattern, 'COUNT', 100);
+        cursor = nextCursor;
+        if (foundKeys.length > 0) {
+          await redis.del(...foundKeys);
+        }
+      } while (cursor !== '0');
     }
+    console.log(`[Cache] Invalidated patterns ${patterns.join(', ')} for school ${schoolId}`);
   } catch (err) {
     console.error('[Cache] Invalidation error:', err.message);
   }
