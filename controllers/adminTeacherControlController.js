@@ -216,6 +216,8 @@ exports.assignments = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
     const session = await getCurrentSession(schoolId);
+    const teacherId = req.query.teacher_id || null;
+
     const [rows] = await sequelize.query(`
       SELECT
         ta.*,
@@ -232,9 +234,11 @@ exports.assignments = async (req, res, next) => {
       JOIN sections sec ON sec.id = ta.section_id
       JOIN sessions sess ON sess.id = ta.session_id
       LEFT JOIN subjects sub ON sub.id = ta.subject_id
-      WHERE ta.session_id = :sessionId AND u.school_id = :schoolId
+      WHERE ta.session_id = :sessionId 
+        AND u.school_id = :schoolId
+        AND (:teacherId::int IS NULL OR ta.teacher_id = :teacherId)
       ORDER BY ta.is_active DESC, u.first_name ASC, u.last_name ASC, c.name ASC, sec.name ASC, ta.is_class_teacher DESC;
-    `, { replacements: { sessionId: session?.id || 0, schoolId } });
+    `, { replacements: { sessionId: session?.id || 0, schoolId, teacherId } });
 
     // Check online status in Redis for each teacher using a pipeline
     let assignmentsWithOnlineStatus = rows.map(r => ({ ...r, is_online: false }));
@@ -520,7 +524,10 @@ exports.deleteAssignment = async (req, res, next) => {
 
 exports.timetable = async (req, res, next) => {
   try {
-    const session = await getCurrentSession(req.user.school_id);
+    const schoolId = req.user.school_id;
+    const session = await getCurrentSession(schoolId);
+    const teacherId = req.query.teacher_id || null;
+
     const [rows] = await sequelize.query(`
       SELECT
         ts.*,
@@ -541,9 +548,11 @@ exports.timetable = async (req, res, next) => {
        AND ta.teacher_id = ts.teacher_id
        AND ta.subject_id = ts.subject_id
        AND ta.is_active = true
-      WHERE ts.session_id = :sessionId
+      WHERE ts.session_id = :sessionId 
+        AND u.school_id = :schoolId
+        AND (:teacherId::int IS NULL OR ts.teacher_id = :teacherId)
       ORDER BY ts.day_of_week ASC, ts.period_number ASC, u.first_name ASC, u.last_name ASC;
-    `, { replacements: { sessionId: session?.id || 0 } });
+    `, { replacements: { sessionId: session?.id || 0, schoolId, teacherId } });
 
     res.ok({ session, timetable: rows }, `${rows.length} timetable slot(s) found.`);
   } catch (err) { next(err); }
@@ -933,11 +942,14 @@ exports.updateNotice = async (req, res, next) => {
   try {
     const { id } = req.params;
     const [[notice]] = await sequelize.query(`
-      SELECT id, is_active
-      FROM teacher_notices
-      WHERE id = :id
+      SELECT n.id, n.is_active
+      FROM teacher_notices n
+      LEFT JOIN teachers t ON t.id = n.teacher_id
+      LEFT JOIN users u ON u.id = n.created_by_user_id
+      WHERE n.id = :id
+        AND (t.school_id = :schoolId OR u.school_id = :schoolId)
       LIMIT 1;
-    `, { replacements: { id } });
+    `, { replacements: { id, schoolId: req.user.school_id } });
     if (!notice) return res.fail('Notice not found.', [], 404);
 
     const attachmentPath = req.file ? req.file.path.replace(/\\/g, '/') : undefined;
@@ -949,17 +961,17 @@ exports.updateNotice = async (req, res, next) => {
           category = COALESCE(:category, category),
           attachment_path = COALESCE(:attachmentPath, attachment_path),
           is_active = COALESCE(:isActive, is_active),
-          expiry_date = :expiryDate,
+          expiry_date = COALESCE(:expiryDate, expiry_date),
           updated_at = NOW()
       WHERE id = :id;
     `, {
       replacements: {
         id,
-        title: req.body.title,
-        content: req.body.content,
-        category: req.body.category,
-        attachmentPath: attachmentPath,
-        isActive: req.body.is_active,
+        title: req.body.title || null,
+        content: req.body.content || null,
+        category: req.body.category || null,
+        attachmentPath: attachmentPath || null,
+        isActive: req.body.is_active !== undefined ? req.body.is_active : null,
         expiryDate: req.body.expiry_date || null,
       },
     });
@@ -1527,13 +1539,24 @@ exports.updateMark = async (req, res, next) => {
     }
 
     await sequelize.query(`
-      UPDATE exam_results
+      UPDATE exam_results er
       SET marks_obtained = :marksObtained,
           is_absent = :isAbsent,
+          grade = CASE
+            WHEN :isAbsent THEN 'AB'
+            WHEN :marksObtained >= es.combined_passing_marks THEN 'P'
+            ELSE 'F'
+          END,
+          is_pass = CASE
+            WHEN :isAbsent THEN false
+            WHEN :marksObtained >= es.combined_passing_marks THEN true
+            ELSE false
+          END,
           override_reason = :reason,
           entered_by = :enteredBy,
           updated_at = NOW()
-      WHERE id = :id;
+      FROM exam_subjects es
+      WHERE er.id = :id AND es.exam_id = er.exam_id AND es.subject_id = er.subject_id;
     `, {
       replacements: {
         id,
@@ -1749,7 +1772,7 @@ exports.getLeaveBalances = async (req, res, next) => {
         ) FILTER (WHERE lb.id IS NOT NULL) AS balances
       FROM teachers t
       LEFT JOIN leave_balances lb ON lb.teacher_id = t.id
-      JOIN sessions s ON s.id = lb.session_id AND s.is_current = true
+      LEFT JOIN sessions s ON s.id = lb.session_id AND s.is_current = true
       WHERE t.school_id = :schoolId
         AND t.is_deleted = false
       GROUP BY t.id, t.first_name, t.last_name, t.employee_id

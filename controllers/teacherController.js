@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const sequelize = require('../config/database');
 const redis = require('../config/redis');
+const { notifyClass, notifyAllStudents, sendNotification, notifySubject } = require('../utils/notification');
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -480,7 +481,7 @@ async function enrichAssignment(assignment, session) {
   `, {
     replacements: {
       today: TODAY(),
-      weekStart: TODAY(),
+      weekStart: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
       sessionId: session?.id || 0,
       classId: assignment.class_id,
       sectionId: assignment.section_id,
@@ -631,75 +632,6 @@ async function ensureHomeworkPendingRows(homeworkId, homework) {
       sessionId: homework.session_id,
     },
   });
-}
-
-function validateNoticePayload(payload, { partial = false } = {}) {
-  const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other', 'fee']);
-  const allowedScopes = new Set(['my_class_only', 'specific_section', 'specific_student', 'all_students', 'specific_subject', 'whole_class', 'teachers', 'whole_school']);
-
-  if (!partial) {
-    requireFields(payload, ['title', 'content', 'target_scope']);
-  }
-
-  if (payload.category != null && !allowedCategories.has(payload.category)) {
-    const error = new Error('category is invalid.');
-    error.status = 422;
-    throw error;
-  }
-
-  if (payload.target_scope != null && !allowedScopes.has(payload.target_scope)) {
-    const error = new Error('Invalid target scope.');
-    error.status = 422;
-    throw error;
-  }
-
-  if (payload.expiry_date && payload.publish_date) {
-    const expiry = new Date(payload.expiry_date).toISOString().slice(0, 10);
-    const publish = new Date(payload.publish_date).toISOString().slice(0, 10);
-    if (expiry < publish) {
-      const error = new Error('expiry_date cannot be earlier than publish_date.');
-      error.status = 422;
-      throw error;
-    }
-  }
-}
-
-async function getAccessibleNoticeForTeacher(noticeId, req, scope) {
-  const classTeacherPairs = [...scope.classTeacherSections];
-
-  const tupleClause = classTeacherPairs.length
-    ? classTeacherPairs.map((_, index) => `(:noticeClassId${index}, :noticeSectionId${index})`).join(', ')
-    : '(NULL, NULL)';
-
-  const replacements = {
-    noticeId,
-    teacherId: req.user.id,
-    sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
-    ...Object.fromEntries(
-      classTeacherPairs.flatMap((key, index) => {
-        const [classId, sectionId] = key.split(':');
-        return [[`noticeClassId${index}`, Number(classId)], [`noticeSectionId${index}`, Number(sectionId)]];
-      })
-    ),
-  };
-
-  const [[notice]] = await sequelize.query(`
-    SELECT n.*
-    FROM teacher_notices n
-    WHERE n.id = :noticeId
-      AND n.is_active = true
-      AND (
-        n.teacher_id = :teacherId
-        OR n.target_scope = 'teachers'
-        OR n.target_scope = 'whole_school'
-        OR (n.target_scope = 'specific_teacher' AND n.target_teacher_id = :teacherId)
-        OR (n.target_scope IN ('my_class_only', 'whole_class') AND (n.class_id, n.section_id) IN (${tupleClause}))
-        OR (n.target_scope = 'specific_section' AND n.section_id IN (:sectionIds))
-      )
-    LIMIT 1;
-  `, { replacements });
-
-  return notice || null;
 }
 
 function eachDate(fromDate, toDate) {
@@ -3112,223 +3044,6 @@ exports.remindHomework = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-exports.noticeList = async (req, res, next) => {
-  try {
-    const { scope } = await getTeacherContext(req);
-    const category = req.query.category || null;
-    const mineOnly = String(req.query.mine || '').toLowerCase() === 'true';
-    const classTeacherPairs = [...scope.classTeacherSections];
-
-    const [rows] = await sequelize.query(`
-      SELECT
-        n.*,
-        COALESCE(NULLIF(TRIM(CONCAT(u.first_name, ' ', u.last_name)), ''), admin.name) AS teacher_name,
-        COALESCE(n.created_by_role, 'teacher') AS teacher_role,
-        c.name AS class_name,
-        sec.name AS section_name,
-        COUNT(nr.id) AS read_count,
-        MAX(CASE WHEN nr.user_id = :teacherId THEN 1 ELSE 0 END) = 1 AS is_read
-      FROM teacher_notices n
-      LEFT JOIN teachers u ON u.id = n.teacher_id
-      LEFT JOIN users admin ON admin.id = n.created_by_user_id
-      LEFT JOIN classes c ON c.id = n.class_id
-      LEFT JOIN sections sec ON sec.id = n.section_id
-      LEFT JOIN teacher_notice_reads nr ON nr.notice_id = n.id
-      WHERE n.is_active = true
-        AND (u.school_id = :schoolId OR admin.school_id = :schoolId)
-        AND (n.expiry_date IS NULL OR n.expiry_date >= NOW())
-        AND (:category::text IS NULL OR n.category = :category)
-        AND (:mineOnly = false OR n.teacher_id = :teacherId)
-        AND (
-          n.target_scope = 'teachers'
-          OR n.target_scope = 'whole_school'
-          OR (n.target_scope = 'specific_teacher' AND n.target_teacher_id = :teacherId)
-          OR (n.target_scope IN ('my_class_only', 'whole_class') AND (n.class_id, n.section_id) IN (${classTeacherPairs.map((_, i) => `(:classId${i}, :sectionId${i})`).join(', ') || '(NULL, NULL)'}))
-          OR (n.target_scope = 'specific_section' AND n.section_id IN (:sectionIds))
-          OR n.teacher_id = :teacherId
-        )      GROUP BY n.id, u.id, u.first_name, u.last_name, admin.id, admin.name, c.id, sec.id
-      ORDER BY n.publish_date DESC;
-    `, {
-      replacements: {
-        teacherId: req.user.id,
-        schoolId: req.user.school_id,
-        category,
-        mineOnly,
-        sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
-        ...Object.fromEntries(
-          classTeacherPairs.flatMap((key, index) => {
-            const [classId, sectionId] = key.split(':');
-            return [[`classId${index}`, Number(classId)], [`sectionId${index}`, Number(sectionId)]];
-          })
-        ),
-      },
-    });
-
-    res.ok({ notices: rows }, `${rows.length} notice(s) found.`);
-  } catch (err) { next(err); }
-};
-
-exports.createNotice = async (req, res, next) => {
-  try {
-    const {
-      title,
-      content: rawContent,
-      body: bodyAlias,
-      category = 'general',
-      target_scope: rawTargetScope,
-      audience: audienceAlias,
-      class_id = null,
-      section_id = null,
-      subject_id = null,
-      target_student_id = null,
-      attachment_path = null,
-      publish_date = new Date(),
-      expiry_date = null,
-    } = req.body;
-    const content = rawContent || bodyAlias;
-    let target_scope = rawTargetScope || audienceAlias;
-
-    // Map mobile audiences to backend scopes
-    if (target_scope === 'class') target_scope = 'whole_class';
-    if (target_scope === 'section') target_scope = 'specific_section';
-    if (target_scope === 'subject_wise') target_scope = 'specific_subject';
-    if (target_scope === 'students' || target_scope === 'student') target_scope = 'specific_student';
-
-    validateNoticePayload({ ...req.body, content, target_scope, category, publish_date, expiry_date });
-
-    const { scope } = await getTeacherContext(req);
-    if (target_scope === 'my_class_only' || target_scope === 'whole_class') {
-      requireFields({ class_id, section_id }, ['class_id', 'section_id']);
-      if (!scope.classTeacherSections.has(`${class_id}:${section_id}`)) {
-        return res.fail('You can only post to your own class teacher section.', [], 403);
-      }
-    }
-    if (target_scope === 'specific_section') {
-      requireFields({ class_id, section_id }, ['class_id', 'section_id']);
-      assertAccess(scope, Number(class_id), Number(section_id));
-    }
-    if (target_scope === 'specific_subject') {
-      requireFields({ class_id, section_id, subject_id }, ['class_id', 'section_id', 'subject_id']);
-      const isAssigned = scope.assignments.some(a => 
-        Number(a.class_id) === Number(class_id) && 
-        Number(a.section_id) === Number(section_id) && 
-        Number(a.subject_id) === Number(subject_id)
-      );
-      if (!isAssigned) {
-        return res.fail('You can only post to subjects you are assigned to.', [], 403);
-      }
-    }
-    if (target_scope === 'specific_student') {
-      requireFields({ target_student_id }, ['target_student_id']);
-      await getAccessibleStudent(scope, req.user.school_id, Number(target_student_id));
-    }
-
-    const [[notice]] = await sequelize.query(`
-      INSERT INTO teacher_notices (
-        teacher_id, created_by_role, class_id, section_id, subject_id, target_student_id, title, content, category, target_scope,
-        attachment_path, publish_date, expiry_date, is_active, created_at, updated_at
-      )
-      VALUES (
-        :teacherId, 'teacher', :classId, :sectionId, :subjectId, :targetStudentId, :title, :content, :category, :targetScope,
-        :attachmentPath, :publishDate, :expiryDate, true, NOW(), NOW()
-      )
-      RETURNING *;
-    `, {
-      replacements: {
-        teacherId: req.user.id,
-        classId: class_id,
-        sectionId: section_id,
-        subjectId: subject_id,
-        targetStudentId: target_student_id,
-        title,
-        content,
-        category,
-        targetScope: target_scope,
-        attachmentPath: attachment_path,
-        publishDate: publish_date,
-        expiryDate: expiry_date,
-      },
-    });
-
-    const { notifyClass, notifyAllStudents, sendNotification, notifySubject } = require('../utils/notification');
-
-    if (target_scope === 'my_class_only' || target_scope === 'specific_section' || target_scope === 'whole_class') {
-      await notifyClass(class_id, section_id, title, content, 'notice', { notice_id: notice.id });
-    } else if (target_scope === 'specific_subject') {
-      await notifySubject(subject_id, title, content, 'notice', { notice_id: notice.id });
-    } else if (target_scope === 'specific_student') {
-      await sendNotification({ studentId: target_student_id, title, content, type: 'notice', data: { notice_id: notice.id } });
-    } else if (target_scope === 'all_students') {
-       await notifyAllStudents(req.user.school_id, title, content, 'notice', { notice_id: notice.id });
-    }
-
-    await audit('teacher_notices', notice.id, {
-      field: 'created',
-      oldValue: null,
-      newValue: title,
-      reason: 'Teacher notice posted',
-    }, req);
-
-    res.ok({ notice }, 'Notice posted successfully.', 201);
-  } catch (err) { next(err); }
-};
-
-exports.updateNotice = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const [[notice]] = await sequelize.query(`
-      SELECT id, teacher_id, created_at, title, publish_date, expiry_date
-      FROM teacher_notices
-      WHERE id = :id AND is_active = true;
-    `, { replacements: { id } });
-
-    if (!notice) return res.fail('Notice not found.', [], 404);
-    if (Number(notice.teacher_id) !== Number(req.user.id)) return res.fail('You can only edit your own notices.', [], 403);
-    if ((Date.now() - new Date(notice.created_at).getTime()) > 24 * 60 * 60 * 1000) {
-      return res.fail('Notices can only be edited within 24 hours.', [], 403);
-    }
-
-    const updates = ['title', 'content', 'category', 'attachment_path', 'expiry_date']
-      .filter((key) => req.body[key] !== undefined);
-    if (updates.length === 0) return res.fail('No valid fields to update.', [], 422);
-    validateNoticePayload({ ...req.body, publish_date: notice.publish_date }, { partial: true });
-
-    const setClause = updates.map((key) => `${key} = :${key}`).join(', ');
-    await sequelize.query(`
-      UPDATE teacher_notices
-      SET ${setClause}, updated_at = NOW()
-      WHERE id = :id;
-    `, { replacements: { ...req.body, id } });
-
-    await audit('teacher_notices', Number(id), {
-      field: 'updated',
-      oldValue: notice.title,
-      newValue: req.body.title || notice.title,
-      reason: 'Teacher notice updated',
-    }, req);
-
-    res.ok({ id: Number(id) }, 'Notice updated successfully.');
-  } catch (err) { next(err); }
-};
-
-exports.readNotice = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { scope } = await getTeacherContext(req);
-    const notice = await getAccessibleNoticeForTeacher(id, req, scope);
-    if (!notice) return res.fail('Notice not found.', [], 404);
-
-    await sequelize.query(`
-      INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
-      VALUES (:noticeId, :userId, NOW())
-      ON CONFLICT (notice_id, user_id)
-      DO UPDATE SET read_at = NOW();
-    `, { replacements: { noticeId: id, userId: req.user.id } });
-
-    res.ok({ notice_id: Number(id) }, 'Notice marked as read.');
-  } catch (err) { next(err); }
-};
-
 exports.leaveBalance = async (req, res, next) => {
   try {
     const { session } = await getTeacherContext(req);
@@ -3562,18 +3277,46 @@ exports.profile = async (req, res, next) => {
     let attendanceRate = { marked: 0, total: 0, on_time_rate: 0 };
     if (scope.sectionIds.length > 0) {
       const [[attendanceSummary]] = await sequelize.query(`
-        SELECT
-          COUNT(DISTINCT (a.date, e.section_id)) AS marked
-        FROM attendance a
-        JOIN enrollments e ON e.id = a.enrollment_id
-        WHERE a.marked_by = :teacherId
-          AND e.session_id = :sessionId;
+        WITH RECURSIVE days AS (
+          SELECT start_date AS d FROM sessions WHERE id = :sessionId
+          UNION ALL
+          SELECT d + 1 FROM days WHERE d < GREATEST((SELECT start_date FROM sessions WHERE id = :sessionId), LEAST(CURRENT_DATE, (SELECT end_date FROM sessions WHERE id = :sessionId)))
+        ),
+        elapsed_working_days AS (
+          SELECT COUNT(*) as count
+          FROM days d
+          LEFT JOIN session_working_days swd ON swd.session_id = :sessionId
+          WHERE NOT EXISTS (SELECT 1 FROM session_holidays WHERE session_id = :sessionId AND holiday_date = d.d)
+            AND CASE
+              WHEN EXTRACT(DOW FROM d.d) = 0 THEN swd.sunday
+              WHEN EXTRACT(DOW FROM d.d) = 1 THEN swd.monday
+              WHEN EXTRACT(DOW FROM d.d) = 2 THEN swd.tuesday
+              WHEN EXTRACT(DOW FROM d.d) = 3 THEN swd.wednesday
+              WHEN EXTRACT(DOW FROM d.d) = 4 THEN swd.thursday
+              WHEN EXTRACT(DOW FROM d.d) = 5 THEN swd.friday
+              WHEN EXTRACT(DOW FROM d.d) = 6 THEN swd.saturday
+            END = true
+        ),
+        marked_count AS (
+          SELECT COUNT(DISTINCT (a.date, e.section_id)) AS marked
+          FROM attendance a
+          JOIN enrollments e ON e.id = a.enrollment_id
+          WHERE a.marked_by = :teacherId
+            AND e.session_id = :sessionId
+        )
+        SELECT 
+          m.marked,
+          (SELECT COUNT(DISTINCT section_id) FROM teacher_assignments WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true) * ewd.count AS total
+        FROM marked_count m, elapsed_working_days ewd;
       `, { replacements: { teacherId: req.user.id, sessionId: session?.id || 0 } });
 
+      const marked = Number(attendanceSummary?.marked || 0);
+      const total = Number(attendanceSummary?.total || 0);
+
       attendanceRate = {
-        marked: Number(attendanceSummary?.marked || 0),
-        total: Number(attendanceSummary?.marked || 0),
-        on_time_rate: attendanceSummary?.marked ? 100 : 0,
+        marked,
+        total,
+        on_time_rate: total > 0 ? Math.round((marked / total) * 100) : (marked > 0 ? 100 : 0),
       };
     }
 
@@ -3779,7 +3522,15 @@ exports.createStudyMaterial = async (req, res, next) => {
     }
 
     const { session, scope } = await getTeacherContext(req);
-    assertAccess(scope, Number(class_id), null, Number(subject_id));
+    const isAssigned = scope.assignments.some(a =>
+      Number(a.class_id) === Number(class_id) &&
+      Number(a.subject_id) === Number(subject_id)
+    );
+    if (!isAssigned) {
+      const err = new Error('You are not assigned to this class and subject.');
+      err.status = 403;
+      throw err;
+    }
 
     const filePath = req.file.path.replace(/\\/g, '/');
     const fileType = req.file.mimetype;
@@ -3838,7 +3589,6 @@ exports.deleteStudyMaterial = async (req, res, next) => {
 
     // Optionally delete file from disk
     const fullPath = path.join(__dirname, '..', material.file_path);
-    const fs = require('fs');
     if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
 
     await audit('study_materials', Number(id), {
