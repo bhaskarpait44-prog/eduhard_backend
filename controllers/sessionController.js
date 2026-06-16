@@ -242,10 +242,11 @@ exports.activate = async (req, res, next) => {
           (table_name, record_id, field_name, old_value, new_value,
            changed_by, reason, ip_address, device_info, created_at)
         VALUES
-          ('sessions', :id, 'status', 'upcoming', 'active',
+          ('sessions', :id, 'status', :oldStatus, 'active',
            :userId, :reason, :ip, :device, NOW());
       `, { replacements: {
         id,
+        oldStatus: target.status,
         userId: req.user.id,
         reason: `Session "${target.name}" activated by admin`,
         ip: req.ip || null,
@@ -739,13 +740,13 @@ exports.removeHoliday = async (req, res, next) => {
           (table_name, record_id, field_name, old_value, new_value,
            changed_by, reason, ip_address, device_info, created_at)
         VALUES
-          ('sessions', :id, 'holiday_removed', :date, 'removed',
+          ('session_holidays', :holidayId, 'holiday_removed', :date, 'removed',
            :userId, :reason, :ip, :device, NOW());
       `, { replacements: { 
-        id, 
+        holidayId, 
         date: holiday.holiday_date, 
         userId: req.user.id,
-        reason: `Holiday removed by admin`, // Fixing reason as well if needed, user said "reason: :reason"
+        reason: `Holiday removed by admin`,
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
