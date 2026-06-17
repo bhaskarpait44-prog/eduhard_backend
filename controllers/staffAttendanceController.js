@@ -65,46 +65,33 @@ exports.markBulk = async (req, res, next) => {
     const updated = [];
 
     for (const rec of records) {
-      const idColumn = rec.type === 'teacher' ? 'teacher_id' : 'user_id';
+      const idField = rec.type === 'teacher' ? 'teacher_id' : 'user_id';
       
-      const [[existing]] = await sequelize.query(`
-        SELECT id FROM staff_attendance 
-        WHERE ${idColumn} = :staffId AND date = :date AND school_id = :schoolId;
-      `, { replacements: { staffId: rec.staff_id, date, schoolId }, transaction });
+      const existing = await StaffAttendance.findOne({
+        where: {
+          [idField]: rec.staff_id,
+          date,
+          school_id: schoolId
+        },
+        transaction
+      });
 
       if (existing) {
-        await sequelize.query(`
-          UPDATE staff_attendance
-          SET status = :status,
-              remarks = :remarks,
-              created_by = :markerId,
-              updated_at = NOW()
-          WHERE id = :id;
-        `, {
-          replacements: {
-            id: existing.id,
-            status: rec.status,
-            remarks: rec.remarks || null,
-            markerId
-          },
-          transaction
-        });
+        await existing.update({
+          status: rec.status,
+          remarks: rec.remarks || null,
+          created_by: markerId
+        }, { transaction });
         updated.push(rec.staff_id);
       } else {
-        await sequelize.query(`
-          INSERT INTO staff_attendance (school_id, ${idColumn}, date, status, remarks, created_by, created_at, updated_at)
-          VALUES (:schoolId, :staffId, :date, :status, :remarks, :markerId, NOW(), NOW());
-        `, {
-          replacements: {
-            schoolId,
-            staffId: rec.staff_id,
-            date,
-            status: rec.status,
-            remarks: rec.remarks || null,
-            markerId
-          },
-          transaction
-        });
+        await StaffAttendance.create({
+          school_id: schoolId,
+          [idField]: rec.staff_id,
+          date,
+          status: rec.status,
+          remarks: rec.remarks || null,
+          created_by: markerId
+        }, { transaction });
         inserted.push(rec.staff_id);
       }
     }

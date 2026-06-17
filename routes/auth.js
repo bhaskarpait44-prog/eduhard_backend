@@ -137,8 +137,7 @@ router.post('/reset-password',
           UPDATE student_profiles
           SET parent_password_hash = :hash,
               parent_reset_password_token = NULL,
-              parent_reset_password_expires = NULL,
-              parent_last_login_at = NULL
+              parent_reset_password_expires = NULL
           WHERE id = :id;
         `, { replacements: { hash, id: user.id } });
       } else {
@@ -501,6 +500,16 @@ router.post('/refresh', async (req, res) => {
     }
 
     const decoded = jwt.verify(refresh_token, JWT_SECRET);
+
+    // Security: Blacklist the old refresh token after rotation
+    if (REDIS_ENABLED && redis.status === 'ready' && decoded.exp) {
+      const ttl = decoded.exp - Math.floor(Date.now() / 1000);
+      if (ttl > 0) {
+        // Reuse tokenHash computed above
+        await redis.setex(`blacklist:${tokenHash}`, ttl, '1');
+      }
+    }
+
     const payload = {
       userId: decoded.userId,
       schoolId: decoded.schoolId,

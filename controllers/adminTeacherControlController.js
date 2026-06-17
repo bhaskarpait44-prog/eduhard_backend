@@ -185,7 +185,10 @@ exports.teachers = async (req, res, next) => {
         phone,
         employee_id,
         department,
-        designation
+        designation,
+        joining_date,
+        years_of_experience,
+        gender
       FROM teachers
       WHERE school_id = :schoolId
         AND is_active = true
@@ -990,7 +993,8 @@ exports.updateNotice = async (req, res, next) => {
 
 exports.leaves = async (req, res, next) => {
   try {
-    const [rows] = await sequelize.query(`
+      const teacherId = req.query.teacher_id || null;
+      const [rows] = await sequelize.query(`
       SELECT
         tl.*,
         CONCAT(u.first_name, ' ', u.last_name) AS teacher_name,
@@ -1000,10 +1004,12 @@ exports.leaves = async (req, res, next) => {
       LEFT JOIN users reviewer ON reviewer.id = tl.reviewed_by
       WHERE u.school_id = :schoolId
         AND u.is_deleted = false
+        AND (:teacherId::int IS NULL OR tl.teacher_id = :teacherId)
       ORDER BY CASE WHEN tl.status = 'pending' THEN 0 ELSE 1 END, tl.created_at DESC;
     `, {
       replacements: {
         schoolId: req.user.school_id,
+        teacherId,
       },
     });
 

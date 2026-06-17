@@ -29,7 +29,25 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ 
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB Limit per file
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB Limit per file
+  fileFilter: (req, file, cb) => {
+    const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    const allowedDocTypes = [...allowedImageTypes, 'application/pdf'];
+    
+    if (file.fieldname === 'photo') {
+      if (allowedImageTypes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Invalid photo type. Only JPEG, PNG and WebP are allowed.'), false);
+      }
+    } else {
+      if (allowedDocTypes.includes(file.mimetype)) {
+        cb(null, true);
+      } else {
+        cb(new Error('Invalid document type. Only PDF and images are allowed.'), false);
+      }
+    }
+  }
 });
 
 // ── Bulk Import ──────────────────────────────────────────────────────────
