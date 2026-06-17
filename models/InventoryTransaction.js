@@ -9,6 +9,7 @@ const InventoryTransaction = sequelize.define('InventoryTransaction', {
   quantity: { type: DataTypes.DECIMAL(10, 2), allowNull: false },
   date: { type: DataTypes.DATEONLY, allowNull: false },
   remarks: { type: DataTypes.TEXT, allowNull: true },
+  vendor: { type: DataTypes.STRING(200), allowNull: true },
   performed_by: { type: DataTypes.INTEGER, allowNull: true },
 }, { tableName: 'inventory_transactions', underscored: true });
 

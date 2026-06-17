@@ -1085,6 +1085,26 @@ exports.updateIdentity = async (req, res, next) => {
     const { id } = req.params;
     const { admission_no, first_name, last_name, date_of_birth, gender, aadhar_no, reason } = req.body;
 
+    // ── Validation Guards ─────────────────────────────────────────────
+    if (first_name !== undefined && (!first_name?.trim() || first_name.trim().length < 2))
+      return res.fail('First name must be at least 2 characters.', [], 422);
+    if (last_name !== undefined && !last_name?.trim())
+      return res.fail('Last name is required.', [], 422);
+    if (date_of_birth !== undefined && (!date_of_birth || new Date(date_of_birth) >= new Date()))
+      return res.fail('Date of birth must be in the past.', [], 422);
+    if (gender !== undefined && !['male', 'female', 'other'].includes(gender))
+      return res.fail('Gender must be male, female, or other.', [], 422);
+    
+    if (admission_no !== undefined) {
+      if (!admission_no?.trim()) return res.fail('Admission number is required.', [], 422);
+      if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
+        return res.fail('Admission number contains invalid characters.', [], 422);
+    }
+
+    if (aadhar_no && aadhar_no.trim() !== '' && !/^\d{12}$/.test(aadhar_no))
+      return res.fail('Aadhaar number must be exactly 12 digits.', [], 422);
+    // ──────────────────────────────────────────────────────────────────
+
     const [[student]] = await sequelize.query(`
       SELECT id, admission_no, first_name, last_name, date_of_birth, gender, aadhar_no
       FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
@@ -1157,6 +1177,12 @@ exports.updateProfile = async (req, res, next) => {
       ...newData 
     } = req.body;
 
+    if (admission_no !== undefined) {
+      if (!admission_no?.trim()) return res.fail('Admission number is required.', [], 422);
+      if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
+        return res.fail('Admission number contains invalid characters.', [], 422);
+    }
+
     if (!change_reason?.trim() || change_reason.trim().length < 5)
       return res.fail('A reason for the update is required (minimum 5 characters).', [], 422);
 
@@ -1167,6 +1193,11 @@ exports.updateProfile = async (req, res, next) => {
       return res.fail('Date of birth must be in the past.', [], 422);
     if (gender !== undefined && !['male', 'female', 'other'].includes(gender))
       return res.fail('Gender must be male, female, or other.', [], 422);
+    if (admission_no !== undefined) {
+      if (!admission_no?.trim()) return res.fail('Admission number is required.', [], 422);
+      if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
+        return res.fail('Admission number contains invalid characters.', [], 422);
+    }
     if (aadhar_no && aadhar_no.trim() !== '' && !/^\d{12}$/.test(aadhar_no))
       return res.fail('Aadhaar must be exactly 12 digits.', [], 422);
     // ──────────────────────────────────────────────────────────────────

@@ -114,6 +114,19 @@ exports.enroll = async (req, res, next) => {
       return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
     }
 
+    // Check if student is already enrolled in this session
+    const [[existingEnrollment]] = await sequelize.query(`
+      SELECT id FROM enrollments 
+      WHERE student_id = :student_id 
+        AND session_id = :session_id 
+        AND status = 'active'
+      LIMIT 1;
+    `, { replacements: { student_id, session_id } });
+
+    if (existingEnrollment) {
+      return res.fail('Student is already enrolled in an active class for this session.', [], 409);
+    }
+
     // Check section capacity
     const [[capacityCheck]] = await sequelize.query(`
       SELECT sec.capacity,

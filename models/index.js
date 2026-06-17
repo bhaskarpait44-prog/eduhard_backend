@@ -187,6 +187,12 @@ AlumniProfile.belongsTo(Student, { foreignKey: 'student_id', as: 'student' });
 AlumniProfile.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 AlumniEvent.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 
+// Inventory
+InventoryItem.hasMany(InventoryTransaction, { foreignKey: 'item_id', as: 'transactions' });
+InventoryTransaction.belongsTo(InventoryItem, { foreignKey: 'item_id', as: 'item' });
+InventoryItem.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+School.hasMany(InventoryItem, { foreignKey: 'school_id', as: 'inventory_items' });
+
 const db = {
   sequelize,
   AcademicEvent,

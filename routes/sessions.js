@@ -3,7 +3,8 @@
 const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
-const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
+const { requireAdmin, requireRole } = require('../middlewares/auth');
+const requireAdminOrTeacherOrAccountant = requireRole('admin', 'teacher', 'accountant');
 const ctrl     = require('../controllers/sessionController');
 
 router.post('/',                requireAdmin, [
@@ -13,9 +14,9 @@ router.post('/',                requireAdmin, [
   body('working_days').isObject().withMessage('working_days object required'),
 ], validate, ctrl.create);
 
-router.get('/',                            requireAdminOrTeacher, ctrl.list);
-router.get('/current',                     requireAdminOrTeacher, ctrl.getCurrent);
-router.get('/:id',               requireAdminOrTeacher, [param('id').isInt()], validate, ctrl.getById);
+router.get('/',                            requireAdminOrTeacherOrAccountant, ctrl.list);
+router.get('/current',                     requireAdminOrTeacherOrAccountant, ctrl.getCurrent);
+router.get('/:id',               requireAdminOrTeacherOrAccountant, [param('id').isInt()], validate, ctrl.getById);
 
 router.patch('/:id', requireAdmin, [
   param('id').isInt(),
@@ -51,7 +52,7 @@ router.patch('/:id/working-days', requireAdmin, [
   body('working_days').isObject().withMessage('working_days object required'),
 ], validate, ctrl.updateWorkingDays);
 
-router.get('/:id/holidays',      requireAdminOrTeacher, [param('id').isInt()], validate, ctrl.getHolidays);
+router.get('/:id/holidays',      requireAdminOrTeacherOrAccountant, [param('id').isInt()], validate, ctrl.getHolidays);
 
 router.post('/:id/holidays',  requireAdmin, [
   param('id').isInt(),

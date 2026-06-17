@@ -10,6 +10,9 @@ const InventoryItem = sequelize.define('InventoryItem', {
   unit: { type: DataTypes.STRING(50), allowNull: false },
   quantity: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
   reorder_level: { type: DataTypes.DECIMAL(10, 2), allowNull: false, defaultValue: 0 },
+  description: { type: DataTypes.TEXT, allowNull: true },
+  location: { type: DataTypes.STRING(150), allowNull: true },
+  unit_price: { type: DataTypes.DECIMAL(10, 2), allowNull: true },
 }, { tableName: 'inventory_items', underscored: true });
 
 module.exports = InventoryItem;
