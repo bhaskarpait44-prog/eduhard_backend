@@ -82,6 +82,8 @@ exports.updateItem = async (req, res, next) => {
     if (!unit?.trim())     return res.fail('Unit is required.', [], 422);
     const rl = parseFloat(reorder_level);
     if (isNaN(rl) || rl < 0) return res.fail('Reorder level must be zero or a positive number.', [], 422);
+    if (unit_price !== undefined && unit_price !== '' && (isNaN(parseFloat(unit_price)) || parseFloat(unit_price) < 0))
+      return res.fail('Unit price must be a positive number.', [], 422);
 
     // Duplicate name check (exclude self)
     const [[dup]] = await sequelize.query(
@@ -150,8 +152,9 @@ exports.getTransactions = async (req, res, next) => {
     if (date_from){ conditions.push('t.date >= :date_from');        replacements.date_from = date_from; }
     if (date_to)  { conditions.push('t.date <= :date_to');          replacements.date_to   = date_to; }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
     const WHERE = 'WHERE ' + conditions.join(' AND ');
+    const l = parseInt(limit) || 50;
+    const o = (parseInt(page) - 1) * l;
 
     const [[{ total }]] = await sequelize.query(
       `SELECT COUNT(*) AS total FROM inventory_transactions t
@@ -163,14 +166,19 @@ exports.getTransactions = async (req, res, next) => {
       SELECT t.*, i.name AS item_name, i.unit, i.category,
              u.name AS performed_by_name
       FROM inventory_transactions t
-      JOIN inventory_items i ON i.id = t.item_id
+      LEFT JOIN inventory_items i ON i.id = t.item_id
       LEFT JOIN users u ON u.id = t.performed_by
       ${WHERE}
       ORDER BY t.date DESC, t.id DESC
-      LIMIT :limit OFFSET :offset
-    `, { replacements: { ...replacements, limit: parseInt(limit), offset } });
+      LIMIT ${l} OFFSET ${o}
+    `, { replacements });
 
-    res.ok({ transactions, total: parseInt(total), page: parseInt(page), limit: parseInt(limit) });
+    res.ok({ 
+      transactions, 
+      total: parseInt(total || 0), 
+      page: parseInt(page), 
+      limit: l 
+    });
   } catch (err) { next(err); }
 };
 
@@ -235,12 +243,11 @@ exports.getItemCatalogData = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
     const [items] = await sequelize.query(
-      `SELECT *, (quantity <= reorder_level AND reorder_level > 0) AS is_low_stock
-       FROM inventory_items WHERE school_id = :schoolId ORDER BY category ASC, name ASC`,
+      `SELECT * FROM inventory_items WHERE school_id = :schoolId ORDER BY category ASC, name ASC`,
       { replacements: { schoolId } }
     );
     const [[school]] = await sequelize.query(
-      `SELECT name, address, phone, email, logo_url FROM schools WHERE id = :schoolId`,
+      `SELECT name, address, phone, email FROM schools WHERE id = :schoolId`,
       { replacements: { schoolId } }
     );
     res.ok({ school, items, generated_by: req.user.name, generated_at: new Date().toISOString() });
@@ -267,7 +274,7 @@ exports.getStockInData = async (req, res, next) => {
     `, { replacements });
 
     const [[school]] = await sequelize.query(
-      `SELECT name, address, phone, email, logo_url FROM schools WHERE id = :schoolId`,
+      `SELECT name, address, phone, email FROM schools WHERE id = :schoolId`,
       { replacements: { schoolId } }
     );
 
@@ -299,7 +306,7 @@ exports.getStockOutData = async (req, res, next) => {
     `, { replacements });
 
     const [[school]] = await sequelize.query(
-      `SELECT name, address, phone, email, logo_url FROM schools WHERE id = :schoolId`,
+      `SELECT name, address, phone, email FROM schools WHERE id = :schoolId`,
       { replacements: { schoolId } }
     );
 
@@ -329,7 +336,7 @@ exports.getLowStockData = async (req, res, next) => {
       { replacements: { schoolId } }
     );
     const [[school]] = await sequelize.query(
-      `SELECT name, address, phone, email, logo_url FROM schools WHERE id = :schoolId`,
+      `SELECT name, address, phone, email FROM schools WHERE id = :schoolId`,
       { replacements: { schoolId } }
     );
     res.ok({ school, items, generated_by: req.user.name, generated_at: new Date().toISOString() });
