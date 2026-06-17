@@ -156,6 +156,40 @@ exports.createNotice = async (req, res, next) => {
        role = 'admin'; // Fallback to admin for system-posted notices if needed
     }
 
+    // Scope guard: teachers can only target classes/sections they are assigned to
+    if (req.user.role === 'teacher') {
+      const resolvedClassId  = parseInt(target_class_id)  || null;
+      const resolvedSectionId = parseInt(target_section_id) || null;
+      const resolvedSubjectId = parseInt(target_subject_id) || null;
+
+      if (!isSchoolWide && (resolvedClassId || resolvedSectionId || resolvedSubjectId)) {
+        const [[assignment]] = await sequelize.query(`
+          SELECT ta.id
+          FROM teacher_assignments ta
+          JOIN teachers t ON t.id = ta.teacher_id
+          WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+            AND ta.is_active = true
+            AND (:classId::int   IS NULL OR ta.class_id   = :classId)
+            AND (:sectionId::int IS NULL OR ta.section_id = :sectionId)
+            AND (:subjectId::int IS NULL OR ta.subject_id = :subjectId)
+          LIMIT 1;
+        `, { replacements: {
+          userId,
+          classId:   resolvedClassId,
+          sectionId: resolvedSectionId,
+          subjectId: resolvedSubjectId,
+        }});
+
+        if (!assignment) {
+          return res.fail(
+            'You are not assigned to the targeted class, section, or subject.',
+            [],
+            403
+          );
+        }
+      }
+    }
+
     const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
     const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || 
                        ['school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone'].includes(audience);
@@ -414,7 +448,28 @@ exports.listTeacherNotices = async (req, res, next) => {
         OR LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR LOWER(n.audience::text) = 'teachers'
         OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id = :userId)
-        OR (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')      ORDER BY n.created_at DESC
+        OR (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')
+        OR (
+          LOWER(n.audience::text) = 'class'
+          AND n.target_class_id IN (
+            SELECT ta.class_id
+            FROM teacher_assignments ta
+            JOIN teachers t ON t.id = ta.teacher_id
+            WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+              AND ta.is_active = true
+          )
+        )
+        OR (
+          LOWER(n.audience::text) IN ('section', 'subject_wise')
+          AND n.target_section_id IN (
+            SELECT ta.section_id
+            FROM teacher_assignments ta
+            JOIN teachers t ON t.id = ta.teacher_id
+            WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+              AND ta.is_active = true
+          )
+        )
+      ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId } });
 
     res.ok({ notices });

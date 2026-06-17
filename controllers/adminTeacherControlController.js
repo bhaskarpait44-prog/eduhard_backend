@@ -961,7 +961,7 @@ exports.updateNotice = async (req, res, next) => {
           category = COALESCE(:category, category),
           attachment_path = COALESCE(:attachmentPath, attachment_path),
           is_active = COALESCE(:isActive, is_active),
-          expiry_date = COALESCE(:expiryDate, expiry_date),
+          expiry_date = CASE WHEN :expiryDateChanged THEN :expiryDate ELSE expiry_date END,
           updated_at = NOW()
       WHERE id = :id;
     `, {
@@ -972,7 +972,8 @@ exports.updateNotice = async (req, res, next) => {
         category: req.body.category || null,
         attachmentPath: attachmentPath || null,
         isActive: req.body.is_active !== undefined ? req.body.is_active : null,
-        expiryDate: req.body.expiry_date || null,
+        expiryDate: req.body.hasOwnProperty('expiry_date') ? (req.body.expiry_date || null) : null,
+        expiryDateChanged: req.body.hasOwnProperty('expiry_date'),
       },
     });
 
