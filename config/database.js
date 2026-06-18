@@ -28,11 +28,15 @@ const dialect = process.env.DB_DIALECT || 'postgres';
 const useSsl =
   process.env.DB_SSL === 'true' ||
   (hasDatabaseUrl && process.env.DB_SSL !== 'false');
+
 const dialectOptions = useSsl
   ? {
       ssl: {
         require: true,
-        rejectUnauthorized: false,
+        // Default to true (secure) unless explicitly set to 'false'
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+        // Optional: provide a custom CA certificate via env var
+        ca: process.env.DB_SSL_CA ? [process.env.DB_SSL_CA] : undefined,
       },
     }
   : {};

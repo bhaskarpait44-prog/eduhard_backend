@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { escapeHtml } = require('../utils/helpers');
 const { generatePayslipHtml } = require('../utils/payslipTemplate');
 const { renderPdf } = require('../utils/puppeteerPdf');
 const { sendEmail } = require('../utils/mailer');
@@ -275,14 +276,16 @@ exports.markPaid = async (req, res, next) => {
           console.log(`[Payroll] PDF generated successfully. Size: ${pdfBuffer.length} bytes`);
 
           console.log(`[Payroll] Sending email to ${staff.email}...`);
+          const safeStaffName = escapeHtml(staff.name);
+          const safeSchoolName = escapeHtml(staff.school_name);
           await sendEmail({
             to: staff.email,
             subject: `Salary Slip - ${monthName} ${staff.year} | ${staff.school_name}`,
             text: `Dear ${staff.name},\n\nYour salary for ${monthName} ${staff.year} has been processed.\n\nPlease find your salary slip attached.\n\nBest Regards,\nAccounts Department\n${staff.school_name}`,
-            html: `<p>Dear <b>${staff.name}</b>,</p><p>Your salary for <b>${monthName} ${staff.year}</b> has been processed.</p><p>Please find your salary slip attached.</p><br/><p>Best Regards,<br/>Accounts Department<br/>${staff.school_name}</p>`,
+            html: `<p>Dear <b>${safeStaffName}</b>,</p><p>Your salary for <b>${monthName} ${staff.year}</b> has been processed.</p><p>Please find your salary slip attached.</p><br/><p>Best Regards,<br/>Accounts Department<br/>${safeSchoolName}</p>`,
             attachments: [
               {
-                filename: `Salary_Slip_${staff.name.replace(/ /g, '_')}_${monthName}_${staff.year}.pdf`,
+                filename: `Salary_Slip_${staff.name.replace(/[^a-z0-9]/gi, '_')}_${monthName}_${staff.year}.pdf`,
                 content: pdfBuffer,
               }
             ]

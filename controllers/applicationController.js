@@ -4,6 +4,7 @@ const sequelize = require('../config/database');
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
+const { escapeHtml } = require('../utils/helpers');
 const profileVersioning = require('../utils/profileVersioning');
 const { generateStudentPassword } = require('../utils/studentCredentials');
 const { invalidateCache } = require('../middlewares/cache');
@@ -194,13 +195,15 @@ exports.updateStatus = async (req, res, next) => {
       const email = application.student_data.email || application.student_data.father_email;
       if (email) {
         try {
+          const safeFirstName = escapeHtml(application.student_data.first_name);
+          const safeLastName = escapeHtml(application.student_data.last_name);
           await require('../utils/emailService').sendEmail({
             to: email,
             subject: 'Admission Application Approved',
             html: `
               <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
                 <h2 style="color: #2e7d32;">Application Approved!</h2>
-                <p>Congratulations <strong>${application.student_data.first_name} ${application.student_data.last_name}</strong>,</p>
+                <p>Congratulations <strong>${safeFirstName} ${safeLastName}</strong>,</p>
                 <p>Your admission application (Ref: ${application.reference_no}) has been approved.</p>
                 <p>Please visit the school office to complete the admission process.</p>
                 <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
@@ -230,6 +233,9 @@ exports.updateStatus = async (req, res, next) => {
       const parentEmail = (application.student_data.father_email || application.student_data.email);
       if (parentEmail) {
         try {
+          const safeFirstName = escapeHtml(application.student_data.first_name);
+          const safeLastName = escapeHtml(application.student_data.last_name);
+          const safeRemarks = escapeHtml(remarks || 'Criteria not met');
           await require('../utils/emailService').sendEmail({
             to: parentEmail,
             subject: `Admission Application Update - Ref: ${application.reference_no}`,
@@ -237,8 +243,8 @@ exports.updateStatus = async (req, res, next) => {
               <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
                 <h2 style="color: #d32f2f;">Application Status: Rejected</h2>
                 <p>Dear Parent/Guardian,</p>
-                <p>We regret to inform you that the admission application for <strong>${application.student_data.first_name} ${application.student_data.last_name}</strong> (Ref: ${application.reference_no}) has been rejected.</p>
-                <p><strong>Reason:</strong> ${remarks || 'Criteria not met'}</p>
+                <p>We regret to inform you that the admission application for <strong>${safeFirstName} ${safeLastName}</strong> (Ref: ${application.reference_no}) has been rejected.</p>
+                <p><strong>Reason:</strong> ${safeRemarks}</p>
                 <p>If you have any questions, please contact the school office.</p>
                 <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
                 <p style="font-size: 12px; color: #999;">This is an automated notification. Please do not reply.</p>
@@ -444,13 +450,15 @@ exports.admitStudent = async (req, res, next) => {
     // Notify Applicant
     if (result.email) {
       try {
+        const safeFirstName = escapeHtml(result.first_name);
+        const safeLastName = escapeHtml(result.last_name);
         await require('../utils/emailService').sendEmail({
           to: result.email,
           subject: 'Admission Process Complete',
           html: `
             <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
               <h2 style="color: #2e7d32;">Welcome to the School!</h2>
-              <p>Congratulations <strong>${result.first_name} ${result.last_name}</strong>,</p>
+              <p>Congratulations <strong>${safeFirstName} ${safeLastName}</strong>,</p>
               <p>Your admission process is complete. Your account has been created with the following credentials:</p>
               <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
                 <p style="margin: 5px 0;"><strong>Admission No:</strong> ${result.admission_no}</p>
@@ -495,6 +503,10 @@ exports.sendEmail = async (req, res, next) => {
     const name = `${application.student_data.first_name} ${application.student_data.last_name}`;
 
     const mailer = require('../utils/mailer');
+    const safeName = escapeHtml(name);
+    const safeMessage = escapeHtml(message);
+    const safeSchoolName = escapeHtml(req.user.school_name || 'The School');
+
     await mailer.sendEmail({
       to: email,
       subject: `[${application.reference_no}] ${subject}`,
@@ -502,8 +514,8 @@ exports.sendEmail = async (req, res, next) => {
       html: `
         <div style="font-family: sans-serif; padding: 20px; color: #333;">
           <h2 style="color: #4f46e5;">Admission Update</h2>
-          <p>Dear <strong>${name}</strong>,</p>
-          <p style="white-space: pre-wrap; line-height: 1.6;">${message}</p>
+          <p>Dear <strong>${safeName}</strong>,</p>
+          <p style="white-space: pre-wrap; line-height: 1.6;">${safeMessage}</p>
           <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;" />
           <p style="font-size: 12px; color: #666;">
             Reference: ${application.reference_no}<br>

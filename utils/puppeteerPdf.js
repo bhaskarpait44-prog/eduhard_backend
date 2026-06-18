@@ -10,6 +10,34 @@ async function renderPdf(html) {
     })
     const page = await browser.newPage()
     
+    // Mitigate SSRF: intercept and block requests to internal/private IP ranges
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const url = req.url();
+      try {
+        const parsedUrl = new URL(url);
+        const hostname = parsedUrl.hostname;
+
+        // Block localhost, loopback, and common private IP ranges
+        if (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '[::1]' ||
+          hostname.startsWith('10.') ||
+          hostname.startsWith('192.168.') ||
+          /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(hostname)
+        ) {
+          console.warn(`[Puppeteer] Blocked internal request to: ${url}`);
+          req.abort();
+        } else {
+          req.continue();
+        }
+      } catch (e) {
+        // If URL parsing fails (e.g., data URI), let it continue or handle accordingly
+        req.continue();
+      }
+    });
+
     console.log('[Puppeteer] Setting content...')
     // Using networkidle2 is often more reliable than networkidle0 for external fonts/images
     await page.setContent(html, { waitUntil: 'networkidle2', timeout: 30000 })

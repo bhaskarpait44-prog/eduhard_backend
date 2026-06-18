@@ -1,5 +1,7 @@
 'use strict';
 
+const { escapeHtml } = require('./helpers');
+
 /**
  * Generates HTML for a payslip.
  * @param {Object} data - Payslip data.
@@ -15,6 +17,14 @@ function generatePayslipHtml(data) {
 
   const monthName = new Date(0, month - 1).toLocaleString('default', { month: 'long' });
   const totalEarnings = Number(basic) + Number(hra) + Number(da) + Number(allowances);
+
+  const safeName = escapeHtml(name);
+  const safeEmployeeId = escapeHtml(employee_id);
+  const safeDesignation = escapeHtml(designation || '--');
+  const safeDepartment = escapeHtml(department || '--');
+  const safeSchoolName = escapeHtml(school_name || 'EduCore School');
+  const safeSchoolAddress = escapeHtml(school_address || '');
+  const safePaymentMode = escapeHtml(payment_mode || '--');
 
   return `
     <!DOCTYPE html>
@@ -53,8 +63,8 @@ function generatePayslipHtml(data) {
       <div class="container">
         <div class="header">
           <div class="school-info">
-            <h1>${school_name || 'EduCore School'}</h1>
-            <p>${school_address || ''}</p>
+            <h1>${safeSchoolName}</h1>
+            <p>${safeSchoolAddress}</p>
           </div>
           <div class="payslip-title">
             <h2>SALARY SLIP</h2>
@@ -65,13 +75,13 @@ function generatePayslipHtml(data) {
         <div class="staff-info">
           <div class="info-group">
             <label>Staff Member</label>
-            <span>${name}</span>
-            <p style="margin: 3px 0; font-size: 11px; color: #9a3412;">${employee_id}</p>
+            <span>${safeName}</span>
+            <p style="margin: 3px 0; font-size: 11px; color: #9a3412;">${safeEmployeeId}</p>
           </div>
           <div class="info-group" style="text-align: right;">
             <label>Designation</label>
-            <span>${designation || '--'}</span>
-            <p style="margin: 3px 0; font-size: 11px; color: #9a3412;">${department || '--'}</p>
+            <span>${safeDesignation}</span>
+            <p style="margin: 3px 0; font-size: 11px; color: #9a3412;">${safeDepartment}</p>
           </div>
         </div>
 
@@ -93,7 +103,7 @@ function generatePayslipHtml(data) {
 
         <div class="footer">
           <div class="payment-info">
-            <p><strong>Payment Mode:</strong> ${payment_mode || '--'}</p>
+            <p><strong>Payment Mode:</strong> ${safePaymentMode}</p>
             <p><strong>Paid On:</strong> ${payment_date ? new Date(payment_date).toLocaleDateString() : '--'}</p>
           </div>
           <div class="net-salary">

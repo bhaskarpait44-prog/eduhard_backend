@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { escapeHtml } = require('../utils/helpers');
 
 // ── GET /api/public/sessions/current ────────────────────────────────────────
 exports.getCurrentSession = async (req, res, next) => {
@@ -142,6 +143,8 @@ exports.createApplication = async (req, res, next) => {
     const parentEmail = (email || rest.father_email);
     if (parentEmail) {
       try {
+        const safeFirstName = escapeHtml(first_name);
+        const safeLastName = escapeHtml(last_name);
         await require('../utils/emailService').sendEmail({
           to: parentEmail,
           subject: `Application Received - Reference: ${reference_no}`,
@@ -149,7 +152,7 @@ exports.createApplication = async (req, res, next) => {
             <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
               <h2 style="color: #2563eb;">Application Successfully Submitted</h2>
               <p>Dear Parent/Guardian,</p>
-              <p>We have received your admission application for <strong>${first_name} ${last_name}</strong>. Thank you for your interest.</p>
+              <p>We have received your admission application for <strong>${safeFirstName} ${safeLastName}</strong>. Thank you for your interest.</p>
               <div style="background: #f8fafc; padding: 20px; border-radius: 12px; border: 1px solid #e2e8f0; margin: 20px 0; text-align: center;">
                 <p style="margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase; color: #64748b; font-weight: bold;">Tracking Reference Number</p>
                 <code style="font-size: 24px; font-weight: 800; color: #1e293b; letter-spacing: 2px;">${reference_no}</code>
