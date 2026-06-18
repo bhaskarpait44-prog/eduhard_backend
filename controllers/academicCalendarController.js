@@ -11,7 +11,7 @@ const { generateAcademicCalendarPdf } = require('../utils/pdfGenerator');
  */
 exports.downloadPdf = async (req, res) => {
   try {
-    const { session_id, month, year, event_type } = req.query;
+    const { session_id, month, year, event_type, audience } = req.query;
     const schoolId = req.user.school_id;
 
     if (!session_id) {
@@ -63,8 +63,13 @@ exports.downloadPdf = async (req, res) => {
       replacements.eventType = event_type;
     }
 
+    if (audience) {
+      query += ` AND ae.audience = :audience`;
+      replacements.audience = audience;
+    }
+
     // Include session holidays if event_type is not filtered or is filtered to 'holiday'
-    if (!event_type || event_type === 'holiday') {
+    if ((!event_type || event_type === 'holiday') && (!audience || audience === 'everyone')) {
       let holidaysQuery = `
         SELECT 
           id, :schoolId as school_id, session_id, name as title, CAST(NULL AS TEXT) as description, 'holiday' as event_type, 
@@ -241,8 +246,8 @@ exports.create = async (req, res) => {
       SELECT ae.*, c.name as target_class_name
       FROM academic_events ae
       LEFT JOIN classes c ON c.id = ae.target_class_id
-      WHERE ae.id = :id
-    `, { replacements: { id: eventId[0].id } });
+      WHERE ae.id = :id AND ae.school_id = :schoolId
+    `, { replacements: { id: eventId[0].id, schoolId } });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 
@@ -267,9 +272,9 @@ exports.update = async (req, res) => {
     const userId = req.user.id;
     const updates = req.body;
 
-    // Check ownership and get existing dates
+    // Check ownership and get existing state
     const [[existing]] = await sequelize.query(
-      `SELECT id, start_date, end_date FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      `SELECT id, start_date, end_date, is_published FROM academic_events WHERE id = :id AND school_id = :schoolId`,
       { replacements: { id, schoolId } }
     );
 
@@ -323,12 +328,13 @@ exports.update = async (req, res) => {
       SELECT ae.*, c.name as target_class_name
       FROM academic_events ae
       LEFT JOIN classes c ON c.id = ae.target_class_id
-      WHERE ae.id = :id
-    `, { replacements: { id } });
+      WHERE ae.id = :id AND ae.school_id = :schoolId
+    `, { replacements: { id, schoolId } });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 
-    if (event.is_published && event.notify_on_publish && updates.is_published) {
+    // Only notify if status changed from false -> true
+    if (event.is_published && event.notify_on_publish && updates.is_published && !existing.is_published) {
       fireEventNotification(event);
     }
 
@@ -385,16 +391,16 @@ exports.togglePublish = async (req, res) => {
     const newPublished = !existing.is_published;
 
     await sequelize.query(
-      `UPDATE academic_events SET is_published = :newPublished, updated_by = :userId, updated_at = NOW() WHERE id = :id`,
-      { replacements: { id, newPublished, userId } }
+      `UPDATE academic_events SET is_published = :newPublished, updated_by = :userId, updated_at = NOW() WHERE id = :id AND school_id = :schoolId`,
+      { replacements: { id, newPublished, userId, schoolId } }
     );
 
     const [[event]] = await sequelize.query(`
       SELECT ae.*, c.name as target_class_name
       FROM academic_events ae
       LEFT JOIN classes c ON c.id = ae.target_class_id
-      WHERE ae.id = :id
-    `, { replacements: { id } });
+      WHERE ae.id = :id AND ae.school_id = :schoolId
+    `, { replacements: { id, schoolId } });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 
