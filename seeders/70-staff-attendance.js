@@ -3,7 +3,7 @@
 module.exports = {
   async up(queryInterface, Sequelize) {
     const now = new Date();
-    const schoolId = 1;
+    const schoolId = parseInt(process.env.SEED_SCHOOL_ID || '1', 10);
 
     // Start date: April 1st, 2026
     const startDate = new Date(2026, 3, 1);
@@ -12,15 +12,15 @@ module.exports = {
 
     // Fetch active users and teachers
     const [users] = await queryInterface.sequelize.query(`
-      SELECT id FROM users WHERE school_id = ${schoolId} AND role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant') AND is_active = true AND is_deleted = false
-    `);
+      SELECT id FROM users WHERE school_id = :schoolId AND role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant') AND is_active = true AND is_deleted = false
+    `, { replacements: { schoolId } });
     const [teachers] = await queryInterface.sequelize.query(`
-      SELECT id FROM teachers WHERE school_id = ${schoolId} AND is_active = true AND is_deleted = false
-    `);
+      SELECT id FROM teachers WHERE school_id = :schoolId AND is_active = true AND is_deleted = false
+    `, { replacements: { schoolId } });
 
     const [[admin]] = await queryInterface.sequelize.query(`
-      SELECT id FROM users WHERE school_id = ${schoolId} AND role = 'admin' LIMIT 1
-    `);
+      SELECT id FROM users WHERE school_id = :schoolId AND role = 'admin' LIMIT 1
+    `, { replacements: { schoolId } });
     const markerId = admin ? admin.id : null;
 
     const dates = [];
@@ -29,7 +29,7 @@ module.exports = {
       if (curr.getDay() !== 0) { // Skip Sundays
         dates.push(curr.toISOString().slice(0, 10));
       }
-      curr.setDate(curr.getDate() + 1);
+      curr = new Date(curr.setDate(curr.getDate() + 1));
     }
 
     console.log(`Generating staff attendance for ${users.length} users and ${teachers.length} teachers across ${dates.length} days...`);

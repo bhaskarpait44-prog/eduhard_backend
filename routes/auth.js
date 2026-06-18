@@ -199,20 +199,25 @@ router.post('/student/login',
       const valid = await bcrypt.compare(password, student.password_hash);
 
       if (!valid) {
-        // Increment failed attempts
-        const failedAttempts = (student.failed_login_attempts || 0) + 1;
+        // Atomic increment and fetch the new count
+        const [[result]] = await sequelize.query(`
+          UPDATE students
+          SET failed_login_attempts = failed_login_attempts + 1
+          WHERE id = :id
+          RETURNING failed_login_attempts;
+        `, { replacements: { id: student.id } });
+
+        const newCount = result.failed_login_attempts;
         let lockedUntil = null;
 
-        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+        if (newCount >= MAX_FAILED_ATTEMPTS) {
           lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
+          await sequelize.query(`
+            UPDATE students
+            SET locked_until = :lockedUntil
+            WHERE id = :id;
+          `, { replacements: { lockedUntil, id: student.id } });
         }
-
-        await sequelize.query(`
-          UPDATE students
-          SET failed_login_attempts = :failedAttempts,
-              locked_until = :lockedUntil
-          WHERE id = :id;
-        `, { replacements: { failedAttempts, lockedUntil, id: student.id } });
 
         if (lockedUntil) {
           return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
@@ -286,7 +291,7 @@ router.post('/login',
         LIMIT 1;
       `, { replacements: { email } });
 
-      if (!user) return res.fail('Email is incorrect.', [], 401);
+      if (!user) return res.fail('Invalid email or password.', [], 401);
       if (!user.is_active) return res.fail('Account is deactivated.', [], 401);
 
       // Check if account is locked
@@ -298,34 +303,52 @@ router.post('/login',
       const valid = await bcrypt.compare(password, user.password_hash);
 
       if (!valid) {
-        // Increment failed attempts
-        const failedAttempts = (user.failed_login_attempts || 0) + 1;
-        let lockedUntil = null;
-
-        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-          lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
+        let newCount = 0;
+        // Strict allowlist for table names to prevent SQL injection
+        const allowedTables = ['user', 'teacher', 'student_profile'];
+        if (!allowedTables.includes(user.table_name)) {
+          console.error(`[SECURITY] Invalid table_name detected in login: ${user.table_name}`);
+          return res.fail('Invalid email or password.', [], 401);
         }
 
         if (user.table_name === 'student_profile') {
-          await sequelize.query(`
+          const [[result]] = await sequelize.query(`
             UPDATE student_profiles
-            SET parent_failed_login_attempts = :failedAttempts,
-                parent_locked_until = :lockedUntil
-            WHERE id = :id;
-          `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+            SET parent_failed_login_attempts = parent_failed_login_attempts + 1
+            WHERE id = :id
+            RETURNING parent_failed_login_attempts as failed_login_attempts;
+          `, { replacements: { id: user.id } });
+          newCount = result.failed_login_attempts;
         } else {
-          await sequelize.query(`
-            UPDATE ${user.table_name}s
-            SET failed_login_attempts = :failedAttempts,
-                locked_until = :lockedUntil
-            WHERE id = :id;
-          `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+          const tableName = `${user.table_name}s`; // users or teachers
+          const [[result]] = await sequelize.query(`
+            UPDATE ${tableName}
+            SET failed_login_attempts = failed_login_attempts + 1
+            WHERE id = :id
+            RETURNING failed_login_attempts;
+          `, { replacements: { id: user.id } });
+          newCount = result.failed_login_attempts;
+        }
+
+        let lockedUntil = null;
+        if (newCount >= MAX_FAILED_ATTEMPTS) {
+          lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
+          if (user.table_name === 'student_profile') {
+            await sequelize.query(`
+              UPDATE student_profiles SET parent_locked_until = :lockedUntil WHERE id = :id;
+            `, { replacements: { lockedUntil, id: user.id } });
+          } else {
+            const tableName = `${user.table_name}s`;
+            await sequelize.query(`
+              UPDATE ${tableName} SET locked_until = :lockedUntil WHERE id = :id;
+            `, { replacements: { lockedUntil, id: user.id } });
+          }
         }
 
         if (lockedUntil) {
           return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
         }
-        return res.fail('Password is incorrect.', [], 401);
+        return res.fail('Invalid email or password.', [], 401);
       }
 
       const normalizedRole = normalizeUserRole(user.role);

@@ -18,8 +18,15 @@ module.exports = {
       },
       user_id: {
         type: Sequelize.INTEGER,
-        allowNull: false,
+        allowNull: true,
         references: { model: 'users', key: 'id' },
+        onUpdate: 'CASCADE',
+        onDelete: 'CASCADE',
+      },
+      teacher_id: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        references: { model: 'teachers', key: 'id' },
         onUpdate: 'CASCADE',
         onDelete: 'CASCADE',
       },
@@ -56,10 +63,31 @@ module.exports = {
     });
 
     await queryInterface.addIndex('staff_attendance', ['school_id', 'date']);
-    await queryInterface.addIndex('staff_attendance', ['user_id', 'date'], {
-      unique: true,
-      name: 'idx_staff_attendance_user_date_unique'
-    });
+    
+    const dialect = queryInterface.sequelize.getDialect();
+    if (dialect === 'postgres') {
+      await queryInterface.addIndex('staff_attendance', ['user_id', 'date'], {
+        unique: true,
+        name: 'idx_staff_attendance_user_date_unique',
+        where: { user_id: { [Sequelize.Op.ne]: null } }
+      });
+
+      await queryInterface.addIndex('staff_attendance', ['teacher_id', 'date'], {
+        unique: true,
+        name: 'idx_staff_attendance_teacher_date_unique',
+        where: { teacher_id: { [Sequelize.Op.ne]: null } }
+      });
+    } else {
+      await queryInterface.addIndex('staff_attendance', ['user_id', 'date'], {
+        unique: true,
+        name: 'idx_staff_attendance_user_date_unique'
+      });
+
+      await queryInterface.addIndex('staff_attendance', ['teacher_id', 'date'], {
+        unique: true,
+        name: 'idx_staff_attendance_teacher_date_unique'
+      });
+    }
   },
 
   async down(queryInterface) {

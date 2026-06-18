@@ -545,6 +545,14 @@ exports.update = async (req, res, next) => {
     });
 
     const setClauses = sets.map(k => `${k} = :${k}`).join(', ');
+    
+    // Strict allowlist check for table name
+    const allowedTables = ['users', 'teachers'];
+    if (!allowedTables.includes(tableName)) {
+      console.error(`[SECURITY] Invalid tableName detected in update: ${tableName}`);
+      return res.fail('Internal server error', [], 500);
+    }
+
     await sequelize.query(
       `UPDATE ${tableName} SET ${setClauses}, updated_at = NOW() WHERE id = :id;`,
       { replacements: { ...updateData, id } }
@@ -575,6 +583,13 @@ exports.remove = async (req, res, next) => {
     if (!canManage(req.user, userRole)) return res.fail('Cannot delete this user.', [], 403);
     if (!isTeacher && parseInt(id) === req.user.id) return res.fail('Cannot delete your own account.', [], 400);
 
+    // Strict allowlist for table name
+    const allowedTables = ['users', 'teachers'];
+    if (!allowedTables.includes(tableName)) {
+      console.error(`[SECURITY] Invalid tableName detected in remove: ${tableName}`);
+      return res.fail('Internal server error', [], 500);
+    }
+
     const updateQuery = isTeacher ? `
       UPDATE teachers SET is_deleted = true, is_active = false,
         updated_at = NOW()
@@ -600,6 +615,13 @@ exports.toggleStatus = async (req, res, next) => {
     const { type, id } = parseId(uid);
     const isTeacher = type === 'teacher';
     const tableName = isTeacher ? 'teachers' : 'users';
+
+    // Strict allowlist for table name
+    const allowedTables = ['users', 'teachers'];
+    if (!allowedTables.includes(tableName)) {
+      console.error(`[SECURITY] Invalid tableName detected in toggleStatus: ${tableName}`);
+      return res.fail('Internal server error', [], 500);
+    }
 
     const [[user]] = await sequelize.query(
       `SELECT id, email, is_active ${isTeacher ? '' : ', role'} FROM ${tableName} WHERE id = :id AND school_id = :schoolId AND is_deleted = false;`,

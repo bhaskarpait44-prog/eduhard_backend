@@ -37,7 +37,7 @@ module.exports = {
       if (curr.getDay() !== 0) {
         dates.push(curr.toISOString().slice(0, 10));
       }
-      curr.setDate(curr.getDate() + 1);
+      curr = new Date(curr.setDate(curr.getDate() + 1));
     }
 
     console.log(`Generating attendance for ${enrollments.length} students across ${dates.length} days...`);

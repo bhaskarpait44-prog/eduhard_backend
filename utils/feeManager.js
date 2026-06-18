@@ -52,7 +52,7 @@ function buildDueDates(sessionStart, sessionEnd, frequency, dueDay) {
     dates.push({
       due_date: makeDate(cursor.getUTCFullYear(), cursor.getUTCMonth(), dueDay),
     });
-    cursor.setUTCMonth(cursor.getUTCMonth() + stepMonths);
+    cursor = new Date(cursor.setUTCMonth(cursor.getUTCMonth() + stepMonths));
   }
 
   return dates;

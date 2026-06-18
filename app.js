@@ -22,31 +22,34 @@ const app = express();
 console.log('[App] Initializing EduCore API v2 (PDFKit Ready)...');
 
 const corsOrigins = (() => {
-  if (process.env.NODE_ENV === 'development') return true;
-  
+  const isDev = process.env.NODE_ENV === 'development';
   const raw = process.env.CORS_ORIGIN;
-  if (!raw || raw.trim() === '*') return true;
 
-  const allowed = raw
-    .split(',')
-    .map((origin) => origin.trim())
-    .filter(Boolean);
+  // Only allow wildcard/all origins in development if explicitly requested or unset
+  if (isDev && (!raw || raw.trim() === '*')) return true;
+  
+  const allowed = (raw && raw.trim() !== '*')
+    ? raw.split(',').map((origin) => origin.trim()).filter(Boolean)
+    : [];
 
-  // Include common local dev origins by default.
+  // Include common local dev origins by default ONLY in development
+  if (isDev) {
     [
-    'http://localhost',
-    'http://localhost:3000',
-    'http://localhost:5173',
-    'http://127.0.0.1',
-    'http://127.0.0.1:3000',
-  ].forEach((origin) => {
-    if (!allowed.includes(origin)) allowed.push(origin);
-  });
+      'http://localhost',
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://127.0.0.1',
+      'http://127.0.0.1:3000',
+    ].forEach((origin) => {
+      if (!allowed.includes(origin)) allowed.push(origin);
+    });
+  }
 
   return function originValidator(origin, callback) {
+    // Allow same-origin (no origin header) or explicitly allowed origins
     if (!origin || allowed.includes(origin)) return callback(null, true);
     
-    if (process.env.NODE_ENV === 'development') {
+    if (isDev) {
       console.log(`[CORS] Blocked origin: ${origin}`);
     }
     return callback(new Error(`CORS blocked for origin: ${origin}`));
@@ -62,7 +65,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(respond);
 
 // Static folders
-app.use('/uploads', express.static('uploads'));
+// Removed: app.use('/uploads', express.static('uploads')); (Security Bug Fix: Unauthenticated access)
 
 app.use('/api', apiLimiter);
 
@@ -74,6 +77,11 @@ app.use('/api/public', require('./routes/public'));
 app.use('/api/applications', require('./routes/applications'));
 
 app.use('/api/auth', require('./routes/auth'));
+
+// Protected File Route (Moved before general API middleware to use specific auth if needed, 
+// but still needs session validation)
+const fileController = require('./controllers/fileController');
+app.get('/api/files/:filename', authenticate, fileController.serveFile);
 
 app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
 

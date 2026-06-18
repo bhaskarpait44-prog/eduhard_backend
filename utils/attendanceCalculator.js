@@ -23,7 +23,7 @@ const Enrollment   = require('../models/Enrollment');
  */
 function getDateRange(startDate, endDate) {
   const dates = [];
-  const current = new Date(startDate);
+  let current = new Date(startDate);
   const end     = new Date(endDate);
 
   // Normalize to midnight UTC to prevent DST shifts
@@ -32,7 +32,7 @@ function getDateRange(startDate, endDate) {
 
   while (current <= end) {
     dates.push(current.toISOString().split('T')[0]);
-    current.setUTCDate(current.getUTCDate() + 1);
+    current = new Date(current.setUTCDate(current.getUTCDate() + 1));
   }
   return dates;
 }

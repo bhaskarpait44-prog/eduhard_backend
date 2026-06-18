@@ -636,12 +636,12 @@ async function ensureHomeworkPendingRows(homeworkId, homework) {
 
 function eachDate(fromDate, toDate) {
   const dates = [];
-  const current = new Date(`${fromDate}T00:00:00`);
+  let current = new Date(`${fromDate}T00:00:00`);
   const end = new Date(`${toDate}T00:00:00`);
 
   while (current <= end) {
     dates.push(current.toISOString().slice(0, 10));
-    current.setDate(current.getDate() + 1);
+    current = new Date(current.setDate(current.getDate() + 1));
   }
 
   return dates;
