@@ -42,6 +42,16 @@ async function convertWebPToPng(filePath) {
   let browser;
   try {
     const puppeteer = require('puppeteer');
+    const path = require('path');
+
+    // Validate path stays within uploads directory before opening with file:// protocol
+    const UPLOADS_BASE = path.resolve(__dirname, '..', 'uploads');
+    const absolutePath = path.resolve(UPLOADS_BASE, filePath);
+
+    if (!absolutePath.startsWith(UPLOADS_BASE + path.sep)) {
+      throw new Error('Invalid file path: access denied');
+    }
+
     browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -49,7 +59,6 @@ async function convertWebPToPng(filePath) {
     const page = await browser.newPage();
     
     // Use file:// protocol for local files
-    const absolutePath = require('path').resolve(filePath);
     const fileUrl = `file://${absolutePath.replace(/\\/g, '/')}`;
     
     await page.goto(fileUrl);

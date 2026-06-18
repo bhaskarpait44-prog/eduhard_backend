@@ -72,7 +72,7 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 53. `20240101000051-fix-notices-teacher-id-nullability.js`
 54. `20240101000052-add-student-leaving-fields.js`
 55. `20240101000053-add-school-logo-principal.js`
-56. `20240101000054-create-staff-attendance.js`
+56. `20240101000054-create-staff-attendance.js` (Initial schema, User-only)
 57. `20240101000055-create-expenses.js`
 58. `20240101000056-create-salary-and-payroll.js`
 59. `20240101000057-create-health-records.js`
@@ -87,7 +87,7 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 68. `20240101000066-add-optional-remarks-to-fee-structures.js`
 69. `20240515000001-add-parent-credentials-to-profiles.js`
 70. `20260511000000-create-unified-notices.js`
-71. `20260511015110-fix-staff-attendance-fk.js`
+71. `20260511015110-fix-staff-attendance-fk.js` (Schema patch: Remove strict User FK)
 72. `20260511020000-add-left-to-enrollment-leaving-type.js`
 73. `20260512000000-enhance-notices-targeting.js`
 74. `20260515000000-add-teacher-role-to-users-enum.js`
@@ -96,7 +96,7 @@ Sequelize applies migrations in lexical filename order. The squashed schema chai
 77. `20260518000000-expand-notices-posted-by-role-enum.js`
 78. `20260523000001-create-certificates.js`
 79. `20260525000000-fix-payroll-foreign-keys.js`
-80. `20260525000001-fix-staff-attendance-polymorphism.js`
+80. `20260525000001-fix-staff-attendance-polymorphism.js` (Schema patch: Add Teacher support and polymorphic indexes)
 81. `20260526000001-add-upi-id-to-schools.js`
 82. `20260526000002-create-upi-payment-requests.js`
 83. `20260526000003-add-upi-id-to-fee-payments.js`

@@ -118,7 +118,14 @@ exports.streamDocument = async (req, res, next) => {
     const docPath = application.student_data.documents?.[key];
     if (!docPath) return res.fail('Document not found.', [], 404);
 
-    const fullPath = path.resolve(docPath);
+    // Resolve to absolute path, then verify it stays inside the uploads directory
+    const UPLOADS_BASE = path.resolve(__dirname, '..', 'uploads');
+    const fullPath = path.resolve(UPLOADS_BASE, docPath);
+
+    if (!fullPath.startsWith(UPLOADS_BASE + path.sep)) {
+      return res.fail('Access denied.', [], 403);
+    }
+
     if (!fs.existsSync(fullPath)) return res.fail('File not found on server.', [], 404);
 
     res.sendFile(fullPath);

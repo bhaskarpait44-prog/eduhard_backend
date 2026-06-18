@@ -143,8 +143,7 @@ exports.markBulk = async (req, res, next) => {
         if (oldStatus !== newStatus || oldRemarks !== newRemarks) {
           await existing.update({
             status: newStatus,
-            remarks: newRemarks,
-            created_by: markerId
+            remarks: newRemarks
           }, { transaction });
 
           const changes = [];
@@ -273,9 +272,14 @@ exports.getStaffSummary = async (req, res, next) => {
     const staffId = req.params.staff_id; 
     const { from, to, type } = req.query; 
 
-    if (!type) return res.fail('Staff type (user/teacher) is required.');
+    if (!from || !to || !type) return res.fail('From date, to date, and staff type (user/teacher) are required.');
 
-    const idColumn = type === 'teacher' ? 'teacher_id' : 'user_id';
+    const ALLOWED_COLUMNS = { teacher: 'teacher_id', user: 'user_id' };
+    const idColumn = ALLOWED_COLUMNS[type];
+    
+    if (!idColumn) {
+      return res.fail('Invalid staff type. Must be "teacher" or "user".', [], 400);
+    }
 
     // Verify staff belongs to this school
     let staffExists = false;

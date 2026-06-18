@@ -43,4 +43,10 @@ const StaffAttendance = sequelize.define('StaffAttendance', {
   underscored: true,
 });
 
+StaffAttendance.associate = (models) => {
+  StaffAttendance.belongsTo(models.User,    { foreignKey: 'user_id',    as: 'user' });
+  StaffAttendance.belongsTo(models.Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
+  StaffAttendance.belongsTo(models.School,  { foreignKey: 'school_id',  as: 'school' });
+};
+
 module.exports = StaffAttendance;
