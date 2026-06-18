@@ -958,7 +958,7 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
 
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
-    doc.page.margins.bottom = 20;
+    doc.page.margins.bottom = 10;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Attendance_${student.first_name}.pdf"`);
@@ -1077,11 +1077,12 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
       
       const dayHeaders = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
       doc.fontSize(8).font('Helvetica-Bold').fillColor('#64748b');
+      const headerY = doc.y;
       dayHeaders.forEach((h, i) => {
-        doc.text(h, 40 + i * 22, doc.y, { width: 22, align: 'center', lineBreak: false });
+        doc.text(h, 40 + i * 22, headerY, { width: 22, align: 'center', lineBreak: false });
       });
       
-      doc.y += 15;
+      doc.y = headerY + 15;
       let gridX = 40, currentX = gridX + adjustedFirstDay * 22, currentY = doc.y;
 
       for (let d = 1; d <= daysInMonth; d++) {

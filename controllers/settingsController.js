@@ -66,7 +66,12 @@ exports.updateSettings = async (req, res, next) => {
       school_name, school_email, school_phone, school_address,
       online_admission_open
     }, 'Settings updated successfully.');
-    invalidateCache(schoolId, '/api/settings*');
-    invalidateCache(schoolId, '/api/student*');
+
+    try {
+      invalidateCache(schoolId, '/api/settings*');
+      invalidateCache(schoolId, '/api/student*');
+    } catch (cacheErr) {
+      console.error('[Cache Invalidation Error] Failed to clear settings/student caches:', cacheErr.message);
+    }
   } catch (err) { next(err); }
 };

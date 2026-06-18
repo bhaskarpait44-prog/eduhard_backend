@@ -402,7 +402,6 @@ router.post('/login',
 );
 
 router.post('/change-password',
-  authenticate,
   [
     body('currentPassword').notEmpty(),
     body('newPassword').isLength({ min: 8 }).withMessage('New password must be at least 8 characters long'),
