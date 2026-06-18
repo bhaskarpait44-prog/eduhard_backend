@@ -1,7 +1,9 @@
 'use strict';
 
+const { Op } = require('sequelize');
 const sequelize = require('../config/database');
-const { StaffAttendance, User } = require('../models');
+const { StaffAttendance, User, Teacher } = require('../models');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 
@@ -16,9 +18,15 @@ exports.getDailyAttendance = async (req, res, next) => {
         SELECT id, name, email, role::text, employee_id, designation, department, school_id, is_active, is_deleted, 'user' as type
         FROM users
         WHERE role IN ('admin', 'staff', 'librarian', 'receptionist', 'accountant')
+          AND school_id = :schoolId
+          AND is_active = true
+          AND is_deleted = false
         UNION ALL
         SELECT id, CONCAT(first_name, ' ', last_name) AS name, email, 'teacher' AS role, employee_id, designation, department, school_id, is_active, is_deleted, 'teacher' as type
         FROM teachers
+        WHERE school_id = :schoolId
+          AND is_active = true
+          AND is_deleted = false
       )
       SELECT
         sl.id AS staff_id,
@@ -36,19 +44,13 @@ exports.getDailyAttendance = async (req, res, next) => {
       LEFT JOIN staff_attendance sa ON (
         (sl.type = 'user' AND sa.user_id = sl.id) OR
         (sl.type = 'teacher' AND sa.teacher_id = sl.id)
-      ) AND sa.date = :date
-      WHERE sl.school_id = :schoolId
-        AND sl.is_active = true
-        AND sl.is_deleted = false
+      ) AND sa.date = :date AND sa.school_id = :schoolId
       ORDER BY sl.name ASC;
     `, { replacements: { schoolId, date } });
 
     res.ok({
       date,
-      staff: staff.map(s => ({
-        ...s,
-        status: s.status || 'present'
-      }))
+      staff: staff
     }, `${staff.length} staff member(s) loaded.`);
   } catch (err) { next(err); }
 };
@@ -61,38 +63,134 @@ exports.markBulk = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const markerId = req.user.id;
 
+    if (!date || !Array.isArray(records) || records.length === 0) {
+      return res.fail('Invalid request data. Date and records are required.');
+    }
+
+    // 1. Validate all staff members belong to this school
+    const teacherIds = [...new Set(records.filter(r => r.type === 'teacher' && r.staff_id).map(r => r.staff_id))];
+    const userIds = [...new Set(records.filter(r => r.type !== 'teacher' && r.staff_id).map(r => r.staff_id))];
+
+    const validTeacherSet = new Set();
+    const validUserSet = new Set();
+
+    if (teacherIds.length > 0) {
+      const validTeachers = await Teacher.findAll({
+        where: { id: teacherIds, school_id: schoolId },
+        attributes: ['id'],
+        transaction
+      });
+      validTeachers.forEach(t => validTeacherSet.add(t.id));
+    }
+
+    if (userIds.length > 0) {
+      const validUsers = await User.findAll({
+        where: { 
+          id: userIds, 
+          school_id: schoolId,
+          role: { [Op.in]: ['admin', 'staff', 'librarian', 'receptionist', 'accountant'] }
+        },
+        attributes: ['id'],
+        transaction
+      });
+      validUsers.forEach(u => validUserSet.add(u.id));
+    }
+
+    // 2. Fetch existing attendance records for these staff on this date
+    const orConditions = [];
+    if (teacherIds.length > 0) orConditions.push({ teacher_id: teacherIds });
+    if (userIds.length > 0) orConditions.push({ user_id: userIds });
+
+    let existingRecords = [];
+    if (orConditions.length > 0) {
+      existingRecords = await StaffAttendance.findAll({
+        where: {
+          school_id: schoolId,
+          date,
+          [Op.or]: orConditions
+        },
+        transaction
+      });
+    }
+
+    const existingMap = new Map();
+    existingRecords.forEach(r => {
+      const key = r.teacher_id ? `teacher_${r.teacher_id}` : `user_${r.user_id}`;
+      existingMap.set(key, r);
+    });
+
     const inserted = [];
     const updated = [];
 
     for (const rec of records) {
-      const idField = rec.type === 'teacher' ? 'teacher_id' : 'user_id';
+      const isTeacher = rec.type === 'teacher';
+      const staffId = rec.staff_id;
       
-      const existing = await StaffAttendance.findOne({
-        where: {
-          [idField]: rec.staff_id,
-          date,
-          school_id: schoolId
-        },
-        transaction
-      });
+      // Security: Skip if staff member doesn't belong to this school or has wrong role
+      if (isTeacher && !validTeacherSet.has(staffId)) continue;
+      if (!isTeacher && !validUserSet.has(staffId)) continue;
+
+      const key = isTeacher ? `teacher_${staffId}` : `user_${staffId}`;
+      const existing = existingMap.get(key);
+      const idField = isTeacher ? 'teacher_id' : 'user_id';
 
       if (existing) {
-        await existing.update({
-          status: rec.status,
-          remarks: rec.remarks || null,
-          created_by: markerId
-        }, { transaction });
-        updated.push(rec.staff_id);
+        const oldStatus = existing.status;
+        const oldRemarks = existing.remarks;
+        const newStatus = rec.status;
+        const newRemarks = rec.remarks || null;
+
+        if (oldStatus !== newStatus || oldRemarks !== newRemarks) {
+          await existing.update({
+            status: newStatus,
+            remarks: newRemarks,
+            created_by: markerId
+          }, { transaction });
+
+          const changes = [];
+          if (oldStatus !== newStatus) changes.push({ field: 'status', oldValue: oldStatus, newValue: newStatus });
+          if (oldRemarks !== newRemarks) changes.push({ field: 'remarks', oldValue: oldRemarks, newValue: newRemarks });
+
+          if (changes.length > 0) {
+            await writeAuditLog(sequelize, {
+              tableName: 'staff_attendance',
+              recordId: existing.id,
+              schoolId: schoolId,
+              changes: changes,
+              changedBy: markerId,
+              reason: 'Bulk staff attendance update',
+              ipAddress: req.ip,
+              deviceInfo: req.headers['user-agent']
+            }, transaction);
+          }
+
+          updated.push(staffId);
+        }
       } else {
-        await StaffAttendance.create({
+        const created = await StaffAttendance.create({
           school_id: schoolId,
-          [idField]: rec.staff_id,
+          [idField]: staffId,
           date,
           status: rec.status,
           remarks: rec.remarks || null,
           created_by: markerId
         }, { transaction });
-        inserted.push(rec.staff_id);
+
+        await writeAuditLog(sequelize, {
+          tableName: 'staff_attendance',
+          recordId: created.id,
+          schoolId: schoolId,
+          changes: [
+            { field: 'status', oldValue: null, newValue: rec.status },
+            { field: 'remarks', oldValue: null, newValue: rec.remarks || null }
+          ],
+          changedBy: markerId,
+          reason: 'Bulk staff attendance creation',
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent']
+        }, transaction);
+
+        inserted.push(staffId);
       }
     }
 
@@ -103,7 +201,7 @@ exports.markBulk = async (req, res, next) => {
       updated: updated.length
     }, `Attendance saved. ${inserted.length} marked, ${updated.length} updated.`);
   } catch (err) {
-    await transaction.rollback();
+    if (transaction) await transaction.rollback();
     next(err);
   }
 };
@@ -126,9 +224,15 @@ exports.getMonthlyRegister = async (req, res, next) => {
         SELECT id, name, role::text, employee_id, school_id, is_active, is_deleted, 'user' as type
         FROM users
         WHERE role IN ('admin','staff','librarian','receptionist','accountant')
+          AND school_id = :schoolId
+          AND is_active = true
+          AND is_deleted = false
         UNION ALL
         SELECT id, CONCAT(first_name,' ',last_name) AS name, 'teacher' AS role, employee_id, school_id, is_active, is_deleted, 'teacher' as type
         FROM teachers
+        WHERE school_id = :schoolId
+          AND is_active = true
+          AND is_deleted = false
       )
       SELECT
         sl.id AS staff_id,
@@ -149,10 +253,7 @@ exports.getMonthlyRegister = async (req, res, next) => {
       LEFT JOIN staff_attendance sa ON (
         (sl.type = 'user' AND sa.user_id = sl.id) OR
         (sl.type = 'teacher' AND sa.teacher_id = sl.id)
-      ) AND sa.date BETWEEN :fromDate AND :toDate
-      WHERE sl.school_id = :schoolId
-        AND sl.is_active = true
-        AND sl.is_deleted = false
+      ) AND sa.date BETWEEN :fromDate AND :toDate AND sa.school_id = :schoolId
       GROUP BY sl.id, sl.name, sl.role, sl.employee_id, sl.type
       ORDER BY sl.name ASC;
     `, { replacements: { schoolId, fromDate, toDate } });
@@ -165,16 +266,34 @@ exports.getMonthlyRegister = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-// ── GET /api/staff-attendance/stats/:user_id ────────────────────────────────
+// ── GET /api/staff-attendance/stats/:staff_id ────────────────────────────────
 exports.getStaffSummary = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const staffId = req.params.user_id; // Frontend might still send user_id as param
-    const { from, to, type } = req.query; // type is required now
+    const staffId = req.params.staff_id; 
+    const { from, to, type } = req.query; 
 
-    if (!type) return res.fail('Staff type is required.');
+    if (!type) return res.fail('Staff type (user/teacher) is required.');
 
     const idColumn = type === 'teacher' ? 'teacher_id' : 'user_id';
+
+    // Verify staff belongs to this school
+    let staffExists = false;
+    if (type === 'teacher') {
+      staffExists = await Teacher.findOne({ where: { id: staffId, school_id: schoolId } });
+    } else {
+      staffExists = await User.findOne({ 
+        where: { 
+          id: staffId, 
+          school_id: schoolId,
+          role: { [Op.in]: ['admin', 'staff', 'librarian', 'receptionist', 'accountant'] }
+        } 
+      });
+    }
+
+    if (!staffExists) {
+      return res.fail('Staff member not found or access denied.', [], 404);
+    }
 
     const [stats] = await sequelize.query(`
       SELECT
@@ -203,3 +322,4 @@ exports.getStaffSummary = async (req, res, next) => {
     }, 'Staff attendance summary retrieved.');
   } catch (err) { next(err); }
 };
+

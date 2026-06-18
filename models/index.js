@@ -193,6 +193,15 @@ InventoryTransaction.belongsTo(InventoryItem, { foreignKey: 'item_id', as: 'item
 InventoryItem.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
 School.hasMany(InventoryItem, { foreignKey: 'school_id', as: 'inventory_items' });
 
+StaffAttendance.belongsTo(User, { foreignKey: 'user_id', as: 'user' });
+User.hasMany(StaffAttendance, { foreignKey: 'user_id', as: 'staff_attendance_records' });
+
+StaffAttendance.belongsTo(Teacher, { foreignKey: 'teacher_id', as: 'teacher' });
+Teacher.hasMany(StaffAttendance, { foreignKey: 'teacher_id', as: 'attendance_records' });
+
+StaffAttendance.belongsTo(School, { foreignKey: 'school_id', as: 'school' });
+School.hasMany(StaffAttendance, { foreignKey: 'school_id', as: 'staff_attendance' });
+
 const db = {
   sequelize,
   AcademicEvent,

@@ -13,7 +13,7 @@ async function writeAuditLog(sequelize, {
   reason,
   ipAddress,
   deviceInfo,
-}) {
+}, transaction = null) {
   // Use provided reason or fallback if too short/missing
   const finalReason = (reason && reason.trim().length >= 10) 
     ? reason.trim() 
@@ -37,7 +37,7 @@ async function writeAuditLog(sequelize, {
   }));
 
   if (insertRows.length > 0) {
-    await sequelize.getQueryInterface().bulkInsert('audit_logs', insertRows);
+    await sequelize.getQueryInterface().bulkInsert('audit_logs', insertRows, { transaction });
   }
 }
 

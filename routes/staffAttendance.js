@@ -12,6 +12,6 @@ router.use(requireRole('admin', 'accountant'));
 router.get('/daily',    ctrl.getDailyAttendance);
 router.post('/bulk',    ctrl.markBulk);
 router.get('/register', ctrl.getMonthlyRegister);
-router.get('/stats/:user_id', ctrl.getStaffSummary);
+router.get('/stats/:staff_id', ctrl.getStaffSummary);
 
 module.exports = router;
