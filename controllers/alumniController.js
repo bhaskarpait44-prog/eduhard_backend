@@ -11,7 +11,7 @@ function safeFileName(value, fallback = 'alumni-list') {
   return String(value || fallback)
     .replace(/[^a-z0-9-_]+/gi, '-')
     .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
+    .replace(/(^-)|(-$)/g, '')
     .toLowerCase() || fallback;
 }
 
