@@ -9,7 +9,7 @@ const { generateAcademicCalendarPdf } = require('../utils/pdfGenerator');
  * Download Academic Calendar as PDF
  * GET /api/academic-calendar/download?session_id=&month=&year=&event_type=
  */
-exports.downloadPdf = async (req, res) => {
+exports.downloadPdf = async (req, res, next) => {
   try {
     const { session_id, month, year, event_type, audience } = req.query;
     const schoolId = req.user.school_id;
@@ -18,23 +18,31 @@ exports.downloadPdf = async (req, res) => {
       return res.fail('session_id is required');
     }
 
+    // FIX: validate month/year are real numbers if provided
+    if ((month && isNaN(parseInt(month, 10))) || (year && isNaN(parseInt(year, 10)))) {
+      return res.fail('month and year must be valid numbers');
+    }
+
     // 1. Fetch School Details
     const [[school]] = await sequelize.query(
       `SELECT name, address, phone, email, logo_url FROM schools WHERE id = :schoolId`,
       { replacements: { schoolId } }
     );
 
+    // FIX: guard against missing school row
+    if (!school) return res.fail('School not found', [], 404);
+
     // 2. Fetch Session Details
     const [[session]] = await sequelize.query(
-      `SELECT id, name FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
+      `SELECT id, name, start_date, end_date FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
       { replacements: { sessionId: session_id, schoolId } }
     );
 
     if (!session) {
-      return res.fail('Session not found or access denied');
+      return res.fail('Session not found or access denied', [], 404);
     }
 
-    // 3. Fetch Events (reuse logic from list)
+    // 3. Fetch Events
     const columns = `
       ae.id, ae.school_id, ae.session_id, ae.title, ae.description, ae.event_type, 
       ae.start_date, ae.end_date, ae.start_time, ae.end_time, ae.is_all_day, 
@@ -46,13 +54,15 @@ exports.downloadPdf = async (req, res) => {
       SELECT ${columns}, c.name as target_class_name
       FROM academic_events ae
       LEFT JOIN classes c ON c.id = ae.target_class_id
-      WHERE ae.school_id = :schoolId AND ae.session_id = :sessionId
+      WHERE ae.school_id = :schoolId AND ae.session_id = :sessionId AND ae.is_published = true
     `;
     const replacements = { schoolId, sessionId: session_id };
 
     if (month && year) {
-      const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
-      const lastDay = new Date(year, month, 0).toISOString().split('T')[0];
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
+      const lastDay = new Date(y, m, 0).toISOString().split('T')[0];
       query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
       replacements.firstDay = firstDay;
       replacements.lastDay = lastDay;
@@ -68,7 +78,7 @@ exports.downloadPdf = async (req, res) => {
       replacements.audience = audience;
     }
 
-    // Include session holidays if event_type is not filtered or is filtered to 'holiday'
+    // Include session holidays
     if ((!event_type || event_type === 'holiday') && (!audience || audience === 'everyone')) {
       let holidaysQuery = `
         SELECT 
@@ -91,17 +101,13 @@ exports.downloadPdf = async (req, res) => {
     const [events] = await sequelize.query(query, { replacements });
 
     // 4. Generate PDF
-    const pdfBuffer = await generateAcademicCalendarPdf({
-      school,
-      session,
-      events
-    });
+    const pdfBuffer = await generateAcademicCalendarPdf({ school, session, events });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=Academic_Calendar_${session.name.replace(/\s+/g, '_')}.pdf`);
     res.send(pdfBuffer);
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err) not res.fail(err.message) to avoid leaking internals
   }
 };
 
@@ -109,13 +115,18 @@ exports.downloadPdf = async (req, res) => {
  * List events
  * GET /api/academic-calendar?session_id=&month=&year=&event_type=
  */
-exports.list = async (req, res) => {
+exports.list = async (req, res, next) => {
   try {
-    const { session_id, month, year, event_type } = req.query;
+    const { session_id, month, year, event_type, audience } = req.query; // FIX: was missing audience param
     const schoolId = req.user.school_id;
 
     if (!session_id) {
       return res.fail('session_id is required');
+    }
+
+    // FIX: validate month/year
+    if ((month && isNaN(parseInt(month, 10))) || (year && isNaN(parseInt(year, 10)))) {
+      return res.fail('month and year must be valid numbers');
     }
 
     // Validate Session
@@ -123,7 +134,7 @@ exports.list = async (req, res) => {
       `SELECT id FROM sessions WHERE id = :sessionId AND school_id = :schoolId`,
       { replacements: { sessionId: session_id, schoolId } }
     );
-    if (!session) return res.fail('Invalid session ID or access denied');
+    if (!session) return res.fail('Invalid session ID or access denied', [], 404);
 
     const columns = `
       ae.id, ae.school_id, ae.session_id, ae.title, ae.description, ae.event_type, 
@@ -141,8 +152,10 @@ exports.list = async (req, res) => {
     const replacements = { schoolId, sessionId: session_id };
 
     if (month && year) {
-      const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
-      const lastDay = new Date(year, month, 0).toISOString().split('T')[0];
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
+      const lastDay = new Date(y, m, 0).toISOString().split('T')[0];
       query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
       replacements.firstDay = firstDay;
       replacements.lastDay = lastDay;
@@ -153,8 +166,14 @@ exports.list = async (req, res) => {
       replacements.eventType = event_type;
     }
 
-    // Include session holidays if event_type is not filtered or is filtered to 'holiday'
-    if (!event_type || event_type === 'holiday') {
+    // FIX: audience filter was silently ignored in list (only applied in downloadPdf)
+    if (audience) {
+      query += ` AND ae.audience = :audience`;
+      replacements.audience = audience;
+    }
+
+    // Include session holidays if event_type is not filtered or is 'holiday', and audience is not staff/teacher-only
+    if ((!event_type || event_type === 'holiday') && (!audience || audience === 'everyone')) {
       let holidaysQuery = `
         SELECT 
           id, :schoolId as school_id, session_id, name as title, CAST(NULL AS TEXT) as description, 'holiday' as event_type, 
@@ -177,7 +196,7 @@ exports.list = async (req, res) => {
 
     res.ok(events);
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err)
   }
 };
 
@@ -185,7 +204,7 @@ exports.list = async (req, res) => {
  * Create event
  * POST /api/academic-calendar
  */
-exports.create = async (req, res) => {
+exports.create = async (req, res, next) => {
   try {
     const {
       session_id, title, description, event_type, start_date, end_date,
@@ -257,7 +276,7 @@ exports.create = async (req, res) => {
 
     res.ok(event, 'Event created successfully');
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err)
   }
 };
 
@@ -265,7 +284,7 @@ exports.create = async (req, res) => {
  * Update event
  * PATCH /api/academic-calendar/:id
  */
-exports.update = async (req, res) => {
+exports.update = async (req, res, next) => {
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -340,7 +359,7 @@ exports.update = async (req, res) => {
 
     res.ok(event, 'Event updated successfully');
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err)
   }
 };
 
@@ -348,7 +367,7 @@ exports.update = async (req, res) => {
  * Delete event
  * DELETE /api/academic-calendar/:id
  */
-exports.destroy = async (req, res) => {
+exports.destroy = async (req, res, next) => {
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -365,7 +384,7 @@ exports.destroy = async (req, res) => {
     invalidateCache(schoolId, '/api/academic-calendar*');
     res.ok(null, 'Event deleted successfully');
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err)
   }
 };
 
@@ -373,7 +392,7 @@ exports.destroy = async (req, res) => {
  * Toggle publish
  * PATCH /api/academic-calendar/:id/publish
  */
-exports.togglePublish = async (req, res) => {
+exports.togglePublish = async (req, res, next) => {
   try {
     const { id } = req.params;
     const schoolId = req.user.school_id;
@@ -410,7 +429,7 @@ exports.togglePublish = async (req, res) => {
 
     res.ok(event, `Event ${newPublished ? 'published' : 'unpublished'} successfully`);
   } catch (err) {
-    res.fail(err.message);
+    next(err); // FIX: use next(err)
   }
 };
 

@@ -175,29 +175,92 @@ async function generateAcademicCalendarPdf(data) {
             : `${event.start_date} to ${event.end_date}`;
 
           doc.fontSize(9);
-          doc.text(dateStr, colDate, y, { width: 75 });
-          doc.text(event.title, colTitle, y, { width: 180 });
-          doc.text(event.event_type.replace('_', ' ').toUpperCase(), colType, y, { width: 90 });
-          doc.text(event.audience.toUpperCase(), colAudience, y, { width: 75 });
-          doc.text(event.target_class_name || 'All', colClass, y, { width: 45 });
+            drawPageBorder();
+            doc.y = 45;
+          }
 
-          y += Math.max(25, doc.heightOfString(event.title, { width: 180 }) + 10);
-          
-          // Row separator
-          doc.moveTo(50, y - 5).lineTo(545, y - 5).strokeColor('#f0f0f0').stroke();
+          // Month heading stripe
+          doc.save().rect(MARGIN, doc.y, CONTENT_W, 20).fill('#1a2e44').restore();
+          doc.fillColor('#ffffff').fontSize(9.5).font('Helvetica-Bold')
+            .text(fmtMonthYear(monthEvents[0].start_date), MARGIN + 8, doc.y + 5, { width: CONTENT_W - 16 });
+          doc.y += 22;
+
+          let rowY = drawTableHeader(doc.y);
+
+          monthEvents.forEach((ev, idx) => {
+            const style   = EVENT_STYLE[ev.event_type] || EVENT_STYLE.other;
+            const titleH  = Math.max(doc.heightOfString(ev.title || '', { width: COL_TITLE - 8, fontSize: 8.5 }), 10);
+            const rowH    = Math.max(titleH + 8, 20);
+
+            if (rowY + rowH > PAGE_BOTTOM) {
+              doc.addPage();
+              drawPageBorder();
+              rowY = drawTableHeader(45);
+            }
+
+            // Alternating background
+            if (idx % 2 === 0) {
+              doc.save().rect(MARGIN, rowY, CONTENT_W, rowH).fill('#f8f9fa').restore();
+            }
+
+            // Left colour accent strip
+            doc.save().rect(MARGIN, rowY, 4, rowH).fill(style.bg).restore();
+
+            // Date column
+            const isSameDay = String(ev.start_date).slice(0, 10) === String(ev.end_date).slice(0, 10);
+            const dateStr   = isSameDay
+              ? fmtDate(ev.start_date)
+              : `${fmtDate(ev.start_date)}\n– ${fmtDate(ev.end_date)}`;
+            doc.fillColor('#333').fontSize(8).font('Helvetica')
+              .text(dateStr, MARGIN + 6, rowY + 4, { width: COL_DATE - 10 });
+
+            // Title
+            doc.fillColor('#111').fontSize(8.5).font('Helvetica-Bold')
+              .text(ev.title || '', MARGIN + COL_DATE + 4, rowY + 4, { width: COL_TITLE - 8 });
+
+            // Type badge
+            const badgeX = MARGIN + COL_DATE + COL_TITLE + 4;
+            const badgeW = COL_TYPE - 10;
+            doc.save().roundedRect(badgeX, rowY + 4, badgeW, 13, 3).fill(style.bg).restore();
+            doc.fillColor(style.fg).fontSize(7.5).font('Helvetica-Bold')
+              .text(safeStr(style.label), badgeX + 2, rowY + 6, { width: badgeW - 4, align: 'center' });
+
+            // Audience
+            doc.fillColor('#555').fontSize(7.5).font('Helvetica')
+              .text(safeStr(ev.audience).toUpperCase(),
+                MARGIN + COL_DATE + COL_TITLE + COL_TYPE + 4, rowY + 4,
+                { width: COL_AUD - 6 });
+
+            // Class
+            doc.fillColor('#555').fontSize(7.5).font('Helvetica')
+              .text(ev.target_class_name || 'All',
+                MARGIN + COL_DATE + COL_TITLE + COL_TYPE + COL_AUD + 4, rowY + 4,
+                { width: COL_CLASS - 4 });
+
+            // Row divider
+            doc.save().moveTo(MARGIN, rowY + rowH).lineTo(PAGE_W - MARGIN, rowY + rowH)
+              .strokeColor('#e0e0e0').lineWidth(0.3).stroke().restore();
+
+            rowY += rowH;
+          });
+
+          doc.y = rowY + 10;
         });
       }
 
-      // --- Footer ---
+      // ── Footers on every page ──────────────────────────────────────────────
       const pageCount = doc.bufferedPageRange().count;
+      const genDate   = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
       for (let i = 0; i < pageCount; i++) {
         doc.switchToPage(i);
-        doc.fontSize(8).fillColor('#999').text(
-          `Generated on ${new Date().toLocaleDateString()} | Page ${i + 1} of ${pageCount}`,
-          50,
-          doc.page.height - 50,
-          { align: 'center' }
-        );
+        const footerY = doc.page.height - 35;
+        doc.save().rect(MARGIN, footerY, CONTENT_W, 18).fill('#1a2e44').restore();
+        doc.fillColor('#aac4e0').fontSize(7).font('Helvetica')
+          .text(`${school.name || 'Academic Calendar'}  |  Generated: ${genDate}`,
+            MARGIN + 6, footerY + 5, { width: CONTENT_W / 2 });
+        doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold')
+          .text(`Page ${i + 1} of ${pageCount}`,
+            MARGIN, footerY + 5, { width: CONTENT_W - 6, align: 'right' });
       }
 
       doc.end();
