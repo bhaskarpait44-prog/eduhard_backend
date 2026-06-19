@@ -1267,13 +1267,18 @@ exports.createNotice = async (req, res, next) => {
       return res.fail('audience must be all_classes, class, or student.', [], 422);
     }
 
+    let finalExpiryDate = expiry_date || null;
+    if (finalExpiryDate && /^\d{4}-\d{2}-\d{2}$/.test(finalExpiryDate)) {
+      finalExpiryDate = `${finalExpiryDate}T23:59:59`;
+    }
+
     const notice = await createFeeNotice(req, {
       title,
       content,
       targetScope,
       classId,
       targetStudentId,
-      expiryDate: expiry_date || null,
+      expiryDate: finalExpiryDate,
     });
 
     res.ok({ notice }, 'Fee notice created.', 201);

@@ -831,6 +831,10 @@ exports.createNotice = async (req, res, next) => {
       posted_by_teacher_id = null, // Allow specifying a teacher ID if posted on behalf of one
     } = req.body;
 
+    if (expiry_date && /^\d{4}-\d{2}-\d{2}$/.test(expiry_date)) {
+      expiry_date = `${expiry_date}T23:59:59`;
+    }
+
     const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other', 'fee']);
     const allowedScopes = new Set(['teachers', 'all_students', 'specific_section', 'specific_student', 'specific_teacher', 'specific_subject', 'whole_class', 'whole_school']);
     if (!title || !content || !target_scope) return res.fail('title, content and target_scope are required.', [], 422);
@@ -957,6 +961,11 @@ exports.updateNotice = async (req, res, next) => {
 
     const attachmentPath = req.file ? req.file.path.replace(/\\/g, '/') : undefined;
 
+    let finalExpiryDate = req.body.hasOwnProperty('expiry_date') ? (req.body.expiry_date || null) : null;
+    if (finalExpiryDate && /^\d{4}-\d{2}-\d{2}$/.test(finalExpiryDate)) {
+      finalExpiryDate = `${finalExpiryDate}T23:59:59`;
+    }
+
     await sequelize.query(`
       UPDATE teacher_notices
       SET title = COALESCE(:title, title),
@@ -975,7 +984,7 @@ exports.updateNotice = async (req, res, next) => {
         category: req.body.category || null,
         attachmentPath: attachmentPath || null,
         isActive: req.body.is_active !== undefined ? req.body.is_active : null,
-        expiryDate: req.body.hasOwnProperty('expiry_date') ? (req.body.expiry_date || null) : null,
+        expiryDate: finalExpiryDate,
         expiryDateChanged: req.body.hasOwnProperty('expiry_date'),
       },
     });

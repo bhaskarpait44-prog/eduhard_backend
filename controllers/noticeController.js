@@ -131,6 +131,9 @@ exports.createNotice = async (req, res, next) => {
     target_section_id = target_section_id || section_id;
     target_subject_id = target_subject_id || subject_id;
     expires_at = expires_at || expiry_date;
+    if (expires_at && /^\d{4}-\d{2}-\d{2}$/.test(expires_at)) {
+      expires_at = `${expires_at} 23:59:59`;
+    }
 
     // Map mobile scopes to backend audiences
     if (audience === 'whole_class') audience = 'class';
@@ -325,7 +328,13 @@ exports.updateNotice = async (req, res, next) => {
     if (title !== undefined) updateData.title = title;
     if (body !== undefined) updateData.body = body;
     if (priority !== undefined) updateData.priority = priority;
-    if (expires_at !== undefined) updateData.expires_at = expires_at || null;
+    if (expires_at !== undefined) {
+      let finalExpiresAt = expires_at || null;
+      if (finalExpiresAt && /^\d{4}-\d{2}-\d{2}$/.test(finalExpiresAt)) {
+        finalExpiresAt = `${finalExpiresAt} 23:59:59`;
+      }
+      updateData.expires_at = finalExpiresAt;
+    }
     if (attachment_path !== undefined) updateData.attachment_path = attachment_path;
 
     await notice.update(updateData);
@@ -406,13 +415,7 @@ exports.listTeacherNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE 
@@ -440,7 +443,9 @@ exports.listTeacherNotices = async (req, res, next) => {
         n.is_school_wide = true 
         OR LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR LOWER(n.audience::text) = 'teachers'
-        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id = :userId)
+        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id IN (
+          SELECT id FROM teachers WHERE email = (SELECT email FROM users WHERE id = :userId)
+        ))
         OR (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')
         OR (
           LOWER(n.audience::text) = 'class'
@@ -556,13 +561,7 @@ exports.listAccountantNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN (SELECT COUNT(*)::int FROM notice_reads nr WHERE nr.notice_id = n.id) ELSE 0 END) as read_count,
@@ -626,13 +625,7 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -697,13 +690,7 @@ exports.listReceptionistNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -766,13 +753,7 @@ exports.listLibrarianNotices = async (req, res, next) => {
         LEFT JOIN teachers t ON t.id = tn.teacher_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
@@ -849,21 +830,14 @@ exports.getStudentNotices = async (req, res, next) => {
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
-          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), admin.name, 'School') AS posted_by_name,
-          COALESCE(tn.created_by_role, 'teacher')::text AS posted_by_role, tn.attachment_path,
+          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), 'School') AS posted_by_name,
+          'teacher'::text AS posted_by_role, tn.attachment_path,
           'teacher_notices' AS source
         FROM teacher_notices tn
         LEFT JOIN teachers t ON t.id = tn.teacher_id
-        LEFT JOIN users admin ON admin.id = tn.created_by_user_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE 
@@ -1024,21 +998,14 @@ exports.getParentNotices = async (req, res, next) => {
           tn.publish_date AS created_at, tn.expiry_date AS expires_at, tn.class_id AS target_class_id, 
           tn.section_id AS target_section_id, tn.target_student_id, tn.subject_id AS target_subject_id,
           (tn.target_scope::text IN ('all_students', 'whole_school', 'all_classes', 'everyone')) AS is_school_wide,
-          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), admin.name, 'School') AS posted_by_name,
-          COALESCE(tn.created_by_role, 'teacher')::text AS posted_by_role, tn.attachment_path,
+          COALESCE(NULLIF(TRIM(CONCAT(t.first_name, ' ', t.last_name)), ''), 'School') AS posted_by_name,
+          'teacher'::text AS posted_by_role, tn.attachment_path,
           'teacher_notices' AS source
         FROM teacher_notices tn
         LEFT JOIN teachers t ON t.id = tn.teacher_id
-        LEFT JOIN users admin ON admin.id = tn.created_by_user_id
         WHERE tn.is_active = true
           AND (tn.expiry_date IS NULL OR tn.expiry_date > NOW())
-          AND (
-            t.school_id = :schoolId
-            OR (tn.teacher_id IS NULL AND EXISTS (
-              SELECT 1 FROM users u2
-              WHERE u2.id = tn.created_by_user_id AND u2.school_id = :schoolId
-            ))
-          )
+          AND t.school_id = :schoolId
       )
       SELECT n.*,
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :readTrackingId) ELSE false END) as is_read,
