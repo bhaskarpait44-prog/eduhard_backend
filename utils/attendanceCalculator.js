@@ -396,7 +396,10 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
     `, { replacements: { sessionId }, transaction });
     
     const today = new Date().toISOString().split('T')[0];
-    const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
+    // FIX: normalize to plain YYYY-MM-DD strings (Sequelize may return Date objects)
+    const sessionEndStr   = String(sessionInfo.end_date).slice(0, 10);
+    const sessionStartStr = String(sessionInfo.start_date).slice(0, 10);
+    const calcUpTo = today < sessionEndStr ? today : sessionEndStr;
 
     // Fetch config and all holidays for the entire session at once
     const [[workingDaysRow]] = await sequelize.query(`
@@ -408,10 +411,11 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       SELECT holiday_date FROM session_holidays 
       WHERE session_id = :sessionId AND holiday_date <= :calcUpTo;
     `, { replacements: { sessionId, calcUpTo }, transaction });
-    const holidaySet = new Set(allHolidays.map(h => h.holiday_date));
+    // FIX: normalize holiday dates to strings to avoid Date-object set membership failures
+    const holidaySet = new Set(allHolidays.map(h => String(h.holiday_date).slice(0, 10)));
 
     // Generate prefix sum of working days from session start to calcUpTo
-    const fullDateRange = getDateRange(sessionInfo.start_date, calcUpTo);
+    const fullDateRange = getDateRange(sessionStartStr, calcUpTo);
     const prefixSum = new Array(fullDateRange.length).fill(0);
     const dateToIndex = new Map();
     

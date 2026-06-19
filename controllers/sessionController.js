@@ -96,8 +96,8 @@ exports.create = async (req, res, next) => {
 // ── GET /api/sessions ────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
   try {
-    const page = parseInt(req.query.page, 10) || 1;
-    const limit = parseInt(req.query.limit, 10) || 20;
+    const page  = parseInt(req.query.page,  10) || 1;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100); // FIX: cap at 100 to prevent resource exhaustion
     const { search, status } = req.query;
     const offset = (page - 1) * limit;
     const schoolId = req.user.school_id;
@@ -212,9 +212,9 @@ exports.activate = async (req, res, next) => {
 
       if (current) {
         await sequelize.query(`
-          UPDATE sessions SET is_current = false, status = 'closed', updated_at = NOW()
+          UPDATE sessions SET is_current = false, status = 'closed', is_locked = false, updated_at = NOW()
           WHERE id = :id;
-        `, { replacements: { id: current.id }, transaction: t });
+        `, { replacements: { id: current.id }, transaction: t }); // FIX: also clear is_locked to prevent stuck closed+locked state
 
         await sequelize.query(`
           INSERT INTO audit_logs
@@ -294,8 +294,9 @@ exports.addHoliday = async (req, res, next) => {
         throw { name: 'CustomError', message: 'Session not found.', status: 404 };
       }
 
-      if (session.is_locked || ['upcoming', 'locked', 'closed', 'archived'].includes(session.status)) {
-        throw { name: 'CustomError', message: `Cannot add holiday: session is ${session.status}.`, status: 400 };
+      // FIX: use a whitelist instead of an exclusion list — only active sessions allow holiday changes
+      if (session.status !== 'active' || session.is_locked) {
+        throw { name: 'CustomError', message: `Cannot add holiday: session must be active and unlocked (current status: ${session.status}).`, status: 400 };
       }
 
       const hDate = new Date(holiday_date);
@@ -508,7 +509,8 @@ exports.update = async (req, res, next) => {
 
       if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
 
-      if (session.is_locked || ['closed', 'archived', 'locked'].includes(session.status)) {
+      // FIX: use a whitelist — only upcoming or active sessions can be updated
+      if (session.is_locked || !['upcoming', 'active'].includes(session.status)) {
         throw { name: 'CustomError', message: `Cannot update session: it is already ${session.status}.`, status: 400 };
       }
 
@@ -557,7 +559,8 @@ exports.update = async (req, res, next) => {
       }, transaction: t });
 
       // 5. Update working days if provided
-      if (working_days) {
+      // FIX: guard against empty object {} which would silently reset schedule to defaults
+      if (working_days && typeof working_days === 'object' && Object.keys(working_days).length > 0) {
         await sequelize.query(`
           UPDATE session_working_days
           SET monday = :mon, tuesday = :tue, wednesday = :wed, thursday = :thu, 
@@ -621,7 +624,8 @@ exports.updateWorkingDays = async (req, res, next) => {
       `, { replacements: { id, schoolId }, transaction: t });
 
       if (!session) throw { name: 'CustomError', message: 'Session not found.', status: 404 };
-      if (session.is_locked || ['locked', 'closed', 'archived'].includes(session.status)) {
+      // FIX: use a whitelist — only upcoming or active sessions allow working-day changes
+      if (session.is_locked || !['upcoming', 'active'].includes(session.status)) {
         throw { name: 'CustomError', message: 'Cannot update working days: session is locked or inactive.', status: 400 };
       }
 
@@ -701,8 +705,9 @@ exports.removeHoliday = async (req, res, next) => {
       `, { replacements: { holidayId, id, schoolId }, transaction: t });
 
       if (!holiday) throw { name: 'CustomError', message: 'Holiday not found.', status: 404 };
-      if (holiday.is_locked || ['locked', 'closed', 'archived'].includes(holiday.status)) {
-        throw { name: 'CustomError', message: 'Cannot modify holidays on a closed, archived or locked session.', status: 400 };
+      // FIX: use whitelist — only active sessions allow holiday changes
+      if (holiday.status !== 'active' || holiday.is_locked) {
+        throw { name: 'CustomError', message: 'Cannot modify holidays on a session that is not active and unlocked.', status: 400 };
       }
 
       // 2. Delete holiday
@@ -799,6 +804,9 @@ exports.remove = async (req, res, next) => {
         };
       }
 
+      // FIX: DELETE first, then audit log — avoids FK violation if audit_logs references sessions.id
+      await sequelize.query(`DELETE FROM sessions WHERE id = :id;`, { replacements: { id }, transaction: t });
+
       await sequelize.query(`
         INSERT INTO audit_logs
           (table_name, record_id, field_name, old_value, new_value,
@@ -813,8 +821,6 @@ exports.remove = async (req, res, next) => {
         ip: req.ip || null,
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
-
-      await sequelize.query(`DELETE FROM sessions WHERE id = :id;`, { replacements: { id }, transaction: t });
     });
 
     res.ok(null, 'Session deleted successfully.');
@@ -846,8 +852,8 @@ exports.archive = async (req, res, next) => {
       }
 
       await sequelize.query(`
-        UPDATE sessions SET status = 'archived', updated_at = NOW() WHERE id = :id;
-      `, { replacements: { id }, transaction: t });
+        UPDATE sessions SET status = 'archived', is_locked = false, updated_at = NOW() WHERE id = :id;
+      `, { replacements: { id }, transaction: t }); // FIX: ensure is_locked is cleared on archive
 
       await sequelize.query(`
         INSERT INTO audit_logs
@@ -927,14 +933,19 @@ exports.getStats = async (req, res, next) => {
     `, { replacements: { id } });
 
     const today = new Date().toISOString().split('T')[0];
-    const calcUpTo = today < sessionInfo.end_date ? today : sessionInfo.end_date;
-    const allDates = _internal.getDateRange(sessionInfo.start_date, calcUpTo);
+    // FIX: normalize dates to plain YYYY-MM-DD strings to avoid Date-vs-string comparison bugs
+    const sessionStart = String(sessionInfo.start_date).slice(0, 10);
+    const sessionEnd   = String(sessionInfo.end_date).slice(0, 10);
+    const calcUpTo = today < sessionEnd ? today : sessionEnd;
+    const allDates = _internal.getDateRange(sessionStart, calcUpTo);
     
     const holidaySet = new Set(holidayRows.map(h => {
       const d = h.holiday_date;
       return d instanceof Date ? d.toISOString().split('T')[0] : String(d).slice(0, 10);
     }));
+    // FIX: guard against missing working-days row to prevent crash
     const workingDates = allDates.filter(date => {
+      if (!wdRow) return false;
       const dayOfWeek = _internal.getDayOfWeek(date);
       const colName = _internal.DAY_COLUMN_MAP[dayOfWeek];
       return wdRow[colName] && !holidaySet.has(date);

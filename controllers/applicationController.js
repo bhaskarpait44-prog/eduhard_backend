@@ -197,7 +197,7 @@ exports.updateStatus = async (req, res, next) => {
         try {
           const safeFirstName = escapeHtml(application.student_data.first_name);
           const safeLastName = escapeHtml(application.student_data.last_name);
-          await require('../utils/emailService').sendEmail({
+          await require('../utils/mailer').sendEmail({
             to: email,
             subject: 'Admission Application Approved',
             html: `
@@ -236,7 +236,7 @@ exports.updateStatus = async (req, res, next) => {
           const safeFirstName = escapeHtml(application.student_data.first_name);
           const safeLastName = escapeHtml(application.student_data.last_name);
           const safeRemarks = escapeHtml(remarks || 'Criteria not met');
-          await require('../utils/emailService').sendEmail({
+          await require('../utils/mailer').sendEmail({
             to: parentEmail,
             subject: `Admission Application Update - Ref: ${application.reference_no}`,
             html: `
@@ -444,31 +444,56 @@ exports.admitStudent = async (req, res, next) => {
         WHERE id = :id;
       `, { replacements: { id, userId: req.user.id }, transaction: t });
 
-      return { studentId: student.id, admission_no, first_name, last_name, email: studentEmail, password: generatedPassword };
+      return { 
+        studentId: student.id, 
+        admission_no, 
+        first_name, 
+        last_name, 
+        email: studentEmail, 
+        password: generatedPassword,
+        parentEmail,
+        parentPassword: generatedParentPassword
+      };
     });
 
-    // Notify Applicant
-    if (result.email) {
+    // Notify Applicant (Parent and/or Student)
+    const emailTo = result.email || result.parentEmail;
+    if (emailTo) {
       try {
         const safeFirstName = escapeHtml(result.first_name);
         const safeLastName = escapeHtml(result.last_name);
-        await require('../utils/emailService').sendEmail({
-          to: result.email,
+        let htmlContent = `
+          <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
+            <h2 style="color: #2e7d32;">Welcome to the School!</h2>
+            <p>Congratulations <strong>${safeFirstName} ${safeLastName}</strong>,</p>
+            <p>Your admission process is complete. The account details are as follows:</p>
+            
+            <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <h4 style="margin: 0 0 10px 0; color: #1e3a8a;">Student Portal Credentials:</h4>
+              <p style="margin: 5px 0;"><strong>Admission No:</strong> ${result.admission_no}</p>
+              <p style="margin: 5px 0;"><strong>Password:</strong> ${result.password}</p>
+            </div>`;
+
+        if (result.parentPassword) {
+          htmlContent += `
+            <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <h4 style="margin: 0 0 10px 0; color: #1e3a8a;">Parent Portal Credentials:</h4>
+              <p style="margin: 5px 0;"><strong>Login Email:</strong> ${result.parentEmail}</p>
+              <p style="margin: 5px 0;"><strong>Password:</strong> ${result.parentPassword}</p>
+            </div>`;
+        }
+
+        htmlContent += `
+            <p>Please log in to the portal to access your dashboard.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 12px; color: #999;">This is an automated notification. Please change your passwords after logging in.</p>
+          </div>
+        `;
+
+        await require('../utils/mailer').sendEmail({
+          to: emailTo,
           subject: 'Admission Process Complete',
-          html: `
-            <div style="font-family: sans-serif; line-height: 1.6; color: #333;">
-              <h2 style="color: #2e7d32;">Welcome to the School!</h2>
-              <p>Congratulations <strong>${safeFirstName} ${safeLastName}</strong>,</p>
-              <p>Your admission process is complete. Your account has been created with the following credentials:</p>
-              <div style="background: #f5f5f5; padding: 15px; border-radius: 5px; margin: 20px 0;">
-                <p style="margin: 5px 0;"><strong>Admission No:</strong> ${result.admission_no}</p>
-                <p style="margin: 5px 0;"><strong>Password:</strong> ${result.password}</p>
-              </div>
-              <p>Please log in to the student portal to access your dashboard.</p>
-              <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-              <p style="font-size: 12px; color: #999;">This is an automated notification. Please change your password after logging in.</p>
-            </div>
-          `
+          html: htmlContent
         });
       } catch (e) { console.error('Notify fail:', e) }
     }

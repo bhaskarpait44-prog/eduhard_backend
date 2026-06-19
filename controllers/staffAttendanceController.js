@@ -68,8 +68,8 @@ exports.markBulk = async (req, res, next) => {
     }
 
     // 1. Validate all staff members belong to this school
-    const teacherIds = [...new Set(records.filter(r => r.type === 'teacher' && r.staff_id).map(r => r.staff_id))];
-    const userIds = [...new Set(records.filter(r => r.type !== 'teacher' && r.staff_id).map(r => r.staff_id))];
+    const teacherIds = [...new Set(records.filter(r => r.type === 'teacher' && r.staff_id).map(r => Number(r.staff_id)))];
+    const userIds = [...new Set(records.filter(r => r.type !== 'teacher' && r.staff_id).map(r => Number(r.staff_id)))];
 
     const validTeacherSet = new Set();
     const validUserSet = new Set();
@@ -124,7 +124,7 @@ exports.markBulk = async (req, res, next) => {
 
     for (const rec of records) {
       const isTeacher = rec.type === 'teacher';
-      const staffId = rec.staff_id;
+      const staffId = Number(rec.staff_id);
       
       // Security: Skip if staff member doesn't belong to this school or has wrong role
       if (isTeacher && !validTeacherSet.has(staffId)) continue;

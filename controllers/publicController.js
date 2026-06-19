@@ -56,7 +56,7 @@ exports.createApplication = async (req, res, next) => {
     }
 
     const { 
-      first_name, last_name, email, class_id, 
+      first_name, last_name, email, class_id, date_of_birth,
       ...rest 
     } = student_data;
     
@@ -145,7 +145,7 @@ exports.createApplication = async (req, res, next) => {
       try {
         const safeFirstName = escapeHtml(first_name);
         const safeLastName = escapeHtml(last_name);
-        await require('../utils/emailService').sendEmail({
+        await require('../utils/mailer').sendEmail({
           to: parentEmail,
           subject: `Application Received - Reference: ${reference_no}`,
           html: `
