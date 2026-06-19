@@ -136,7 +136,7 @@ exports.list = async (req, res, next) => {
         LEFT JOIN users creator ON creator.id = u.created_by
         WHERE u.school_id = :schoolId
           AND u.is_deleted = false
-          AND u.role IN ('admin', 'super_admin', 'accountant', 'student', 'staff', 'librarian', 'receptionist')
+          AND u.role IN ('admin', 'super_admin', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist')
         GROUP BY u.id, creator.name
 
         UNION ALL
@@ -782,7 +782,7 @@ exports.downloadImportTemplate = async (req, res, next) => {
       { key: 'department',   label: 'Department',     example: 'Science'              },
       { key: 'designation',  label: 'Designation',    example: 'Senior Teacher'       },
     ],
-    valid_roles: ['admin', 'teacher', 'accountant', 'student'],
+    valid_roles: ['admin', 'teacher', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist'],
     notes: [
       'All fields marked * are required.',
       'Email must be unique across the system.',
@@ -828,7 +828,7 @@ exports.previewImport = async (req, res, next) => {
         }
       }
 
-      const validRoles = ['admin', 'teacher', 'accountant', 'student'];
+      const validRoles = ['admin', 'teacher', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
       if (!row.role?.trim()) errors.push('Role is required');
       else if (!validRoles.includes(row.role.trim().toLowerCase())) {
         errors.push(`Invalid role. Must be one of: ${validRoles.join(', ')}`);
