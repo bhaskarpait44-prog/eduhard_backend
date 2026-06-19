@@ -1075,6 +1075,7 @@ exports.getDefaulters = async (req, res, next) => {
         s.admission_no,
         s.first_name || ' ' || s.last_name AS student_name,
         c.name AS class_name,
+        e.class_id AS class_id,
         sec.name AS section_name,
         COUNT(fi.id)::int AS open_invoices,
         MIN(fi.due_date) AS first_due_date,
@@ -1098,7 +1099,7 @@ exports.getDefaulters = async (req, res, next) => {
           OR s.admission_no ILIKE :search
           OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
         )
-      GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name, sec.name
+      GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name, e.class_id, sec.name
       HAVING COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) > 0
       ORDER BY balance DESC, first_due_date ASC;
     `, { replacements });
@@ -1155,75 +1156,86 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
 
     // --- Header ---
     const drawHeader = () => {
-      doc.fillColor('#0f766e').fontSize(18).font('Helvetica-Bold').text(school.name.toUpperCase(), { align: 'center' });
-      doc.fillColor('#64748b').fontSize(9).font('Helvetica').text(school.address, { align: 'center' });
+      doc.fillColor('#0f766e').fontSize(18).font('Helvetica-Bold').text(school?.name ? school.name.toUpperCase() : 'SCHOOL ERP', { align: 'center' });
+      doc.fillColor('#64748b').fontSize(9).font('Helvetica').text(school?.address || '', { align: 'center' });
       doc.moveDown(0.5);
       doc.fillColor('#1e293b').fontSize(14).font('Helvetica-Bold').text('FEE DEFAULTERS LIST', { align: 'center' });
       doc.fontSize(10).text(`Session: ${session?.name || 'Current'}`, { align: 'center' });
       doc.moveDown(1);
-      doc.strokeColor('#e2e8f0').lineWidth(1).moveTo(40, doc.y).lineTo(555, doc.y).stroke();
-      doc.moveDown(1);
+      doc.strokeColor('#0f766e').lineWidth(2).moveTo(40, doc.y).lineTo(555, doc.y).stroke();
+      doc.moveDown(1.2);
     };
 
     drawHeader();
 
-    // --- Table ---
+    // --- Table Configuration ---
     const startX = 40;
     const cols = [
-      { label: 'Adm No', width: 60 },
-      { label: 'Student Name', width: 150 },
+      { label: 'Adm No', width: 90 },
+      { label: 'Student Name', width: 165 },
       { label: 'Class', width: 80 },
       { label: 'Pending Amt', width: 90, align: 'right' },
-      { label: 'Last Payment', width: 100, align: 'right' }
+      { label: 'Last Payment', width: 90, align: 'right' }
     ];
 
-    // Header Row
-    doc.fillColor('#f8fafc').rect(startX, doc.y, 515, 20).fill();
-    doc.fillColor('#475569').fontSize(9).font('Helvetica-Bold');
-    let currX = startX;
-    cols.forEach(c => {
-      doc.text(c.label, currX + 5, doc.y - 15, { width: c.width, align: c.align || 'left' });
-      currX += c.width;
-    });
-    doc.moveDown(0.5);
+    const drawTableHeader = () => {
+      const headerY = doc.y;
+      const headerHeight = 22;
+      
+      // Header background
+      doc.fillColor('#0f766e').rect(startX, headerY - 4, 515, headerHeight).fill();
+      
+      doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
+      let currX = startX;
+      cols.forEach(c => {
+        doc.text(c.label, currX + 5, headerY, { width: c.width - 10, align: c.align || 'left' });
+        currX += c.width;
+      });
+      
+      doc.y = headerY + headerHeight;
+    };
+
+    drawTableHeader();
 
     // Data Rows
-    doc.font('Helvetica').fontSize(9).fillColor('#1e293b');
     let totalPending = 0;
 
     defaulters.forEach((row, i) => {
-      if (doc.y > 750) {
+      if (doc.y > 720) {
         doc.addPage();
         drawHeader();
-        // Re-draw table header
-        doc.fillColor('#f8fafc').rect(startX, doc.y, 515, 20).fill();
-        doc.fillColor('#475569').fontSize(9).font('Helvetica-Bold');
-        currX = startX;
-        cols.forEach(c => {
-          doc.text(c.label, currX + 5, doc.y - 15, { width: c.width, align: c.align || 'left' });
-          currX += c.width;
-        });
-        doc.moveDown(0.5);
-        doc.font('Helvetica').fontSize(9).fillColor('#1e293b');
+        drawTableHeader();
       }
 
-      currX = startX;
+      const rowHeight = 22;
       const rowY = doc.y;
+
+      // Zebra striping
+      if (i % 2 === 1) {
+        doc.fillColor('#f8fafc').rect(startX, rowY - 4, 515, rowHeight).fill();
+      }
+
+      doc.font('Helvetica').fontSize(9).fillColor('#1e293b');
+      let currX = startX;
       const classText = `${row.class_name}${row.section_name ? ` (${row.section_name})` : ''}`;
       const lastPay = row.last_payment_date ? new Date(row.last_payment_date).toLocaleDateString('en-IN') : 'None';
       
-      doc.text(row.admission_no, currX + 5, rowY); currX += cols[0].width;
-      doc.text(row.student_name, currX + 5, rowY, { width: cols[1].width }); currX += cols[1].width;
-      doc.text(classText, currX + 5, rowY); currX += cols[2].width;
-      doc.text(formatINR(row.balance), currX + 5, rowY, { width: cols[3].width, align: 'right' }); currX += cols[3].width;
-      doc.text(lastPay, currX + 5, rowY, { width: cols[4].width, align: 'right' });
+      doc.text(row.admission_no, currX + 5, rowY, { width: cols[0].width - 10 }); currX += cols[0].width;
+      doc.text(row.student_name, currX + 5, rowY, { width: cols[1].width - 10 }); currX += cols[1].width;
+      doc.text(classText, currX + 5, rowY, { width: cols[2].width - 10 }); currX += cols[2].width;
+      doc.text(formatINR(row.balance), currX + 5, rowY, { width: cols[3].width - 10, align: 'right' }); currX += cols[3].width;
+      doc.text(lastPay, currX + 5, rowY, { width: cols[4].width - 10, align: 'right' });
 
       totalPending += parseFloat(row.balance);
-      doc.moveDown(1.2);
-      doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(startX, doc.y - 5).lineTo(555, doc.y - 5).stroke();
+      doc.y = rowY + rowHeight;
+      doc.strokeColor('#f1f5f9').lineWidth(0.5).moveTo(startX, doc.y - 4).lineTo(555, doc.y - 4).stroke();
     });
 
     // Summary
+    if (doc.y > 720) {
+      doc.addPage();
+      drawHeader();
+    }
     doc.moveDown(1);
     doc.fillColor('#0f766e').font('Helvetica-Bold').fontSize(11);
     doc.text(`TOTAL OUTSTANDING: INR ${formatINR(totalPending)}`, { align: 'right' });

@@ -143,6 +143,9 @@ exports.createNotice = async (req, res, next) => {
     if (audience === 'all_teachers') audience = 'teachers';
     if (audience === 'all_receptionists') audience = 'receptionists';
     
+    const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || 
+                       ['school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone'].includes(audience);
+    
     const schoolId = req.user.school_id;
     if (!schoolId) {
        return res.fail('School ID is missing from your profile. Please contact support.', [], 400);
@@ -191,8 +194,6 @@ exports.createNotice = async (req, res, next) => {
     }
 
     const attachment_path = req.file ? req.file.path.replace(/\\/g, '/') : null;
-    const isSchoolWide = is_school_wide === 'true' || is_school_wide === true || 
-                       ['school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone'].includes(audience);
 
     const [result] = await sequelize.query(`
       INSERT INTO notices (
@@ -242,9 +243,6 @@ exports.createNotice = async (req, res, next) => {
       }
     })();
   } catch (err) { 
-    try {
-      require('fs').appendFileSync('notice_error.log', `[${new Date().toISOString()}] ${err.message}\n${err.stack}\n\n`);
-    } catch (e) {}
     next(err); 
   }
 };
@@ -299,11 +297,6 @@ exports.listAllNotices = async (req, res, next) => {
       ORDER BY n.created_at DESC
       LIMIT :limit OFFSET :offset
     `, { replacements: { ...replacements, limit: pp, offset } });
-
-    // DEBUG LOG
-    try {
-      require('fs').appendFileSync('notice_debug.log', `[${new Date().toISOString()}] listAllNotices: schoolId=${schoolId}, count=${notices.length}, total=${count}\n`);
-    } catch (e) {}
 
     res.ok({ notices, pagination: { total: count, page: p, perPage: pp, totalPages: Math.ceil(count / pp) } });
   } catch (err) { next(err); }
@@ -426,12 +419,12 @@ exports.listTeacherNotices = async (req, res, next) => {
                WHEN n.source = 'unified' THEN EXISTS(
                  SELECT 1 FROM notice_reads nr 
                  WHERE nr.notice_id = n.id 
-                 AND (nr.teacher_id = :userId OR nr.user_id = :userId)
+                 AND nr.user_id = :userId
                ) 
                WHEN n.source = 'teacher_notices' THEN EXISTS(
                  SELECT 1 FROM teacher_notice_reads tnr 
                  WHERE tnr.notice_id = n.id 
-                 AND (tnr.teacher_id = :userId OR tnr.user_id = :userId)
+                 AND tnr.user_id = :userId
                )
                ELSE false 
              END) as is_read,
@@ -484,9 +477,9 @@ exports.markTeacherRead = async (req, res, next) => {
 
     if (source === 'teacher_notices') {
       await sequelize.query(`
-        INSERT INTO teacher_notice_reads (notice_id, teacher_id, read_at)
+        INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
         VALUES (:noticeId, :userId, NOW())
-        ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+        ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
       `, { replacements: { noticeId: id, userId } });
     } else {
       // Check if it's actually a unified notice first
@@ -494,16 +487,16 @@ exports.markTeacherRead = async (req, res, next) => {
       
       if (exists) {
         await sequelize.query(`
-          INSERT INTO notice_reads (notice_id, teacher_id, read_at)
+          INSERT INTO notice_reads (notice_id, user_id, read_at)
           VALUES (:noticeId, :userId, NOW())
-          ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+          ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
         `, { replacements: { noticeId: id, userId } });
       } else {
         // Fallback: try teacher_notices if it wasn't specified but ID exists there
         await sequelize.query(`
-          INSERT INTO teacher_notice_reads (notice_id, teacher_id, read_at)
+          INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
           VALUES (:noticeId, :userId, NOW())
-          ON CONFLICT (notice_id, teacher_id) DO UPDATE SET read_at = NOW()
+          ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
         `, { replacements: { noticeId: id, userId } });
       }
     }
