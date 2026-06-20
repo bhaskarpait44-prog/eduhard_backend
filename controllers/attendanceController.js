@@ -170,9 +170,9 @@ exports.markBulk = async (req, res, next) => {
     });
 
     await writeAuditLog(sequelize, {
-      tableName: 'attendance',
+      tableName: 'attendance_bulk',
       recordId: Number(section_id) || 0,
-      changes: { field: 'bulk_marking', oldValue: 'none', newValue: `${inserted.length + updated.length} records` },
+      changes: { field: 'bulk_marking', oldValue: 'none', newValue: `${inserted.length + updated.length} records on ${date}` },
       changedBy: req.user.id,
       reason: `Bulk attendance marking for ${date}`,
       ipAddress: req.ip,
@@ -396,6 +396,22 @@ exports.downloadRegisterPdf = async (req, res, next) => {
     const classId = parseInt(class_id, 10);
     const sectionId = parseInt(section_id, 10);
 
+    if (!Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12)
+      return res.fail('month must be between 1 and 12.', [], 422);
+    if (!Number.isInteger(yearNum) || yearNum < 2000 || yearNum > 2100)
+      return res.fail('year must be a valid 4-digit year.', [], 422);
+    if (!Number.isInteger(classId))
+      return res.fail('class_id must be a valid integer.', [], 422);
+    if (!Number.isInteger(sectionId))
+      return res.fail('section_id must be a valid integer.', [], 422);
+
+    const sessionId = await resolveSessionId({
+      requestedSessionId: parseInt(session_id, 10),
+      schoolId: req.user.school_id,
+      allowLocked: true,
+    });
+    if (sessionId == null) return res.fail('Session not found or access denied.', [], 404);
+
     const fromDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-01`;
     const lastDay = new Date(yearNum, monthNum, 0).getDate();
     const toDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
@@ -411,7 +427,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
       JOIN sections sec ON sec.class_id = c.id
       JOIN sessions sess ON sess.id = :sessionId
       WHERE c.id = :classId AND sec.id = :sectionId LIMIT 1;
-    `, { replacements: { classId, sectionId, sessionId: session_id } });
+    `, { replacements: { classId, sectionId, sessionId } });
 
     const [students] = await sequelize.query(`
       SELECT
@@ -423,7 +439,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
       WHERE e.session_id = :sessionId AND e.class_id = :classId AND e.section_id = :sectionId AND e.status = 'active'
       GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
       ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
-    `, { replacements: { fromDate, toDate, sessionId: session_id, classId, sectionId } });
+    `, { replacements: { fromDate, toDate, sessionId, classId, sectionId } });
 
     const PDFDocument = require('pdfkit');
     const doc = new PDFDocument({ 
@@ -602,6 +618,15 @@ exports.sessionReport = async (req, res, next) => {
       return res.fail('session_id must be a valid integer.', [], 422);
     }
 
+    const [[sessionCheck]] = await sequelize.query(`
+      SELECT id FROM sessions
+      WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { sessionId: parsedSessionId, schoolId: req.user.school_id } });
+
+    if (!sessionCheck) {
+      return res.fail('Session not found or access denied.', [], 404);
+    }
+
     const [rows] = await sequelize.query(`
       WITH attendance_records AS (
         SELECT
@@ -713,6 +738,7 @@ exports.override = async (req, res, next) => {
     const [[updated]] = await sequelize.query(`
       UPDATE attendance SET
         status          = :status,
+        method          = 'manual',
         override_reason = :reason,
         marked_by       = :markedBy,
         marked_at       = NOW(),

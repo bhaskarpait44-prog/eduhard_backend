@@ -435,7 +435,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       
       if (startIndex === undefined) {
         // If joined before session starts, we start counting from the session start
-        if (joinedDate < sessionInfo.start_date) {
+        if (joinedDate < sessionStartStr) {
           startIndex = 0;
         } else {
           // Joined after calcUpTo

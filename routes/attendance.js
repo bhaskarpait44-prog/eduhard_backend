@@ -11,6 +11,7 @@ router.post('/mark',    requireAdminOrTeacher, [
   body('date').isDate(),
   body('status').isIn(['present', 'absent', 'late', 'half_day', 'holiday']),
   body('method').isIn(['biometric', 'manual', 'auto']),
+  body('session_id').optional().isInt(),
 ], validate, ctrl.markSingle);
 
 router.post('/bulk',    requireAdminOrTeacher, [
