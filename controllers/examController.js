@@ -149,6 +149,10 @@ exports.list = async (req, res, next) => {
       replacements.sessionId = session_id;
     }
 
+    if (req.user.role === 'teacher') {
+      sql += " AND e.status != 'draft'";
+    }
+
     sql += ' GROUP BY e.id, c.id, c.name, c.stream, s.name ORDER BY e.start_date DESC, e.id DESC';
 
     const [exams] = await sequelize.query(sql, { 
@@ -167,7 +171,8 @@ exports.getSubjects = async (req, res, next) => {
     const examId = req.params.id;
 
     const [[exam]] = await sequelize.query(`
-      SELECT e.id, e.class_id, e.session_id, e.status, e.published_at, 
+      SELECT e.id, e.name, e.class_id, e.session_id, e.status, e.published_at, 
+             e.start_date, e.end_date,
              c.name AS class_name, c.stream AS class_stream
       FROM exams e
       JOIN classes c ON c.id = e.class_id
@@ -176,6 +181,10 @@ exports.getSubjects = async (req, res, next) => {
     `, { replacements: { examId: Number(examId) } });
 
     if (!exam) return res.fail('Exam not found', [], 404);
+
+    if (req.user.role === 'teacher' && exam.status === 'draft') {
+      return res.fail('Teachers cannot access draft exam details.', [], 403);
+    }
 
     const [subjects] = await sequelize.query(`
       SELECT
@@ -345,6 +354,7 @@ exports.create = async (req, res, next) => {
       start_date,
       end_date,
       status = 'draft',
+      weightage = 100.00,
       subjects = [],
     } = req.body;
 
@@ -430,17 +440,17 @@ exports.create = async (req, res, next) => {
       const [[createdExam]] = await sequelize.query(`
         INSERT INTO exams (
           session_id, class_id, name, exam_type, start_date, end_date,
-          total_marks, passing_marks, status, published_at, published_by,
+          total_marks, passing_marks, weightage, status, published_at, published_by,
           created_by, updated_by, created_at, updated_at
         )
         VALUES (
           :session_id, :class_id, :name, :exam_type, :start_date, :end_date,
-          :total_marks, :passing_marks, :status,
+          :total_marks, :passing_marks, :weightage, :status,
           CASE WHEN :status = 'published' THEN NOW() ELSE NULL END,
           CASE WHEN :status = 'published' THEN :userId ELSE NULL END,
           :userId, :userId, NOW(), NOW()
         )
-        RETURNING id, session_id, class_id, name, exam_type, start_date, end_date, total_marks, passing_marks, status, published_at;
+        RETURNING id, session_id, class_id, name, exam_type, start_date, end_date, total_marks, passing_marks, weightage, status, published_at;
       `, {
         replacements: {
           session_id: session.id,
@@ -451,6 +461,7 @@ exports.create = async (req, res, next) => {
           end_date,
           total_marks,
           passing_marks,
+          weightage: parseFloat(weightage),
           status,
           userId: req.user.id,
         },
@@ -910,6 +921,9 @@ exports.uploadMarks = async (req, res, next) => {
       { replacements: { id } }
     );
     if (!exam) return res.fail('Exam not found.', [], 404);
+    if (req.user.role === 'teacher' && exam.status === 'draft') {
+      return res.fail('Teachers cannot enter or upload marks for draft exams.', [], 403);
+    }
     if (exam.status === 'completed') return res.fail('Exam is already completed.');
 
     const [[subject]] = await sequelize.query(`
@@ -1038,15 +1052,22 @@ exports.downloadTimetablePdf = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[exam]] = await sequelize.query(`
-      SELECT e.id, e.name, e.start_date, e.end_date, c.name AS class_name, s.name AS session_name
+      SELECT e.id, e.name, e.start_date, e.end_date, e.status, c.name AS class_name, s.name AS session_name
       FROM exams e
       JOIN classes c ON c.id = e.class_id
       JOIN sessions s ON s.id = e.session_id
       WHERE e.id = :examId AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { examId, schoolId } });
+    `, { replacements: { examId: Number(examId), schoolId: Number(schoolId) } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+
+    if (req.user.role === 'teacher' && exam.status === 'draft') {
+      return res.status(403).json({
+        success: false,
+        message: 'Teachers cannot download timetables of draft exams.'
+      });
+    }
 
     const [subjects] = await sequelize.query(`
       SELECT s.name, s.code, es.exam_date, es.start_time, es.end_time,
@@ -1056,7 +1077,7 @@ exports.downloadTimetablePdf = async (req, res, next) => {
       LEFT JOIN teachers t ON t.id = es.invigilator_teacher_id
       WHERE es.exam_id = :examId
       ORDER BY es.exam_date ASC, es.start_time ASC, s.name ASC;
-    `, { replacements: { examId } });
+    `, { replacements: { examId: Number(examId) } });
 
     const [[school]] = await sequelize.query(
       `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
@@ -1141,11 +1162,11 @@ exports.downloadClassTimetablePdf = async (req, res, next) => {
 
     const [[cls]] = await sequelize.query(`
       SELECT name FROM classes WHERE id = :classId AND school_id = :schoolId LIMIT 1;
-    `, { replacements: { classId: class_id, schoolId } });
+    `, { replacements: { classId: Number(class_id), schoolId: Number(schoolId) } });
 
     if (!cls) return res.fail('Class not found.', [], 404);
 
-    const [subjects] = await sequelize.query(`
+    let sql = `
       SELECT e.name AS exam_name, s.name, s.code, es.exam_date, es.start_time, es.end_time,
              CONCAT(t.first_name, ' ', t.last_name) AS invigilator_name
       FROM exam_subjects es
@@ -1153,8 +1174,15 @@ exports.downloadClassTimetablePdf = async (req, res, next) => {
       JOIN subjects s ON s.id = es.subject_id
       LEFT JOIN teachers t ON t.id = es.invigilator_teacher_id
       WHERE e.class_id = :classId AND e.session_id = :sessionId
-      ORDER BY es.exam_date ASC, es.start_time ASC, e.name ASC, s.name ASC;
-    `, { replacements: { classId: class_id, sessionId: session_id } });
+    `;
+    if (req.user.role === 'teacher') {
+      sql += " AND e.status != 'draft'";
+    }
+    sql += " ORDER BY es.exam_date ASC, es.start_time ASC, e.name ASC, s.name ASC;";
+
+    const [subjects] = await sequelize.query(sql, {
+      replacements: { classId: Number(class_id), sessionId: Number(session_id) }
+    });
 
     const [[school]] = await sequelize.query(
       `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,

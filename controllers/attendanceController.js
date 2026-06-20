@@ -28,32 +28,39 @@ async function getCurrentSessionForSchool(schoolId) {
 
 async function resolveSessionId({ requestedSessionId, schoolId, allowLocked = false }) {
   let sessionId = null;
+  let session = null;
+
   if (requestedSessionId != null) {
-    const [[session]] = await sequelize.query(`
-      SELECT id, is_locked
+    const [[res]] = await sequelize.query(`
+      SELECT id, status, is_locked
       FROM sessions
       WHERE id = :sessionId
         AND school_id = :schoolId
       LIMIT 1;
     `, { replacements: { sessionId: requestedSessionId, schoolId } });
-    if (session) {
-      if (session.is_locked && !allowLocked) {
-        const error = new Error('Session is locked. Cannot mark attendance.');
-        error.status = 422;
-        throw error;
-      }
-      sessionId = session.id;
-    }
+    session = res;
   } else {
-    const session = await getCurrentSessionForSchool(schoolId);
-    if (session) {
-      if (session.is_locked && !allowLocked) {
-        const error = new Error('Current session is locked. Cannot mark attendance.');
-        error.status = 422;
-        throw error;
-      }
-      sessionId = session.id;
+    const [[res]] = await sequelize.query(`
+      SELECT id, status, is_locked
+      FROM sessions
+      WHERE school_id = :schoolId
+        AND is_current = true
+      LIMIT 1;
+    `, { replacements: { schoolId } });
+    session = res;
+  }
+
+  if (session) {
+    const isWritable = session.status === 'active' && !session.is_locked;
+    if (!isWritable && !allowLocked) {
+      const reason = session.status !== 'active'
+        ? `Session is ${session.status}. Cannot mark attendance.`
+        : 'Session is locked. Cannot mark attendance.';
+      const error = new Error(reason);
+      error.status = 422;
+      throw error;
     }
+    sessionId = session.id;
   }
 
   return sessionId;
@@ -71,6 +78,19 @@ exports.markSingle = async (req, res, next) => {
 
     if (sessionId == null) {
       return res.fail('No active session found. Cannot mark attendance.', [], 422);
+    }
+
+    const [[enrollment]] = await sequelize.query(`
+      SELECT e.id FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.id = :enrollment_id
+        AND e.session_id = :sessionId
+        AND s.school_id = :schoolId
+        AND e.status = 'active';
+    `, { replacements: { enrollment_id, sessionId, schoolId: req.user.school_id } });
+
+    if (!enrollment) {
+      return res.fail('Enrollment not found in this session or access denied.', [], 404);
     }
 
     const [[existing]] = await sequelize.query(`
@@ -355,7 +375,7 @@ exports.getClassRegister = async (req, res, next) => {
       WHERE e.session_id = :sessionId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
-        AND e.status = 'active'
+        AND e.status IN ('active', 'inactive')
       GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
       ORDER BY
         COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer,
@@ -436,7 +456,7 @@ exports.downloadRegisterPdf = async (req, res, next) => {
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date BETWEEN :fromDate AND :toDate
-      WHERE e.session_id = :sessionId AND e.class_id = :classId AND e.section_id = :sectionId AND e.status = 'active'
+      WHERE e.session_id = :sessionId AND e.class_id = :classId AND e.section_id = :sectionId AND e.status IN ('active', 'inactive')
       GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
       ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
     `, { replacements: { fromDate, toDate, sessionId, classId, sectionId } });
@@ -693,7 +713,7 @@ exports.sessionReport = async (req, res, next) => {
       LEFT JOIN attendance_records ar ON ar.enrollment_id = e.id
       LEFT JOIN attendance_summary ats ON ats.enrollment_id = e.id
       WHERE e.session_id = :session_id
-        AND e.status = 'active'
+        AND e.status IN ('active', 'inactive')
         AND (:class_id IS NULL OR e.class_id = :class_id)
         AND (:section_id IS NULL OR e.section_id = :section_id)
       ORDER BY
@@ -720,26 +740,33 @@ exports.override = async (req, res, next) => {
     const { id } = req.params;
     const { status, override_reason } = req.body;
 
-    // 1. Fetch current status for audit log
+    // 1. Fetch current status and session lock status for audit log & authorization check
     const [[current]] = await sequelize.query(`
-      SELECT id, status FROM attendance
-      WHERE id = :id
-        AND enrollment_id IN (
-          SELECT e.id FROM enrollments e
-          JOIN sessions sess ON sess.id = e.session_id
-          WHERE sess.school_id = :schoolId
-        )
+      SELECT a.id, a.status, sess.is_locked, sess.status AS session_status
+      FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      JOIN sessions sess ON sess.id = e.session_id
+      WHERE a.id = :id AND sess.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!current) return res.fail('Attendance record not found or access denied.', [], 404);
+    
+    const isWritable = current.session_status === 'active' && !current.is_locked;
+    if (!isWritable) {
+      const reason = current.session_status !== 'active'
+        ? `Cannot override attendance: session is ${current.session_status}.`
+        : 'Cannot override attendance: session is locked.';
+      return res.fail(reason, [], 422);
+    }
 
-    // 2. Perform update
+    // 2. Perform update (clearing stale previous_status if manual override occurs)
     const [[updated]] = await sequelize.query(`
       UPDATE attendance SET
         status          = :status,
         method          = 'manual',
         override_reason = :reason,
+        previous_status = NULL,
         marked_by       = :markedBy,
         marked_at       = NOW(),
         updated_at      = NOW()
@@ -817,7 +844,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
       WHERE e.session_id = :sessionId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
-        AND e.status = 'active'
+        AND e.status IN ('active', 'inactive')
       GROUP BY e.id, e.roll_number, s.first_name, s.last_name
       ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D','','g'),''),'999999')::int, s.first_name
     `, { replacements: { fromDate: from_date, toDate: to_date, sessionId: session_id, classId: class_id, sectionId: section_id } });

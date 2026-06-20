@@ -815,7 +815,7 @@ exports.dashboard = async (req, res, next) => {
        AND ta.teacher_id = :teacherId
        AND ta.is_active = true
       WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
-        AND ex.status IN ('draft', 'published', 'upcoming', 'ongoing')
+        AND ex.status IN ('published', 'upcoming', 'ongoing')
         AND es.exam_date >= CURRENT_DATE
         AND (
           es.invigilator_teacher_id = :teacherId 
@@ -1592,6 +1592,7 @@ exports.marksExams = async (req, res, next) => {
       JOIN subjects s ON s.id = es.subject_id
       WHERE ex.session_id = :sessionId
         AND ex.class_id IN (:classIds)
+        AND ex.status != 'draft'
       ORDER BY ex.start_date DESC, ex.id DESC;
     `, { replacements: { sessionId: session?.id || 0, classIds } });
 
@@ -1643,6 +1644,10 @@ exports.marksEntry = async (req, res, next) => {
 
     if (!exam) {
       return res.fail('Exam not found.', [], 404);
+    }
+
+    if (exam.status === 'draft') {
+      return res.fail('Teachers cannot enter marks for draft exams.', [], 403);
     }
 
     if (Number(exam.class_id) !== Number(class_id) || Number(exam.session_id) !== Number(session?.id || 0)) {
@@ -1771,6 +1776,12 @@ async function saveOneMark(req, payload, context = null, transaction = null) {
   if (!exam) {
     const error = new Error('Exam not found.');
     error.status = 404;
+    throw error;
+  }
+
+  if (exam.status === 'draft') {
+    const error = new Error('Teachers cannot enter marks for draft exams.');
+    error.status = 403;
     throw error;
   }
 
@@ -2005,6 +2016,15 @@ exports.submitMarks = async (req, res, next) => {
 
     const { session, scope } = await getTeacherContext(req);
     assertMarksAccess(scope, Number(class_id), Number(section_id), Number(subject_id));
+
+    const [[exam]] = await sequelize.query(`
+      SELECT id, status FROM exams WHERE id = :examId LIMIT 1;
+    `, { replacements: { examId: exam_id } });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+    if (exam.status === 'draft') {
+      return res.fail('Teachers cannot submit marks for draft exams.', [], 403);
+    }
 
     const [[missing]] = await sequelize.query(`
       SELECT COUNT(*) AS cnt
@@ -2656,7 +2676,7 @@ exports.examTimetable = async (req, res, next) => {
        AND ta.teacher_id = :teacherId
        AND ta.is_active = true
       WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
-        AND ex.status IN ('draft', 'published', 'upcoming', 'ongoing', 'completed')
+        AND ex.status IN ('published', 'upcoming', 'ongoing', 'completed')
         AND (
           es.invigilator_teacher_id = :teacherId 
           OR ta.id IS NOT NULL

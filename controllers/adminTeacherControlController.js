@@ -53,7 +53,7 @@ function requireFields(payload, fields) {
 
 async function getCurrentSession(schoolId) {
   const [[session]] = await sequelize.query(`
-    SELECT id, name
+    SELECT id, name, status, is_locked
     FROM sessions
     WHERE school_id = :schoolId
     ORDER BY CASE WHEN is_current = true THEN 0 ELSE 1 END, start_date DESC
@@ -264,8 +264,43 @@ exports.assignments = async (req, res, next) => {
 exports.createAssignment = async (req, res, next) => {
   try {
     const session = await getCurrentSession(req.user.school_id);
+    if (!session) {
+      return res.fail('No current session found.', [], 422);
+    }
+    if (session.status !== 'active' || session.is_locked) {
+      return res.fail(`Current session is ${session.status || 'inactive'}${session.is_locked ? ' (locked)' : ''}. Cannot modify assignments.`, [], 422);
+    }
+
     const { teacher_id, class_id, section_id, subject_id = null, is_class_teacher = false } = req.body;
     requireFields(req.body, ['teacher_id', 'class_id', 'section_id']);
+
+    const schoolId = req.user.school_id;
+
+    // Validate teacher exists in this school
+    const [[teacherValid]] = await sequelize.query(`
+      SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { teacherId: teacher_id, schoolId } });
+    if (!teacherValid) return res.fail('Teacher not found or unauthorized.', [], 404);
+
+    // Validate class exists in this school
+    const [[classValid]] = await sequelize.query(`
+      SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { classId: class_id, schoolId } });
+    if (!classValid) return res.fail('Class not found or unauthorized.', [], 404);
+
+    // Validate section belongs to the class
+    const [[sectionValid]] = await sequelize.query(`
+      SELECT id FROM sections WHERE id = :sectionId AND class_id = :classId AND is_deleted = false LIMIT 1;
+    `, { replacements: { sectionId: section_id, classId: class_id } });
+    if (!sectionValid) return res.fail('Section not found in the selected class.', [], 404);
+
+    // Validate subject belongs to the class (if subject_id is provided)
+    if (subject_id) {
+      const [[subjectValid]] = await sequelize.query(`
+        SELECT id FROM subjects WHERE id = :subjectId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { subjectId: subject_id, classId: class_id } });
+      if (!subjectValid) return res.fail('Subject not found in the selected class.', [], 404);
+    }
 
     if (!is_class_teacher && !subject_id) {
       return res.fail('Subject must be selected for subject teacher assignments.', [], 422);
@@ -371,6 +406,14 @@ exports.updateAssignment = async (req, res, next) => {
 
     if (!assignment) return res.fail('Assignment not found or unauthorized.', [], 404);
 
+    // Fetch associated session's status
+    const [[assocSession]] = await sequelize.query(`
+      SELECT id, status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: assignment.session_id } });
+    if (!assocSession || assocSession.status !== 'active' || assocSession.is_locked) {
+      return res.fail('The session associated with this assignment is locked or inactive.', [], 422);
+    }
+
     const session = await getCurrentSession(req.user.school_id);
     const sessionId = session?.id || 0;
 
@@ -380,6 +423,35 @@ exports.updateAssignment = async (req, res, next) => {
     const finalIsClassTeacher = is_class_teacher !== undefined ? Boolean(is_class_teacher) : assignment.is_class_teacher;
     const finalSubjectId = finalIsClassTeacher ? null : (subject_id !== undefined ? (subject_id ? Number(subject_id) : null) : assignment.subject_id);
     const finalIsActive = is_active !== undefined ? Boolean(is_active) : assignment.is_active;
+
+    // Validate updated entities if changed
+    if (teacher_id !== undefined) {
+      const [[teacherValid]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { teacherId: finalTeacherId, schoolId } });
+      if (!teacherValid) return res.fail('Teacher not found or unauthorized.', [], 404);
+    }
+
+    if (class_id !== undefined) {
+      const [[classValid]] = await sequelize.query(`
+        SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { classId: finalClassId, schoolId } });
+      if (!classValid) return res.fail('Class not found or unauthorized.', [], 404);
+    }
+
+    if (section_id !== undefined || class_id !== undefined) {
+      const [[sectionValid]] = await sequelize.query(`
+        SELECT id FROM sections WHERE id = :sectionId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { sectionId: finalSectionId, classId: finalClassId } });
+      if (!sectionValid) return res.fail('Section not found in the selected class.', [], 404);
+    }
+
+    if (finalSubjectId && (subject_id !== undefined || class_id !== undefined)) {
+      const [[subjectValid]] = await sequelize.query(`
+        SELECT id FROM subjects WHERE id = :subjectId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { subjectId: finalSubjectId, classId: finalClassId } });
+      if (!subjectValid) return res.fail('Subject not found in the selected class.', [], 404);
+    }
 
     // Validation if something changed
     if (finalIsActive && (
@@ -507,6 +579,14 @@ exports.deleteAssignment = async (req, res, next) => {
 
     if (!assignment) return res.fail('Assignment not found or unauthorized.', [], 404);
 
+    // Fetch associated session's status
+    const [[assocSession]] = await sequelize.query(`
+      SELECT id, status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: assignment.session_id } });
+    if (!assocSession || assocSession.status !== 'active' || assocSession.is_locked) {
+      return res.fail('The session associated with this assignment is locked or inactive.', [], 422);
+    }
+
     await sequelize.query(`DELETE FROM teacher_assignments WHERE id = :id;`, { replacements: { id } });
 
     await audit('teacher_assignments', Number(id), {
@@ -564,6 +644,13 @@ exports.timetable = async (req, res, next) => {
 exports.createTimetableSlot = async (req, res, next) => {
   try {
     const session = await getCurrentSession(req.user.school_id);
+    if (!session) {
+      return res.fail('No current session found.', [], 422);
+    }
+    if (session.status !== 'active' || session.is_locked) {
+      return res.fail(`Current session is ${session.status || 'inactive'}${session.is_locked ? ' (locked)' : ''}. Cannot modify timetable.`, [], 422);
+    }
+
     const {
       teacher_id, class_id, section_id, subject_id,
       day_of_week, period_number, start_time, end_time, room_number = null,
@@ -573,6 +660,32 @@ exports.createTimetableSlot = async (req, res, next) => {
     if (!DAY_NAMES.includes(day_of_week)) {
       return res.fail('Invalid day_of_week.', [], 422);
     }
+
+    const schoolId = req.user.school_id;
+
+    // Validate teacher exists in this school
+    const [[teacherValid]] = await sequelize.query(`
+      SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { teacherId: teacher_id, schoolId } });
+    if (!teacherValid) return res.fail('Teacher not found or unauthorized.', [], 404);
+
+    // Validate class exists in this school
+    const [[classValid]] = await sequelize.query(`
+      SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { classId: class_id, schoolId } });
+    if (!classValid) return res.fail('Class not found or unauthorized.', [], 404);
+
+    // Validate section belongs to the class
+    const [[sectionValid]] = await sequelize.query(`
+      SELECT id FROM sections WHERE id = :sectionId AND class_id = :classId AND is_deleted = false LIMIT 1;
+    `, { replacements: { sectionId: section_id, classId: class_id } });
+    if (!sectionValid) return res.fail('Section not found in the selected class.', [], 404);
+
+    // Validate subject belongs to the class
+    const [[subjectValid]] = await sequelize.query(`
+      SELECT id FROM subjects WHERE id = :subjectId AND class_id = :classId AND is_deleted = false LIMIT 1;
+    `, { replacements: { subjectId: subject_id, classId: class_id } });
+    if (!subjectValid) return res.fail('Subject not found in the selected class.', [], 404);
 
     const [[assignment]] = await sequelize.query(`
       SELECT id
@@ -640,13 +753,16 @@ exports.updateTimetableSlot = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[slot]] = await sequelize.query(`
-      SELECT ts.id, ts.is_active FROM timetable_slots ts
+      SELECT ts.id, ts.is_active, s.status, s.is_locked FROM timetable_slots ts
       JOIN sessions s ON s.id = ts.session_id
       WHERE ts.id = :id AND s.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId } });
 
     if (!slot) return res.fail('Timetable slot not found or unauthorized.', [], 404);
+    if (slot.status !== 'active' || slot.is_locked) {
+      return res.fail(`Timetable session is ${slot.status || 'inactive'}${slot.is_locked ? ' (locked)' : ''}. Cannot modify timetable slot.`, [], 422);
+    }
 
     const fields = ['room_number', 'start_time', 'end_time', 'is_active'];
     const updates = fields.filter((field) => req.body[field] !== undefined);
@@ -721,12 +837,16 @@ exports.updateHomework = async (req, res, next) => {
     }
 
     const [[homework]] = await sequelize.query(`
-      SELECT h.id, h.status FROM homework h
+      SELECT h.id, h.status, s.status AS session_status, s.is_locked FROM homework h
       JOIN teachers t ON t.id = h.teacher_id
+      JOIN sessions s ON s.id = h.session_id
       WHERE h.id = :id AND t.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId } });
     if (!homework) return res.fail('Homework not found or unauthorized.', [], 404);
+    if (homework.session_status !== 'active' || homework.is_locked) {
+      return res.fail(`Session is ${homework.session_status || 'inactive'}${homework.is_locked ? ' (locked)' : ''}. Cannot modify homework.`, [], 422);
+    }
 
     await sequelize.query(`
       UPDATE homework
@@ -858,6 +978,50 @@ exports.createNotice = async (req, res, next) => {
     }
     if (target_scope === 'specific_teacher' && !target_teacher_id) {
       return res.fail('target_teacher_id is required for teacher-wise notices.', [], 422);
+    }
+
+    const schoolId = req.user.school_id;
+
+    if (posted_by_teacher_id) {
+      const [[teacherValid]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { teacherId: posted_by_teacher_id, schoolId } });
+      if (!teacherValid) return res.fail('Posted by teacher not found or unauthorized.', [], 404);
+    }
+
+    if (target_teacher_id) {
+      const [[teacherValid]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { teacherId: target_teacher_id, schoolId } });
+      if (!teacherValid) return res.fail('Target teacher not found or unauthorized.', [], 404);
+    }
+
+    if (target_student_id) {
+      const [[studentValid]] = await sequelize.query(`
+        SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { studentId: target_student_id, schoolId } });
+      if (!studentValid) return res.fail('Target student not found or unauthorized.', [], 404);
+    }
+
+    if (class_id) {
+      const [[classValid]] = await sequelize.query(`
+        SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { classId: class_id, schoolId } });
+      if (!classValid) return res.fail('Class not found or unauthorized.', [], 404);
+    }
+
+    if (section_id) {
+      const [[sectionValid]] = await sequelize.query(`
+        SELECT id FROM sections WHERE id = :sectionId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { sectionId: section_id, classId: class_id || 0 } });
+      if (!sectionValid) return res.fail('Section not found or unauthorized.', [], 404);
+    }
+
+    if (subject_id) {
+      const [[subjectValid]] = await sequelize.query(`
+        SELECT id FROM subjects WHERE id = :subjectId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { subjectId: subject_id, classId: class_id || 0 } });
+      if (!subjectValid) return res.fail('Subject not found or unauthorized.', [], 404);
     }
 
     // Handle attribution properly
@@ -1031,6 +1195,16 @@ const { sendNotification } = require('../utils/notification');
 exports.reviewLeave = async (req, res, next) => {
   const tx = await sequelize.transaction();
   try {
+    const session = await getCurrentSession(req.user.school_id);
+    if (!session) {
+      await tx.rollback();
+      return res.fail('No current session found.', [], 422);
+    }
+    if (session.status !== 'active' || session.is_locked) {
+      await tx.rollback();
+      return res.fail(`Current session is ${session.status || 'inactive'}${session.is_locked ? ' (locked)' : ''}. Cannot review leave.`, [], 422);
+    }
+
     const { id } = req.params;
     const { status, review_note = null } = req.body;
     if (!['approved', 'rejected'].includes(status)) {
@@ -1442,9 +1616,10 @@ exports.attendance = async (req, res, next) => {
       JOIN sections sec ON sec.id = e.section_id
       LEFT JOIN users marker ON marker.id = a.marked_by
       WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId
       ORDER BY a.date DESC, c.name ASC, sec.name ASC, e.roll_number ASC
       LIMIT 300;
-    `, { replacements: { sessionId: session?.id || 0 } });
+    `, { replacements: { sessionId: session?.id || 0, schoolId: req.user.school_id } });
 
     res.ok({ attendance: rows }, `${rows.length} attendance record(s) found.`);
   } catch (err) { next(err); }
@@ -1458,13 +1633,17 @@ exports.updateAttendance = async (req, res, next) => {
     requireFields(req.body, ['status', 'reason']);
 
     const [[record]] = await sequelize.query(`
-      SELECT a.id, a.status FROM attendance a
+      SELECT a.id, a.status, sess.status AS session_status, sess.is_locked FROM attendance a
       JOIN enrollments e ON e.id = a.enrollment_id
       JOIN students s ON s.id = e.student_id
+      JOIN sessions sess ON sess.id = e.session_id
       WHERE a.id = :id AND s.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId } });
     if (!record) return res.fail('Attendance record not found or unauthorized.', [], 404);
+    if (record.session_status !== 'active' || record.is_locked) {
+      return res.fail(`Session is ${record.session_status || 'inactive'}${record.is_locked ? ' (locked)' : ''}. Cannot modify attendance.`, [], 422);
+    }
 
     await sequelize.query(`
       UPDATE attendance
@@ -1524,9 +1703,10 @@ exports.marks = async (req, res, next) => {
       JOIN sections sec ON sec.id = e.section_id
       JOIN subjects sub ON sub.id = er.subject_id
       WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId
       ORDER BY ex.id DESC, c.name ASC, sec.name ASC, e.roll_number ASC
       LIMIT 300;
-    `, { replacements: { sessionId: session?.id || 0 } });
+    `, { replacements: { sessionId: session?.id || 0, schoolId: req.user.school_id } });
 
     res.ok({ marks: rows }, `${rows.length} mark record(s) found.`);
   } catch (err) { next(err); }
@@ -1540,15 +1720,19 @@ exports.updateMark = async (req, res, next) => {
     requireFields(req.body, ['reason']);
 
     const [[record]] = await sequelize.query(`
-      SELECT er.id, er.marks_obtained, er.is_absent, er.subject_id, er.exam_id, ex.total_marks
+      SELECT er.id, er.marks_obtained, er.is_absent, er.subject_id, er.exam_id, ex.total_marks, sess.status AS session_status, sess.is_locked
       FROM exam_results er
       JOIN exams ex ON ex.id = er.exam_id
       JOIN enrollments e ON e.id = er.enrollment_id
       JOIN students s ON s.id = e.student_id
+      JOIN sessions sess ON sess.id = e.session_id
       WHERE er.id = :id AND s.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId } });
     if (!record) return res.fail('Mark record not found or unauthorized.', [], 404);
+    if (record.session_status !== 'active' || record.is_locked) {
+      return res.fail(`Session is ${record.session_status || 'inactive'}${record.is_locked ? ' (locked)' : ''}. Cannot modify marks.`, [], 422);
+    }
 
     if (!is_absent && (marks_obtained === undefined || marks_obtained === null || Number(marks_obtained) < 0 || Number(marks_obtained) > Number(record.total_marks))) {
       return res.fail('marks_obtained must be within valid exam range.', [], 422);
@@ -1642,13 +1826,18 @@ exports.updateRemark = async (req, res, next) => {
     requireFields(req.body, ['remark_text', 'reason']);
 
     const [[record]] = await sequelize.query(`
-      SELECT sr.id, sr.remark_text, sr.visibility
+      SELECT sr.id, sr.remark_text, sr.visibility, sess.status AS session_status, sess.is_locked
       FROM student_remarks sr
       JOIN students s ON s.id = sr.student_id
+      JOIN enrollments e ON e.id = sr.enrollment_id
+      JOIN sessions sess ON sess.id = e.session_id
       WHERE sr.id = :id AND sr.is_deleted = false AND s.school_id = :schoolId
       LIMIT 1;
     `, { replacements: { id, schoolId } });
     if (!record) return res.fail('Remark not found or unauthorized.', [], 404);
+    if (record.session_status !== 'active' || record.is_locked) {
+      return res.fail(`Session is ${record.session_status || 'inactive'}${record.is_locked ? ' (locked)' : ''}. Cannot modify remarks.`, [], 422);
+    }
 
     await sequelize.query(`
       UPDATE student_remarks
@@ -1679,6 +1868,14 @@ exports.updateRemark = async (req, res, next) => {
 
 exports.revokeLeave = async (req, res, next) => {
   try {
+    const session = await getCurrentSession(req.user.school_id);
+    if (!session) {
+      return res.fail('No current session found.', [], 422);
+    }
+    if (session.status !== 'active' || session.is_locked) {
+      return res.fail(`Current session is ${session.status || 'inactive'}${session.is_locked ? ' (locked)' : ''}. Cannot revoke leave.`, [], 422);
+    }
+
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
@@ -1807,6 +2004,23 @@ exports.updateLeaveBalance = async (req, res, next) => {
 
     if (!leave_type || total_allowed == null || !session_id) {
       return res.fail('leave_type, total_allowed and session_id are required.', [], 422);
+    }
+
+    // Validate teacher exists in this school
+    const [[teacherValid]] = await sequelize.query(`
+      SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { teacherId: teacher_id, schoolId } });
+    if (!teacherValid) return res.fail('Teacher not found or unauthorized.', [], 404);
+
+    // Validate session exists in this school
+    const [[sessionValid]] = await sequelize.query(`
+      SELECT id, status, is_locked FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { sessionId: session_id, schoolId } });
+    if (!sessionValid) return res.fail('Session not found or unauthorized.', [], 404);
+
+    // Validate session is writable
+    if (sessionValid.status !== 'active' || sessionValid.is_locked) {
+      return res.fail(`Session is ${sessionValid.status || 'inactive'}${sessionValid.is_locked ? ' (locked)' : ''}. Cannot modify leave balance.`, [], 422);
     }
 
     const [[balance]] = await sequelize.query(`

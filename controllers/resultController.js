@@ -117,6 +117,10 @@ exports.enterMarks = async (req, res, next) => {
 
     if (!exam) return res.fail('Exam not found.', [], 404);
 
+    if (req.user.role === 'teacher' && exam.status === 'draft') {
+      return res.fail('Teachers cannot enter marks for draft exams.', [], 403);
+    }
+
     if (['closed', 'archived', 'locked'].includes(exam.session_status) || exam.session_locked) {
       return res.fail(`Cannot enter marks: session is ${exam.session_status}.`);
     }

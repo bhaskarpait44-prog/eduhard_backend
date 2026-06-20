@@ -32,6 +32,7 @@ router.post('/', requireAdmin, [
   body('start_date').isDate(),
   body('end_date').isDate(),
   body('status').optional().isIn(['draft', 'published']),
+  body('weightage').optional().isFloat({ min: 0, max: 100 }),
   body('subjects').isArray({ min: 1 }),
   body('subjects.*.subject_id').isInt(),
   body('subjects.*.exam_date').optional({ nullable: true, checkFalsy: true }).isDate(),
