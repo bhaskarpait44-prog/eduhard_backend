@@ -281,7 +281,14 @@ exports.activate = async (req, res, next) => {
 exports.addHoliday = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { holiday_date, name, type } = req.body;
+    const { holiday_date, end_date, name, type } = req.body;
+
+    const startDateStr = holiday_date;
+    const endDateStr = end_date || holiday_date;
+
+    if (new Date(endDateStr) < new Date(startDateStr)) {
+      return res.fail('End date must be on or after start date.', [], 400);
+    }
 
     const result = await sequelize.transaction(async (t) => {
       // 1. Fetch session metadata for validation (Inside transaction)
@@ -299,59 +306,89 @@ exports.addHoliday = async (req, res, next) => {
         throw { name: 'CustomError', message: `Cannot add holiday: session must be active and unlocked (current status: ${session.status}).`, status: 400 };
       }
 
-      const hDate = new Date(holiday_date);
-      if (hDate < new Date(session.start_date) || hDate > new Date(session.end_date)) {
-        throw { name: 'CustomError', message: `Holiday date must be between session start (${session.start_date}) and end (${session.end_date}).`, status: 400 };
+      // Generate date range
+      const dates = [];
+      const start = new Date(startDateStr);
+      const end = new Date(endDateStr);
+      start.setUTCHours(0, 0, 0, 0);
+      end.setUTCHours(0, 0, 0, 0);
+      
+      let curr = new Date(start);
+      while (curr <= end) {
+        dates.push(curr.toISOString().slice(0, 10));
+        curr.setUTCDate(curr.getUTCDate() + 1);
       }
 
-      // 2. Check for duplicate holiday
-      const [[duplicate]] = await sequelize.query(`
-        SELECT id FROM session_holidays WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
-      `, { replacements: { sessionId: id, date: holiday_date }, transaction: t });
-
-      if (duplicate) {
-        throw { name: 'CustomError', message: 'A holiday already exists for this date in this session.', status: 400 };
+      // Validate all dates in the range
+      const sessionStart = new Date(session.start_date);
+      const sessionEnd = new Date(session.end_date);
+      for (const d of dates) {
+        const dObj = new Date(d);
+        if (dObj < sessionStart || dObj > sessionEnd) {
+          throw { name: 'CustomError', message: `Holiday date (${d}) must be between session start (${session.start_date}) and end (${session.end_date}).`, status: 400 };
+        }
       }
 
-      // 3. Check if attendance already marked — retroactive if so
-      const [[existingAttendance]] = await sequelize.query(`
-        SELECT COUNT(*) AS cnt FROM attendance a
-        JOIN enrollments e ON e.id = a.enrollment_id
-        WHERE e.session_id = :sessionId AND a.date = :date;
-      `, { replacements: { sessionId: id, date: holiday_date }, transaction: t });
+      // Check for duplicate holidays in the range
+      const [existingHolidays] = await sequelize.query(`
+        SELECT holiday_date FROM session_holidays WHERE session_id = :sessionId AND holiday_date IN (:dates);
+      `, { replacements: { sessionId: id, dates }, transaction: t });
 
-      // Insert holiday record
-      const [[newHoliday]] = await sequelize.query(`
-        INSERT INTO session_holidays (session_id, holiday_date, name, type, added_by, created_at)
-        VALUES (:sessionId, :date, :name, :type, :addedBy, NOW())
-        RETURNING id;
-      `, { replacements: { sessionId: id, date: holiday_date, name, type, addedBy: req.user.id }, transaction: t });
-
-      let retroResult = null;
-      if (parseInt(existingAttendance.cnt, 10) > 0) {
-        retroResult = await retroactiveHoliday(parseInt(id), holiday_date, name, req.user.id, t);
+      if (existingHolidays.length > 0) {
+        const dupStr = existingHolidays.map(h => h.holiday_date).join(', ');
+        throw { name: 'CustomError', message: `Holiday already exists for these dates: ${dupStr}`, status: 400 };
       }
 
-      // Audit log
-      await sequelize.query(`
-        INSERT INTO audit_logs
-          (table_name, record_id, field_name, old_value, new_value,
-           changed_by, reason, ip_address, device_info, created_at)
-        VALUES
-          ('session_holidays', :id, 'holiday_added', 'none', :date,
-           :userId, :reason, :ip, :device, NOW());
-      `, { replacements: {
-        id: newHoliday.id,
-        date: holiday_date,
-        userId: req.user.id,
-        reason: `Holiday "${name}" added to session`,
-        ip: req.ip || null,
-        device: (req.headers['user-agent'] || '').slice(0, 299)
-      }, transaction: t });
+      const createdHolidays = [];
+      let totalAffectedRecords = 0;
+
+      for (const d of dates) {
+        // Check if attendance already marked
+        const [[existingAttendance]] = await sequelize.query(`
+          SELECT COUNT(*) AS cnt FROM attendance a
+          JOIN enrollments e ON e.id = a.enrollment_id
+          WHERE e.session_id = :sessionId AND a.date = :date;
+        `, { replacements: { sessionId: id, date: d }, transaction: t });
+
+        // Insert holiday record
+        const [[newHoliday]] = await sequelize.query(`
+          INSERT INTO session_holidays (session_id, holiday_date, name, type, added_by, created_at)
+          VALUES (:sessionId, :date, :name, :type, :addedBy, NOW())
+          RETURNING id;
+        `, { replacements: { sessionId: id, date: d, name, type, addedBy: req.user.id }, transaction: t });
+
+        let retroResult = null;
+        if (parseInt(existingAttendance.cnt, 10) > 0) {
+          retroResult = await retroactiveHoliday(parseInt(id), d, name, req.user.id, t);
+          if (retroResult) {
+            totalAffectedRecords += retroResult.affectedCount;
+          }
+        }
+
+        // Audit log
+        await sequelize.query(`
+          INSERT INTO audit_logs
+            (table_name, record_id, field_name, old_value, new_value,
+             changed_by, reason, ip_address, device_info, created_at)
+          VALUES
+            ('session_holidays', :recId, 'holiday_added', 'none', :date,
+             :userId, :reason, :ip, :device, NOW());
+        `, { replacements: {
+          recId: newHoliday.id,
+          date: d,
+          userId: req.user.id,
+          reason: `Holiday "${name}" added to session`,
+          ip: req.ip || null,
+          device: (req.headers['user-agent'] || '').slice(0, 299)
+        }, transaction: t });
+
+        createdHolidays.push({ id: newHoliday.id, session_id: id, holiday_date: d, name, type });
+      }
 
       return {
-        holiday      : { id: newHoliday.id, session_id: id, holiday_date, name, type },
-        retroactive  : retroResult,
+        holiday      : createdHolidays[0], // backward compatibility
+        holidays     : createdHolidays,
+        retroactive  : totalAffectedRecords > 0 ? { affectedCount: totalAffectedRecords } : null
       };
     });
 

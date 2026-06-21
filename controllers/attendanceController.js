@@ -5,6 +5,23 @@ const { getAttendancePercent } = require('../utils/attendanceCalculator');
 const { invalidateCache } = require('../middlewares/cache');
 const { writeAuditLog } = require('../utils/writeAuditLog');
 
+const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+function getWeekdayIndex(dateString) {
+  if (!dateString || typeof dateString !== 'string') {
+    return new Date().getDay();
+  }
+  const match = dateString.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+      return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    }
+  }
+  return new Date(dateString).getDay();
+}
+
 function parseOptionalInteger(value) {
   if (value === undefined || value === null || value === '') return null;
   const normalized = String(value).trim();
@@ -80,6 +97,29 @@ exports.markSingle = async (req, res, next) => {
       return res.fail('No active session found. Cannot mark attendance.', [], 422);
     }
 
+    // Check if holiday
+    const [[holiday]] = await sequelize.query(`
+      SELECT name FROM session_holidays
+      WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
+    `, { replacements: { sessionId, date } });
+
+    if (holiday) {
+      return res.fail(`Cannot mark attendance. Selected date is a holiday: ${holiday.name}.`, [], 422);
+    }
+
+    // Check if working day
+    const dayOfWeek = getWeekdayIndex(date);
+    const dayName = DAY_NAMES[dayOfWeek];
+    const [[workingDayConfig]] = await sequelize.query(`
+      SELECT ${dayName} AS is_working FROM session_working_days
+      WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId } });
+
+    const isWorking = workingDayConfig ? workingDayConfig.is_working : (dayOfWeek !== 0);
+    if (!isWorking) {
+      return res.fail(`Cannot mark attendance. Selected date (${date}) is not a working day.`, [], 422);
+    }
+
     const [[enrollment]] = await sequelize.query(`
       SELECT e.id FROM enrollments e
       JOIN students s ON s.id = e.student_id
@@ -135,6 +175,29 @@ exports.markBulk = async (req, res, next) => {
 
     if (sessionId == null) {
       return res.fail('No active session found. Cannot mark attendance.', [], 422);
+    }
+
+    // Check if holiday
+    const [[holiday]] = await sequelize.query(`
+      SELECT name FROM session_holidays
+      WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
+    `, { replacements: { sessionId, date } });
+
+    if (holiday) {
+      return res.fail(`Cannot mark attendance. Selected date is a holiday: ${holiday.name}.`, [], 422);
+    }
+
+    // Check if working day
+    const dayOfWeek = getWeekdayIndex(date);
+    const dayName = DAY_NAMES[dayOfWeek];
+    const [[workingDayConfig]] = await sequelize.query(`
+      SELECT ${dayName} AS is_working FROM session_working_days
+      WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId } });
+
+    const isWorking = workingDayConfig ? workingDayConfig.is_working : (dayOfWeek !== 0);
+    if (!isWorking) {
+      return res.fail(`Cannot mark attendance. Selected date (${date}) is not a working day.`, [], 422);
     }
 
     const inserted = [];
@@ -278,6 +341,15 @@ exports.getClassAttendance = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { sessionId, date } });
 
+    const dayOfWeek = getWeekdayIndex(date);
+    const dayName = DAY_NAMES[dayOfWeek];
+    const [[workingDayConfig]] = await sequelize.query(`
+      SELECT ${dayName} AS is_working FROM session_working_days
+      WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId } });
+
+    const isNonWorkingDay = workingDayConfig ? !workingDayConfig.is_working : (dayOfWeek === 0);
+
     const alreadyMarked = students.some((student) => student.attendance_id);
 
     res.ok({
@@ -287,6 +359,7 @@ exports.getClassAttendance = async (req, res, next) => {
       date,
       is_holiday: !!holiday,
       holiday,
+      is_non_working_day: isNonWorkingDay,
       already_marked: alreadyMarked,
       students: students.map((student) => ({
         ...student,
@@ -392,12 +465,19 @@ exports.getClassRegister = async (req, res, next) => {
       },
     });
 
+    const [holidays] = await sequelize.query(`
+      SELECT holiday_date FROM session_holidays
+      WHERE session_id = :sessionId
+        AND holiday_date BETWEEN :fromDate AND :toDate;
+    `, { replacements: { sessionId, fromDate, toDate } });
+
     res.ok({
       session_id: sessionId,
       class_id: parsedClassId,
       section_id: parsedSectionId,
       month: monthNum,
       year: yearNum,
+      holidays: holidays.map(h => String(h.holiday_date).slice(0, 10)),
       students: rows.map((row) => ({
         ...row,
         student_name: `${row.first_name || ''} ${row.last_name || ''}`.trim(),

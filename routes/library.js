@@ -15,10 +15,10 @@ const settingsController = require('../controllers/librarySettingsController');
 router.use(authenticate);
 
 // Dashboard
-router.get('/dashboard', dashboardController.getDashboardStats);
+router.get('/dashboard', requireRole('admin', 'librarian'), dashboardController.getDashboardStats);
 
 // Settings
-router.get('/settings', settingsController.getSettings);
+router.get('/settings', requireRole('admin', 'librarian'), settingsController.getSettings);
 router.put('/settings', requireRole('admin', 'librarian'), settingsController.updateSettings);
 
 // Books
@@ -31,21 +31,21 @@ router.put('/books/:id', requireRole('admin', 'librarian'), bookController.updat
 router.delete('/books/:id', requireRole('admin', 'librarian'), bookController.deleteBook);
 
 // Issues
-router.get('/issues', issueController.getIssues);
+router.get('/issues', requireRole('admin', 'librarian'), issueController.getIssues);
 router.get('/issues/my', issueController.getMyIssues);
 router.post('/issues', requireRole('admin', 'librarian'), issueController.issueBook);
 router.patch('/issues/mark-overdue', requireRole('admin', 'librarian'), issueController.markOverdue);
 router.patch('/issues/:id/return', requireRole('admin', 'librarian'), issueController.returnBook);
 
 // Reservations
-router.get('/reservations', reservationController.getReservations);
+router.get('/reservations', requireRole('admin', 'librarian'), reservationController.getReservations);
 router.get('/reservations/my', reservationController.getMyReservations);
 router.post('/reservations', reservationController.createReservation);
 router.patch('/reservations/:id/cancel', reservationController.cancelReservation);
 
 // Fines
-router.get('/fines', fineController.getFines);
-router.get('/fines/summary', fineController.getFineSummary);
+router.get('/fines', requireRole('admin', 'librarian', 'accountant'), fineController.getFines);
+router.get('/fines/summary', requireRole('admin', 'librarian', 'accountant'), fineController.getFineSummary);
 router.patch('/fines/:id', requireRole('admin', 'librarian'), fineController.updateFineStatus);
 
 module.exports = router;

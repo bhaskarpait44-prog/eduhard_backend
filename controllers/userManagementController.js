@@ -662,6 +662,8 @@ exports.updatePermissions = async (req, res, next) => {
     );
     if (!user) return res.fail('User not found.', [], 404);
 
+    if (!canManage(req.user, user.role)) return res.fail('Cannot manage this user\'s permissions.', [], 403);
+
     // Cannot grant what you don't have (unless admin)
     if (!ADMIN_ROLES.includes(req.user.role)) {
       const { loadUserPermissions } = require('../middlewares/checkPermission');

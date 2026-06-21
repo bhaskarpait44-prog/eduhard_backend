@@ -9,6 +9,21 @@ const { notifyClass, notifyAllStudents, sendNotification, notifySubject } = requ
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+function getWeekdayIndex(dateString) {
+  if (!dateString || typeof dateString !== 'string') {
+    return new Date().getDay();
+  }
+  const match = dateString.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (match) {
+    const year = Number(match[1]);
+    const month = Number(match[2]);
+    const day = Number(match[3]);
+    if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+      return new Date(Date.UTC(year, month - 1, day)).getUTCDay();
+    }
+  }
+  return new Date(dateString).getDay();
+}
 const DEFAULT_LEAVE_BALANCES = [
   { leave_type: 'casual', total_allowed: Number(process.env.DEFAULT_CASUAL_LEAVE || 12) },
   { leave_type: 'sick', total_allowed: Number(process.env.DEFAULT_SICK_LEAVE || 10) },
@@ -1140,6 +1155,15 @@ exports.attendanceStudents = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { sessionId: session?.id || 0, date } });
 
+    const dayOfWeek = getWeekdayIndex(date);
+    const dayName = DAY_NAMES[dayOfWeek];
+    const [[workingDayConfig]] = await sequelize.query(`
+      SELECT ${dayName} AS is_working FROM session_working_days
+      WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: session?.id || 0 } });
+
+    const isNonWorkingDay = workingDayConfig ? !workingDayConfig.is_working : (dayOfWeek === 0);
+
     const alreadyMarked = students.some((student) => student.attendance_id);
 
     res.ok({
@@ -1150,6 +1174,7 @@ exports.attendanceStudents = async (req, res, next) => {
       subject_id: subject_id ? Number(subject_id) : null,
       is_holiday: !!holiday,
       holiday,
+      is_non_working_day: isNonWorkingDay,
       already_marked: alreadyMarked,
       requires_reason: date < TODAY() || alreadyMarked,
       students: students.map((student) => ({
@@ -1168,6 +1193,29 @@ exports.markAttendance = async (req, res, next) => {
     const { session, scope } = await getTeacherContext(req);
     if (!session) {
       return res.fail('No active session found. Cannot proceed with attendance.', [], 422);
+    }
+
+    // Check if holiday
+    const [[holiday]] = await sequelize.query(`
+      SELECT name FROM session_holidays
+      WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
+    `, { replacements: { sessionId: session.id, date } });
+
+    if (holiday) {
+      return res.fail(`Cannot mark attendance. Selected date is a holiday: ${holiday.name}.`, [], 422);
+    }
+
+    // Check if working day
+    const dayOfWeek = getWeekdayIndex(date);
+    const dayName = DAY_NAMES[dayOfWeek];
+    const [[workingDayConfig]] = await sequelize.query(`
+      SELECT ${dayName} AS is_working FROM session_working_days
+      WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId: session.id } });
+
+    const isWorking = workingDayConfig ? workingDayConfig.is_working : (dayOfWeek !== 0);
+    if (!isWorking) {
+      return res.fail(`Cannot mark attendance. Selected date (${date}) is not a working day.`, [], 422);
     }
     await assertAttendanceAccess(req.user.id, Number(class_id), Number(section_id), date, scope);
     const access = getAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
@@ -1385,9 +1433,17 @@ exports.attendanceRegister = async (req, res, next) => {
       },
     });
 
+    const [holidays] = await sequelize.query(`
+      SELECT holiday_date FROM session_holidays
+      WHERE session_id = :sessionId
+        AND holiday_date BETWEEN :fromDate AND :toDate;
+    `, { replacements: { sessionId: session?.id || 0, fromDate, toDate } });
+
     res.ok({
+      session_id: session?.id || 0,
       month: monthNum,
       year: yearNum,
+      holidays: holidays.map(h => String(h.holiday_date).slice(0, 10)),
       students: rows,
     }, `${rows.length} student(s) found in attendance register.`);
   } catch (err) { next(err); }

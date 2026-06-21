@@ -57,6 +57,7 @@ router.get('/:id/holidays',      requireAdminOrTeacherOrAccountant, [param('id')
 router.post('/:id/holidays',  requireAdmin, [
   param('id').isInt(),
   body('holiday_date').isDate().withMessage('Valid holiday_date required'),
+  body('end_date').optional().isDate().withMessage('Valid end_date required'),
   body('name').notEmpty().withMessage('Holiday name required').isLength({ max: 150 }).withMessage('Holiday name cannot exceed 150 characters'),
   body('type').isIn(['national', 'regional', 'school']).withMessage('Invalid holiday type'),
 ], validate, ctrl.addHoliday);

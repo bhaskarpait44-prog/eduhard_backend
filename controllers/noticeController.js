@@ -1073,6 +1073,95 @@ exports.getNoticeById = async (req, res, next) => {
       WHERE n.id = :id AND n.school_id = :schoolId AND n.is_deleted = false
     `, { replacements: { id, schoolId } });
     if (!notice) return res.fail('Notice not found.', [], 404);
+
+    // Authorization Check: prevent IDOR/reading notices not targeted to user
+    const role = req.user.role;
+    if (role !== 'admin') {
+      const isAuthor = (notice.posted_by_role === role && Number(notice.posted_by_user_id) === Number(req.user.id));
+      const isTargetedToSchool = notice.is_school_wide || ['school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone'].includes(notice.audience);
+
+      if (!isAuthor && !isTargetedToSchool) {
+        if (role === 'teacher') {
+          const audienceMatch = notice.audience === 'teachers';
+          let assignmentMatch = false;
+          if (notice.target_class_id || notice.target_section_id || notice.target_subject_id) {
+            const [[assignment]] = await sequelize.query(`
+              SELECT ta.id FROM teacher_assignments ta
+              JOIN teachers t ON t.id = ta.teacher_id
+              WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+                AND ta.is_active = true
+                AND (:classId::int   IS NULL OR ta.class_id   = :classId)
+                AND (:sectionId::int IS NULL OR ta.section_id = :sectionId)
+                AND (:subjectId::int IS NULL OR ta.subject_id = :subjectId)
+              LIMIT 1;
+            `, { replacements: {
+              userId: req.user.id,
+              classId: notice.target_class_id || null,
+              sectionId: notice.target_section_id || null,
+              subjectId: notice.target_subject_id || null,
+            }});
+            assignmentMatch = !!assignment;
+          }
+          if (!audienceMatch && !assignmentMatch) {
+            return res.fail('Access denied.', [], 403);
+          }
+        } else if (role === 'student') {
+          const studentId = Number(req.user.student_id || req.user.id);
+          const audienceMatch = ['students', 'student'].includes(notice.audience);
+          
+          const [[enrollment]] = await sequelize.query(`
+            SELECT class_id, section_id FROM enrollments WHERE student_id = :studentId AND status = 'active' LIMIT 1;
+          `, { replacements: { studentId } });
+          
+          const isTargetedStudent = (notice.audience === 'student' && Number(notice.target_student_id) === studentId);
+          const isTargetedClass = (notice.audience === 'class' && enrollment && Number(notice.target_class_id) === Number(enrollment.class_id));
+          const isTargetedSection = (notice.audience === 'section' && enrollment && Number(notice.target_section_id) === Number(enrollment.section_id));
+
+          if (!audienceMatch && !isTargetedStudent && !isTargetedClass && !isTargetedSection) {
+            return res.fail('Access denied.', [], 403);
+          }
+        } else if (role === 'parent') {
+          const parentEmail = req.user.email;
+          const [wards] = await sequelize.query(`
+            SELECT s.id, e.class_id, e.section_id
+            FROM students s
+            JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+            LEFT JOIN LATERAL (
+              SELECT en.class_id, en.section_id
+              FROM enrollments en
+              WHERE en.student_id = s.id AND en.status = 'active'
+              ORDER BY en.joined_date DESC, en.id DESC LIMIT 1
+            ) e ON true
+            WHERE s.school_id = :schoolId AND s.is_deleted = false AND LOWER(sp.parent_email) = LOWER(:parentEmail)
+          `, { replacements: { parentEmail, schoolId } });
+          
+          const wardIds = wards.map(w => w.id);
+          const classIds = wards.map(w => w.class_id).filter(id => id);
+          const sectionIds = wards.map(w => w.section_id).filter(id => id);
+
+          const audienceMatch = notice.audience === 'parents';
+          const isTargetedStudent = (notice.audience === 'student' && wardIds.includes(Number(notice.target_student_id)));
+          const isTargetedClass = (notice.audience === 'class' && classIds.includes(Number(notice.target_class_id)));
+          const isTargetedSection = (notice.audience === 'section' && sectionIds.includes(Number(notice.target_section_id)));
+
+          if (!audienceMatch && !isTargetedStudent && !isTargetedClass && !isTargetedSection) {
+            return res.fail('Access denied.', [], 403);
+          }
+        } else {
+          const allowedAudiences = {
+            accountant: ['accountants'],
+            librarian: ['librarians'],
+            receptionist: ['receptionists'],
+            staff: ['staff']
+          };
+          const allowed = allowedAudiences[role] || [];
+          if (!allowed.includes(notice.audience)) {
+            return res.fail('Access denied.', [], 403);
+          }
+        }
+      }
+    }
+
     res.ok(notice);
   } catch (err) { next(err); }
 };

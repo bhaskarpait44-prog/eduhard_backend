@@ -82,6 +82,7 @@ app.use('/api/auth', require('./routes/auth'));
 // but still needs session validation)
 const fileController = require('./controllers/fileController');
 app.get('/api/files/:filename', authenticate, fileController.serveFile);
+app.get('/uploads/*', authenticate, fileController.serveFile);
 
 app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
 
