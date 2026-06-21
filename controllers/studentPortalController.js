@@ -1008,6 +1008,25 @@ exports.results = async (req, res, next) => {
     const context = await getStudentContext(req);
     await ensureAchievementsFresh(context);
 
+    let sessionId = context.sessionId;
+    let classId = context.classId;
+    let enrollmentId = context.enrollmentId;
+
+    const querySessionId = req.query.session_id ? Number(req.query.session_id) : null;
+    if (querySessionId) {
+      const [[targetEnrollment]] = await sequelize.query(`
+        SELECT id, class_id FROM enrollments WHERE student_id = :studentId AND session_id = :sessionId LIMIT 1
+      `, { replacements: { studentId: context.studentId, sessionId: querySessionId } });
+      
+      if (targetEnrollment) {
+        enrollmentId = targetEnrollment.id;
+        sessionId = querySessionId;
+        classId = targetEnrollment.class_id;
+      } else {
+        return res.fail('No enrollment found for the selected session.', [], 404);
+      }
+    }
+
     const [rows] = await sequelize.query(`
       SELECT
         ex.id,
@@ -1033,16 +1052,16 @@ exports.results = async (req, res, next) => {
       ORDER BY ex.start_date DESC, ex.id DESC;
     `, {
       replacements: {
-        enrollmentId: context.enrollmentId,
-        sessionId: context.sessionId,
-        classId: context.classId,
+        enrollmentId,
+        sessionId,
+        classId,
       },
     });
 
     const examsWithWithheld = [];
     for (const exam of rows) {
       if (exam.student_status === 'published') {
-        const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+        const dues = await checkFeeDuesUpToExamMonth(enrollmentId, exam.start_date);
         examsWithWithheld.push({
           ...exam,
           is_withheld: dues > 0,
@@ -1068,34 +1087,35 @@ exports.resultByExam = async (req, res, next) => {
 
     const examId = Number(req.params.examId);
     const [[exam]] = await sequelize.query(`
-      SELECT id, name, exam_type, start_date, end_date, status, publish_controls
+      SELECT id, name, exam_type, start_date, end_date, status, publish_controls, session_id, class_id
       FROM exams
       WHERE id = :examId
-        AND session_id = :sessionId
-        AND class_id = :classId
       LIMIT 1;
-    `, {
-      replacements: {
-        examId,
-        sessionId: context.sessionId,
-        classId: context.classId,
-      },
+    `, { replacements: { examId } });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [[studentEnrollment]] = await sequelize.query(`
+      SELECT id FROM enrollments 
+      WHERE student_id = :studentId AND session_id = :sessionId AND class_id = :classId LIMIT 1;
+    `, { 
+      replacements: { 
+        studentId: context.studentId, 
+        sessionId: exam.session_id, 
+        classId: exam.class_id 
+      } 
     });
 
-    if (!exam) {
-      const [[exists]] = await sequelize.query(`SELECT id FROM exams WHERE id = :examId LIMIT 1;`, { replacements: { examId } });
-      if (exists) {
-        recordForbiddenAttempt(req, context.studentId, 'exam_access', { examId });
-        return res.fail('You are not allowed to access this exam.', [], 403);
-      }
-      return res.fail('Exam not found.', [], 404);
+    if (!studentEnrollment) {
+      recordForbiddenAttempt(req, context.studentId, 'exam_access', { examId });
+      return res.fail('You are not allowed to access this exam.', [], 403);
     }
 
     if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
       return res.fail('Result not yet released or access denied.', [], 403);
     }
 
-    const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+    const dues = await checkFeeDuesUpToExamMonth(studentEnrollment.id, exam.start_date);
     if (dues > 0) {
       return res.fail(`Result withheld due to pending fees of ${dues}. Please clear dues to view marks.`, [], 403);
     }
@@ -1131,8 +1151,8 @@ exports.resultByExam = async (req, res, next) => {
     `, {
       replacements: {
         examId,
-        enrollmentId: context.enrollmentId,
-        classId: context.classId,
+        enrollmentId: studentEnrollment.id,
+        classId: exam.class_id,
       },
     });
 
@@ -1184,32 +1204,61 @@ exports.reportCard = async (req, res, next) => {
 
     const examId = Number(req.params.examId);
     const [[exam]] = await sequelize.query(`
-      SELECT id, start_date, status, publish_controls
+      SELECT id, session_id, class_id, start_date, status, publish_controls
       FROM exams
       WHERE id = :examId
-        AND session_id = :sessionId
-        AND class_id = :classId
       LIMIT 1;
-    `, {
-      replacements: {
-        examId,
-        sessionId: context.sessionId,
-        classId: context.classId,
-      },
-    });
+    `, { replacements: { examId } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [[studentEnrollment]] = await sequelize.query(`
+      SELECT 
+        e.id AS enrollment_id, e.roll_number,
+        cls.name AS class_name,
+        sec.name AS section_name,
+        sess.name AS session_name,
+        class_teacher.name AS class_teacher_name
+      FROM enrollments e
+      JOIN classes cls ON cls.id = e.class_id
+      JOIN sessions sess ON sess.id = e.session_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      LEFT JOIN LATERAL (
+        SELECT CONCAT(u.first_name, ' ', u.last_name) AS name
+        FROM teacher_assignments ta
+        JOIN teachers u ON u.id = ta.teacher_id
+        WHERE ta.session_id = e.session_id
+          AND ta.class_id = e.class_id
+          AND ta.section_id = e.section_id
+          AND ta.is_class_teacher = true
+          AND ta.is_active = true
+        ORDER BY ta.id DESC
+        LIMIT 1
+      ) class_teacher ON true
+      WHERE e.student_id = :studentId AND e.session_id = :sessionId AND e.class_id = :classId LIMIT 1;
+    `, { 
+      replacements: { 
+        studentId: context.studentId, 
+        sessionId: exam.session_id, 
+        classId: exam.class_id 
+      } 
+    });
+
+    if (!studentEnrollment) {
+      recordForbiddenAttempt(req, context.studentId, 'exam_access', { examId });
+      return res.fail('You are not allowed to access this exam.', [], 403);
+    }
 
     if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
       return res.fail('Result not yet released or access denied.', [], 403);
     }
 
-    const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+    const dues = await checkFeeDuesUpToExamMonth(studentEnrollment.enrollment_id, exam.start_date);
     if (dues > 0) {
       return res.fail(`Report card withheld due to pending fees of ${dues}. Please clear dues to download.`, [], 403);
     }
-    const attendance = await getAttendanceSummary(context.enrollmentId);
-    const sharedRemarks = await getSharedStudentRemarks(context.studentId, context.enrollmentId, { limit: 5 });
+    const attendance = await getAttendanceSummary(studentEnrollment.enrollment_id);
+    const sharedRemarks = await getSharedStudentRemarks(context.studentId, studentEnrollment.enrollment_id, { limit: 5 });
     const latestSharedRemark = sharedRemarks[0] || null;
 
     const [rows] = await sequelize.query(`
@@ -1234,8 +1283,8 @@ exports.reportCard = async (req, res, next) => {
     `, {
       replacements: {
         examId,
-        enrollmentId: context.enrollmentId,
-        classId: context.classId,
+        enrollmentId: studentEnrollment.enrollment_id,
+        classId: exam.class_id,
       },
     });
 
@@ -1245,13 +1294,13 @@ exports.reportCard = async (req, res, next) => {
 
     res.ok({
       school: { name: 'EduCore School', address: 'Main Campus' },
-      session_name: context.student.session_name,
+      session_name: studentEnrollment.session_name,
       student: {
         name: getStudentName(context.student),
         admission_no: context.student.admission_no,
-        class_name: context.student.class_name,
-        section_name: context.student.section_name,
-        roll_number: context.student.roll_number,
+        class_name: studentEnrollment.class_name,
+        section_name: studentEnrollment.section_name,
+        roll_number: studentEnrollment.roll_number,
         date_of_birth: context.student.date_of_birth,
         photo_path: context.student.photo_path,
       },
@@ -1262,7 +1311,7 @@ exports.reportCard = async (req, res, next) => {
       remarks: {
         teacher: latestSharedRemark?.remark_text || null,
         teacher_name: latestSharedRemark?.teacher_name || null,
-        class_teacher_name: context.student.class_teacher_name,
+        class_teacher_name: studentEnrollment.class_teacher_name,
         items: sharedRemarks,
       },
     }, 'Report card data loaded.');
@@ -2454,27 +2503,50 @@ exports.resultsExport = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
     const examId = Number(req.params.examId);
-    
-    // Fee check
-    const feeSummary = await getFeeSummary(context);
-    const [[sr]] = await sequelize.query(`
-      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
-    
-    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
-
-    if (isWithheld) {
-      return res.fail(`Result withheld due to pending fees of ${feeSummary.total_pending}.`, [], 403);
-    }
 
     const [[exam]] = await sequelize.query(`
-      SELECT id, name, exam_type, start_date, end_date, status
+      SELECT id, name, exam_type, start_date, end_date, status, session_id, class_id
       FROM exams
       WHERE id = :examId
       LIMIT 1;
     `, { replacements: { examId } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [[studentEnrollment]] = await sequelize.query(`
+      SELECT 
+        e.id AS enrollment_id, e.roll_number,
+        cls.name AS class_name,
+        sec.name AS section_name,
+        sess.name AS session_name
+      FROM enrollments e
+      JOIN classes cls ON cls.id = e.class_id
+      JOIN sessions sess ON sess.id = e.session_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      WHERE e.student_id = :studentId AND e.session_id = :sessionId AND e.class_id = :classId LIMIT 1;
+    `, { 
+      replacements: { 
+        studentId: context.studentId, 
+        sessionId: exam.session_id, 
+        classId: exam.class_id 
+      } 
+    });
+
+    if (!studentEnrollment) {
+      return res.fail('You are not allowed to access this exam.', [], 403);
+    }
+    
+    // Fee check
+    const feeSummary = await getFeeSummary({ enrollmentId: studentEnrollment.enrollment_id });
+    const [[sr]] = await sequelize.query(`
+      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
+    `, { replacements: { enrollmentId: studentEnrollment.enrollment_id } });
+    
+    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
+
+    if (isWithheld) {
+      return res.fail(`Result withheld due to pending fees of ${feeSummary.total_pending}.`, [], 403);
+    }
 
     const [[school]] = await sequelize.query(`
       SELECT name, address, phone 
@@ -2498,7 +2570,7 @@ exports.resultsExport = async (req, res, next) => {
     `, {
       replacements: {
         examId,
-        enrollmentId: context.enrollmentId
+        enrollmentId: studentEnrollment.enrollment_id
       }
     });
 
@@ -2529,8 +2601,8 @@ exports.resultsExport = async (req, res, next) => {
     // Student & Exam Details
     doc.fillColor('#F8FAFC').rect(40, doc.y, contentWidth, 80).fill().stroke('#E2E8F0');
     doc.fillColor('#1E293B').font('Helvetica-Bold').fontSize(14).text(getStudentName(context.student), 60, doc.y + 15);
-    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no} | Roll: ${context.student.roll_number || 'N/A'}`, 60, doc.y + 35);
-    doc.text(`Class: ${context.student.class_name} (${context.student.section_name})`, 60, doc.y + 50);
+    doc.font('Helvetica').fontSize(10).text(`Admission No: ${context.student.admission_no} | Roll: ${studentEnrollment.roll_number || 'N/A'}`, 60, doc.y + 35);
+    doc.text(`Class: ${studentEnrollment.class_name} (${studentEnrollment.section_name || 'N/A'})`, 60, doc.y + 50);
     doc.font('Helvetica-Bold').text(`Exam: ${exam.name} (${exam.exam_type})`, 60, doc.y + 65);
 
     const totalObtained = rows.reduce((sum, row) => sum + Number(row.marks_obtained || 0), 0);

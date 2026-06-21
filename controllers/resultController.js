@@ -460,10 +460,12 @@ exports.getExamMarks = async (req, res, next) => {
         er.is_absent
       FROM exam_results er
       JOIN enrollments e ON e.id = er.enrollment_id
+      JOIN exams ex ON ex.id = er.exam_id
+      JOIN sessions sess ON sess.id = ex.session_id
       WHERE er.exam_id = :examId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
-        AND e.status = 'active';
+        AND (e.status = 'active' OR sess.is_current = false);
     `, {
       replacements: {
         examId: Number(exam_id),
@@ -538,6 +540,7 @@ exports.getClassResults = async (req, res, next) => {
         FROM enrollments e
         JOIN students s ON s.id = e.student_id
         JOIN classes c ON c.id = e.class_id
+        JOIN sessions sess ON sess.id = e.session_id
         LEFT JOIN sections sec ON sec.id = e.section_id
         LEFT JOIN LATERAL (
           SELECT 
@@ -552,7 +555,7 @@ exports.getClassResults = async (req, res, next) => {
            AND er.exam_id = es.exam_id
           WHERE es.exam_id = :exam_id
         ) exam_sums ON true
-        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND (e.status = 'active' OR sess.is_current = false)
         ORDER BY (CASE WHEN e.roll_number IS NULL THEN 1 ELSE 0 END), e.roll_number, s.first_name;
       `, {
         replacements: {
@@ -610,7 +613,9 @@ exports.getClassResults = async (req, res, next) => {
         SELECT COUNT(*) AS count 
         FROM exam_results 
         WHERE exam_id = :exam_id AND enrollment_id IN (
-          SELECT id FROM enrollments WHERE session_id = :session_id AND class_id = :class_id AND status = 'active'
+          SELECT e.id FROM enrollments e
+          JOIN sessions sess ON sess.id = e.session_id
+          WHERE e.session_id = :session_id AND e.class_id = :class_id AND (e.status = 'active' OR sess.is_current = false)
         ) AND (marks_obtained IS NOT NULL OR is_absent = true);
       `, { replacements: { exam_id: Number(exam_id), session_id: Number(session_id), class_id: Number(class_id) } });
       const filledEntries = Number(filledRow.count || 0);
@@ -713,8 +718,12 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       SELECT c.name AS class_name, sess.name AS session_name
       FROM classes c
       JOIN sessions sess ON sess.id = :session_id
-      WHERE c.id = :class_id LIMIT 1;
-    `, { replacements: { class_id, session_id } });
+      WHERE c.id = :class_id AND c.school_id = :schoolId AND sess.school_id = :schoolId LIMIT 1;
+    `, { replacements: { class_id, session_id, schoolId } });
+
+    if (!meta) {
+      return res.fail('Session/Class not found or access denied.', [], 404);
+    }
 
     let subjects = [];
     let students = [];
@@ -753,6 +762,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
           COALESCE(exam_sums.failed_count, 0) AS failed_count
         FROM enrollments e
         JOIN students s ON s.id = e.student_id
+        JOIN sessions sess ON sess.id = e.session_id
         LEFT JOIN LATERAL (
           SELECT 
             SUM(er.marks_obtained) AS marks_obtained,
@@ -766,7 +776,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
            AND er.exam_id = es.exam_id
           WHERE es.exam_id = :exam_id
         ) exam_sums ON true
-        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND (e.status = 'active' OR sess.is_current = false)
         ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
       `, { replacements: { session_id, class_id, exam_id: Number(exam_id) } });
 
@@ -836,8 +846,9 @@ exports.downloadClassResultSheet = async (req, res, next) => {
           sr.result
         FROM enrollments e
         JOIN students s ON s.id = e.student_id
+        JOIN sessions sess ON sess.id = e.session_id
         LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
-        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND (e.status = 'active' OR sess.is_current = false)
         ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
       `, { replacements: { session_id, class_id } });
       students = studentRows;
@@ -995,26 +1006,30 @@ exports.downloadClassResultSheet = async (req, res, next) => {
 exports.calculate = async (req, res, next) => {
   try {
     const { enrollment_id, session_id } = req.body;
+    const schoolId = req.user.school_id;
 
     const [[sessionMeta]] = await sequelize.query(`
-      SELECT status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
-    `, { replacements: { sessionId: session_id } });
+      SELECT status, is_locked FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { sessionId: session_id, schoolId } });
 
-    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (!sessionMeta) return res.fail('Session not found or access denied.', [], 404);
     if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
       return res.fail(`Cannot calculate results: session is ${sessionMeta.status}.`);
     }
 
     const [[enrollment]] = await sequelize.query(`
-      SELECT id, class_id
-      FROM enrollments
-      WHERE id = :enrollmentId
-        AND session_id = :sessionId
+      SELECT e.id, e.class_id
+      FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollmentId
+        AND e.session_id = :sessionId
+        AND s.school_id = :schoolId
       LIMIT 1;
     `, {
       replacements: {
         enrollmentId: enrollment_id,
         sessionId: session_id,
+        schoolId,
       },
     });
 
@@ -1037,16 +1052,23 @@ exports.calculate = async (req, res, next) => {
 exports.bulkCalculate = async (req, res, next) => {
   try {
     const { session_id, class_id, calculate = true, release = true } = req.body;
+    const schoolId = req.user.school_id;
 
     if (!session_id || !class_id) {
       return res.fail('session_id and class_id are required.');
     }
 
     const [[sessionMeta]] = await sequelize.query(`
-      SELECT status, is_locked FROM sessions WHERE id = :sessionId LIMIT 1;
-    `, { replacements: { sessionId: session_id } });
+      SELECT status, is_locked FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { sessionId: session_id, schoolId } });
 
-    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (!sessionMeta) return res.fail('Session not found or access denied.', [], 404);
+
+    const [[classMeta]] = await sequelize.query(`
+      SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { classId: class_id, schoolId } });
+
+    if (!classMeta) return res.fail('Class not found or access denied.', [], 404);
     if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
       return res.fail(`Cannot modify results: session is ${sessionMeta.status}.`);
     }
@@ -1121,16 +1143,18 @@ exports.bulkCalculate = async (req, res, next) => {
 exports.release = async (req, res, next) => {
   try {
     const { enrollment_id, release } = req.body;
+    const schoolId = req.user.school_id;
 
     const [[result]] = await sequelize.query(`
       SELECT sr.id, s.status AS session_status, s.is_locked AS session_locked
       FROM student_results sr
       JOIN sessions s ON s.id = sr.session_id
-      WHERE sr.enrollment_id = :enrollment_id LIMIT 1;
-    `, { replacements: { enrollment_id } });
+      JOIN enrollments e ON e.id = sr.enrollment_id
+      WHERE sr.enrollment_id = :enrollment_id AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { enrollment_id, schoolId } });
 
     if (!result) {
-      return res.fail('Result not yet calculated for this student. Calculate result before releasing.', [], 400);
+      return res.fail('Result not yet calculated or access denied for this student.', [], 404);
     }
 
     if (['closed', 'archived', 'locked'].includes(result.session_status) || result.session_locked) {
@@ -1170,15 +1194,16 @@ exports.release = async (req, res, next) => {
 exports.override = async (req, res, next) => {
   try {
     const { enrollment_id, new_result, reason, compartment_subjects } = req.body;
+    const schoolId = req.user.school_id;
 
     const [[enrollment]] = await sequelize.query(`
       SELECT e.id, s.status AS session_status, s.is_locked AS session_locked
       FROM enrollments e
       JOIN sessions s ON s.id = e.session_id
-      WHERE e.id = :enrollment_id LIMIT 1;
-    `, { replacements: { enrollment_id } });
+      WHERE e.id = :enrollment_id AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { enrollment_id, schoolId } });
 
-    if (!enrollment) return res.fail('Enrollment not found.', [], 404);
+    if (!enrollment) return res.fail('Enrollment not found or access denied.', [], 404);
     if (['closed', 'archived', 'locked'].includes(enrollment.session_status) || enrollment.session_locked) {
       return res.fail(`Cannot override result: session is ${enrollment.session_status}.`);
     }
@@ -1213,17 +1238,18 @@ exports.overrideMark = async (req, res, next) => {
       practical_marks_obtained = null,
       reason,
     } = req.body;
+    const schoolId = req.user.school_id;
 
     const [[exam]] = await sequelize.query(`
       SELECT e.id, e.class_id, e.session_id, s.status AS session_status, s.is_locked AS session_locked
       FROM exams e
       JOIN sessions s ON s.id = e.session_id
-      WHERE e.id = :examId
+      WHERE e.id = :examId AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { examId: exam_id } });
+    `, { replacements: { examId: exam_id, schoolId } });
 
     if (!exam) {
-      return res.fail('Exam not found.', [], 404);
+      return res.fail('Exam not found or access denied.', [], 404);
     }
 
     if (['closed', 'archived', 'locked'].includes(exam.session_status) || exam.session_locked) {
@@ -1231,11 +1257,12 @@ exports.overrideMark = async (req, res, next) => {
     }
 
     const [[enrollment]] = await sequelize.query(`
-      SELECT id, class_id, session_id
-      FROM enrollments
-      WHERE id = :enrollmentId
+      SELECT e.id, e.class_id, e.session_id
+      FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollmentId AND s.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { enrollmentId: enrollment_id } });
+    `, { replacements: { enrollmentId: enrollment_id, schoolId } });
 
     if (!enrollment) {
       return res.fail('Enrollment not found.', [], 404);

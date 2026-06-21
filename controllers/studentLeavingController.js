@@ -585,7 +585,7 @@ exports.readmitStudent = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[student]] = await sequelize.query(`
-      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
+      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
     `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);
@@ -595,19 +595,45 @@ exports.readmitStudent = async (req, res, next) => {
     `, { replacements: { id } });
 
     await sequelize.transaction(async (t) => {
-      await sequelize.query(`
-        INSERT INTO enrollments (
-          student_id, session_id, class_id, section_id, roll_number, 
-          joined_date, joining_type, status, previous_enrollment_id, created_at, updated_at
-        ) VALUES (
-          :id, :session_id, :class_id, :section_id, :roll_number, 
-          :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
-        )
-      `, { replacements: { 
-        id, session_id, class_id, section_id, roll_number, 
-        joined_date: joined_date || new Date().toISOString().split('T')[0],
-        prevId: lastEnrollment ? lastEnrollment.id : null
-      }, transaction: t });
+      const [[existingEnrollment]] = await sequelize.query(`
+        SELECT id FROM enrollments WHERE student_id = :id AND session_id = :session_id LIMIT 1
+      `, { replacements: { id, session_id }, transaction: t });
+
+      if (existingEnrollment) {
+        await sequelize.query(`
+          UPDATE enrollments
+          SET class_id = :class_id,
+              section_id = :section_id,
+              roll_number = :roll_number,
+              joined_date = :joined_date,
+              joining_type = 'rejoined',
+              left_date = null,
+              leaving_type = null,
+              status = 'active',
+              updated_at = NOW()
+          WHERE id = :enrollmentId
+        `, { replacements: {
+          enrollmentId: existingEnrollment.id,
+          class_id,
+          section_id,
+          roll_number,
+          joined_date: joined_date || new Date().toISOString().split('T')[0]
+        }, transaction: t });
+      } else {
+        await sequelize.query(`
+          INSERT INTO enrollments (
+            student_id, session_id, class_id, section_id, roll_number, 
+            joined_date, joining_type, status, previous_enrollment_id, created_at, updated_at
+          ) VALUES (
+            :id, :session_id, :class_id, :section_id, :roll_number, 
+            :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
+          )
+        `, { replacements: { 
+          id, session_id, class_id, section_id, roll_number, 
+          joined_date: joined_date || new Date().toISOString().split('T')[0],
+          prevId: lastEnrollment ? lastEnrollment.id : null
+        }, transaction: t });
+      }
 
       const oldStatus = student.status || 'left';
 
