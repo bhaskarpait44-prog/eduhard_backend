@@ -228,9 +228,12 @@ exports.getResults = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { enrollment_id } });
 
-    // 3. Fee Check (Withholding logic)
+    // 3. Fee Check & Access Check (Withholding logic)
     const pendingBalance = await getPendingBalance(enrollment_id);
-    const isWithheld = pendingBalance > 0 && !finalResult?.release_result;
+    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
+    const isWithheld = isUserRestricted
+      ? (!finalResult || !finalResult.release_result)
+      : (pendingBalance > 0 && !finalResult?.release_result);
 
     res.ok({
       subject_results: isWithheld ? [] : subjectResults,
@@ -258,6 +261,11 @@ exports.getReportCardData = async (req, res, next) => {
 
     if (!finalResult) {
       return res.fail('Result not yet calculated for this student or access denied.', [], 400);
+    }
+
+    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
+    if (isUserRestricted && !finalResult.release_result) {
+      return res.fail('Result not yet released or access denied.', [], 403);
     }
 
     // 1. Fetch Enrollment, Student, School, Session
@@ -363,6 +371,11 @@ exports.getReportCard = async (req, res, next) => {
       return res.fail('Result not yet calculated for this student or access denied.', [], 400);
     }
 
+    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
+    if (isUserRestricted && !finalResult.release_result) {
+      return res.fail('Result not yet released or access denied.', [], 403);
+    }
+
     // 0a. Fee Check
     const pendingBalance = await getPendingBalance(enrollment_id);
     if (pendingBalance > 0 && !finalResult.release_result) {
@@ -429,10 +442,44 @@ exports.getReportCard = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// GET /api/results/exam-marks - Get raw exam marks for all students in a section
+exports.getExamMarks = async (req, res, next) => {
+  try {
+    const { exam_id, class_id, section_id } = req.query;
+    if (!exam_id || !class_id || !section_id) {
+      return res.fail('exam_id, class_id, and section_id are required.');
+    }
+
+    const [rows] = await sequelize.query(`
+      SELECT 
+        er.enrollment_id,
+        er.subject_id,
+        er.marks_obtained,
+        er.theory_marks_obtained,
+        er.practical_marks_obtained,
+        er.is_absent
+      FROM exam_results er
+      JOIN enrollments e ON e.id = er.enrollment_id
+      WHERE er.exam_id = :examId
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+        AND e.status = 'active';
+    `, {
+      replacements: {
+        examId: Number(exam_id),
+        classId: Number(class_id),
+        sectionId: Number(section_id),
+      }
+    });
+
+    res.ok({ marks: rows });
+  } catch (err) { next(err); }
+};
+
 // GET /api/results/class - Get results for all students in a class
 exports.getClassResults = async (req, res, next) => {
   try {
-    const { session_id, class_id } = req.query;
+    const { session_id, class_id, exam_id } = req.query;
     const schoolId = req.user.school_id;
 
     if (!session_id || !class_id) {
@@ -448,59 +495,209 @@ exports.getClassResults = async (req, res, next) => {
       return res.fail('Session not found or access denied.', [], 404);
     }
 
-    const [results] = await sequelize.query(`
-      SELECT
-        e.id AS enrollment_id,
-        s.admission_no,
-        CONCAT(s.first_name, ' ', s.last_name) AS student_name,
-        e.roll_number,
-        c.name AS class_name,
-        sec.name AS section_name,
-        COALESCE(sr.marks_obtained, 0) AS marks_obtained,
-        COALESCE(sr.total_marks, 0) AS total_marks,
-        COALESCE(sr.percentage, 0) AS percentage,
-        sr.grade,
-        sr.result,
-        sr.is_promoted,
-        sr.compartment_subjects,
-        sr.promotion_override_reason,
-        sr.release_result,
-        COALESCE((
-          SELECT SUM(amount_due + late_fee_amount - concession_amount - amount_paid)
-          FROM fee_invoices
-          WHERE enrollment_id = e.id AND status IN ('pending', 'partial')
-        ), 0) AS pending_balance
-      FROM enrollments e
-      JOIN students s ON s.id = e.student_id
-      JOIN classes c ON c.id = e.class_id
-      LEFT JOIN sections sec ON sec.id = e.section_id
-      LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
-      WHERE e.session_id = :session_id AND e.class_id = :class_id
-      ORDER BY (CASE WHEN e.roll_number IS NULL THEN 1 ELSE 0 END), e.roll_number, s.first_name
-    `, { 
-      replacements: { 
-        session_id: Number(session_id), 
-        class_id: Number(class_id) 
-      } 
-    });
+    if (exam_id) {
+      const [[examCheck]] = await sequelize.query(`
+        SELECT id, status, name, exam_type, start_date, end_date, publish_controls
+        FROM exams
+        WHERE id = :exam_id AND session_id = :session_id AND class_id = :class_id LIMIT 1;
+      `, { replacements: { exam_id: Number(exam_id), session_id: Number(session_id), class_id: Number(class_id) } });
 
-    const resultsWithWithheld = results.map(r => ({
-      ...r,
-      is_withheld: parseFloat(r.pending_balance) > 0 && !r.release_result
-    }));
+      if (!examCheck) {
+        return res.fail('Exam not found for the selected session and class.', [], 404);
+      }
 
-    const reviewSummary = await getClassReviewSummary(session_id, class_id);
+      let endOfExamMonth = '9999-12-31';
+      if (examCheck.start_date) {
+        const date = new Date(examCheck.start_date);
+        const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+        const yyyy = lastDay.getFullYear();
+        const mm = String(lastDay.getMonth() + 1).padStart(2, '0');
+        const dd = String(lastDay.getDate()).padStart(2, '0');
+        endOfExamMonth = `${yyyy}-${mm}-${dd}`;
+      }
 
-    res.ok({
-      results: resultsWithWithheld,
-      review_summary: reviewSummary,
-    });
+      // Fetch students with their calculated exam results
+      const [results] = await sequelize.query(`
+        SELECT
+          e.id AS enrollment_id,
+          s.admission_no,
+          CONCAT(s.first_name, ' ', s.last_name) AS student_name,
+          e.roll_number,
+          c.name AS class_name,
+          sec.name AS section_name,
+          COALESCE(exam_sums.marks_obtained, 0) AS marks_obtained,
+          COALESCE(exam_sums.total_marks, 0) AS total_marks,
+          COALESCE(exam_sums.entered_count, 0) AS entered_count,
+          COALESCE(exam_sums.failed_count, 0) AS failed_count,
+          COALESCE((
+            SELECT SUM(amount_due + late_fee_amount - concession_amount - amount_paid)
+            FROM fee_invoices
+            WHERE enrollment_id = e.id AND status IN ('pending', 'partial')
+              AND due_date <= :endOfExamMonth
+          ), 0) AS pending_balance
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        JOIN classes c ON c.id = e.class_id
+        LEFT JOIN sections sec ON sec.id = e.section_id
+        LEFT JOIN LATERAL (
+          SELECT 
+            SUM(er.marks_obtained) AS marks_obtained,
+            SUM(es.combined_total_marks) AS total_marks,
+            COUNT(er.marks_obtained) AS entered_count,
+            COUNT(CASE WHEN (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE) OR er.marks_obtained < es.combined_passing_marks OR er.is_absent = true THEN 1 END) AS failed_count
+          FROM exam_subjects es
+          LEFT JOIN exam_results er 
+            ON er.subject_id = es.subject_id 
+           AND er.enrollment_id = e.id 
+           AND er.exam_id = es.exam_id
+          WHERE es.exam_id = :exam_id
+        ) exam_sums ON true
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        ORDER BY (CASE WHEN e.roll_number IS NULL THEN 1 ELSE 0 END), e.roll_number, s.first_name;
+      `, {
+        replacements: {
+          session_id: Number(session_id),
+          class_id: Number(class_id),
+          exam_id: Number(exam_id),
+          endOfExamMonth
+        }
+      });
+
+      const mappedResults = results.map(r => {
+        const total_marks = Number(r.total_marks || 0);
+        const marks_obtained = Number(r.marks_obtained || 0);
+        const entered_count = Number(r.entered_count || 0);
+        const failed_count = Number(r.failed_count || 0);
+
+        let percentage = null;
+        let grade = null;
+        let result = null;
+
+        if (entered_count > 0) {
+          percentage = total_marks > 0 ? Number(((marks_obtained / total_marks) * 100).toFixed(2)) : 0;
+          
+          if (percentage >= 90) grade = 'A+';
+          else if (percentage >= 80) grade = 'A';
+          else if (percentage >= 70) grade = 'B';
+          else if (percentage >= 60) grade = 'C';
+          else if (percentage >= 50) grade = 'D';
+          else grade = 'F';
+
+          result = failed_count === 0 ? 'pass' : failed_count <= 2 ? 'compartment' : 'fail';
+        }
+
+        return {
+          ...r,
+          marks_obtained,
+          total_marks,
+          percentage,
+          grade,
+          result,
+          release_result: examCheck.publish_controls?.results_published === true,
+          is_withheld: parseFloat(r.pending_balance) > 0 && !(examCheck.publish_controls?.results_published === true)
+        };
+      });
+
+      // Calculate overall progress of marks entry
+      const totalStudents = results.length;
+      const [[subjectCountRow]] = await sequelize.query(`
+        SELECT COUNT(*) AS count FROM exam_subjects WHERE exam_id = :exam_id;
+      `, { replacements: { exam_id: Number(exam_id) } });
+      const totalSubjects = Number(subjectCountRow.count || 0);
+      const totalPossibleEntries = totalStudents * totalSubjects;
+
+      const [[filledRow]] = await sequelize.query(`
+        SELECT COUNT(*) AS count 
+        FROM exam_results 
+        WHERE exam_id = :exam_id AND enrollment_id IN (
+          SELECT id FROM enrollments WHERE session_id = :session_id AND class_id = :class_id AND status = 'active'
+        ) AND (marks_obtained IS NOT NULL OR is_absent = true);
+      `, { replacements: { exam_id: Number(exam_id), session_id: Number(session_id), class_id: Number(class_id) } });
+      const filledEntries = Number(filledRow.count || 0);
+      const progressPercent = totalPossibleEntries > 0 ? Math.round((filledEntries / totalPossibleEntries) * 100) : 0;
+
+      const reviewSummary = await getClassReviewSummary(session_id, class_id);
+
+      res.ok({
+        results: mappedResults,
+        review_summary: reviewSummary,
+        exam_summary: {
+          exam_id: examCheck.id,
+          name: examCheck.name,
+          status: examCheck.status,
+          exam_type: examCheck.exam_type,
+          start_date: examCheck.start_date,
+          end_date: examCheck.end_date,
+          progress_percent: progressPercent
+        }
+      });
+    } else {
+      const [results] = await sequelize.query(`
+        SELECT
+          e.id AS enrollment_id,
+          s.admission_no,
+          CONCAT(s.first_name, ' ', s.last_name) AS student_name,
+          e.roll_number,
+          c.name AS class_name,
+          sec.name AS section_name,
+          COALESCE(sr.marks_obtained, 0) AS marks_obtained,
+          COALESCE(sr.total_marks, 0) AS total_marks,
+          COALESCE(sr.percentage, 0) AS percentage,
+          sr.grade,
+          sr.result,
+          sr.is_promoted,
+          sr.compartment_subjects,
+          sr.promotion_override_reason,
+          sr.release_result,
+          COALESCE((
+            SELECT SUM(amount_due + late_fee_amount - concession_amount - amount_paid)
+            FROM fee_invoices
+            WHERE enrollment_id = e.id AND status IN ('pending', 'partial')
+          ), 0) AS pending_balance
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        JOIN classes c ON c.id = e.class_id
+        LEFT JOIN sections sec ON sec.id = e.section_id
+        LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
+        WHERE e.session_id = :session_id AND e.class_id = :class_id
+        ORDER BY (CASE WHEN e.roll_number IS NULL THEN 1 ELSE 0 END), e.roll_number, s.first_name
+      `, { 
+        replacements: { 
+          session_id: Number(session_id), 
+          class_id: Number(class_id) 
+        } 
+      });
+
+      const { getAttendancePercent } = require('../utils/attendanceCalculator');
+      const resultsWithWithheld = await Promise.all(results.map(async r => {
+        let attendancePct = 0;
+        try {
+          const stats = await getAttendancePercent(r.enrollment_id);
+          attendancePct = stats.percentage;
+        } catch (e) {
+          console.error('Failed to get attendance for', r.enrollment_id, e);
+        }
+        return {
+          ...r,
+          attendance_pct: attendancePct,
+          is_withheld: parseFloat(r.pending_balance) > 0 && !r.release_result
+        };
+      }));
+
+      const reviewSummary = await getClassReviewSummary(session_id, class_id);
+
+      res.ok({
+        results: resultsWithWithheld,
+        review_summary: reviewSummary,
+      });
+    }
   } catch (err) { next(err); }
 };
 
+
 exports.downloadClassResultSheet = async (req, res, next) => {
   try {
-    const { session_id, class_id } = req.query;
+    const { session_id, class_id, exam_id } = req.query;
     const schoolId = req.user.school_id;
 
     if (!session_id || !class_id) {
@@ -519,42 +716,143 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       WHERE c.id = :class_id LIMIT 1;
     `, { replacements: { class_id, session_id } });
 
-    const [subjects] = await sequelize.query(`
-      SELECT DISTINCT sub.id, sub.name, sub.code
-      FROM subjects sub
-      JOIN exam_subjects es ON es.subject_id = sub.id
-      JOIN exams e ON e.id = es.exam_id
-      WHERE e.session_id = :session_id AND e.class_id = :class_id
-        AND e.exam_type != 'compartment'
-      ORDER BY sub.name;
-    `, { replacements: { session_id, class_id } });
+    let subjects = [];
+    let students = [];
+    let marks = [];
+    let exam = null;
 
-    const [students] = await sequelize.query(`
-      SELECT
-        e.id AS enrollment_id,
-        e.roll_number,
-        CONCAT(s.first_name, ' ', s.last_name) AS student_name,
-        COALESCE(sr.marks_obtained, 0) AS total_obtained,
-        COALESCE(sr.total_marks, 0) AS total_max,
-        COALESCE(sr.percentage, 0) AS percentage,
-        sr.grade,
-        sr.result
-      FROM enrollments e
-      JOIN students s ON s.id = e.student_id
-      LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
-      WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
-      ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
-    `, { replacements: { session_id, class_id } });
+    if (exam_id) {
+      const [[examRow]] = await sequelize.query(`
+        SELECT id, name, status, exam_type
+        FROM exams
+        WHERE id = :exam_id AND session_id = :session_id AND class_id = :class_id LIMIT 1;
+      `, { replacements: { exam_id: Number(exam_id), session_id: Number(session_id), class_id: Number(class_id) } });
 
-    const [marks] = await sequelize.query(`
-      SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent, e.weightage
-      FROM exam_results er
-      JOIN exams e ON e.id = er.exam_id
-      WHERE e.session_id = :session_id 
-        AND e.class_id = :class_id
-        AND e.exam_type != 'compartment'
-        AND e.status = 'completed';
-    `, { replacements: { session_id, class_id } });
+      if (!examRow) {
+        return res.fail('Exam not found for the selected session and class.', [], 404);
+      }
+      exam = examRow;
+
+      const [subjectRows] = await sequelize.query(`
+        SELECT DISTINCT sub.id, sub.name, sub.code
+        FROM subjects sub
+        JOIN exam_subjects es ON es.subject_id = sub.id
+        WHERE es.exam_id = :exam_id
+        ORDER BY sub.name;
+      `, { replacements: { exam_id: Number(exam_id) } });
+      subjects = subjectRows;
+
+      const [studentRows] = await sequelize.query(`
+        SELECT
+          e.id AS enrollment_id,
+          e.roll_number,
+          CONCAT(s.first_name, ' ', s.last_name) AS student_name,
+          COALESCE(exam_sums.marks_obtained, 0) AS total_obtained,
+          COALESCE(exam_sums.total_marks, 0) AS total_max,
+          COALESCE(exam_sums.entered_count, 0) AS entered_count,
+          COALESCE(exam_sums.failed_count, 0) AS failed_count
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        LEFT JOIN LATERAL (
+          SELECT 
+            SUM(er.marks_obtained) AS marks_obtained,
+            SUM(es.combined_total_marks) AS total_marks,
+            COUNT(er.marks_obtained) AS entered_count,
+            COUNT(CASE WHEN (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE) OR er.marks_obtained < es.combined_passing_marks OR er.is_absent = true THEN 1 END) AS failed_count
+          FROM exam_subjects es
+          LEFT JOIN exam_results er 
+            ON er.subject_id = es.subject_id 
+           AND er.enrollment_id = e.id 
+           AND er.exam_id = es.exam_id
+          WHERE es.exam_id = :exam_id
+        ) exam_sums ON true
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
+      `, { replacements: { session_id, class_id, exam_id: Number(exam_id) } });
+
+      students = studentRows.map(r => {
+        const total_max = Number(r.total_max || 0);
+        const total_obtained = Number(r.total_obtained || 0);
+        const entered_count = Number(r.entered_count || 0);
+        const failed_count = Number(r.failed_count || 0);
+
+        let percentage = 0;
+        let grade = '-';
+        let result = '-';
+
+        if (entered_count > 0) {
+          percentage = total_max > 0 ? Number(((total_obtained / total_max) * 100).toFixed(2)) : 0;
+          
+          if (percentage >= 90) grade = 'A+';
+          else if (percentage >= 80) grade = 'A';
+          else if (percentage >= 70) grade = 'B';
+          else if (percentage >= 60) grade = 'C';
+          else if (percentage >= 50) grade = 'D';
+          else grade = 'F';
+
+          result = failed_count === 0 ? 'pass' : failed_count <= 2 ? 'compartment' : 'fail';
+        }
+
+        return {
+          enrollment_id: r.enrollment_id,
+          roll_number: r.roll_number,
+          student_name: r.student_name,
+          total_obtained,
+          total_max,
+          percentage,
+          grade,
+          result
+        };
+      });
+
+      const [markRows] = await sequelize.query(`
+        SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent
+        FROM exam_results er
+        WHERE er.exam_id = :exam_id;
+      `, { replacements: { exam_id: Number(exam_id) } });
+      marks = markRows;
+
+    } else {
+      const [subjectRows] = await sequelize.query(`
+        SELECT DISTINCT sub.id, sub.name, sub.code
+        FROM subjects sub
+        JOIN exam_subjects es ON es.subject_id = sub.id
+        JOIN exams e ON e.id = es.exam_id
+        WHERE e.session_id = :session_id AND e.class_id = :class_id
+          AND e.exam_type != 'compartment'
+        ORDER BY sub.name;
+      `, { replacements: { session_id, class_id } });
+      subjects = subjectRows;
+
+      const [studentRows] = await sequelize.query(`
+        SELECT
+          e.id AS enrollment_id,
+          e.roll_number,
+          CONCAT(s.first_name, ' ', s.last_name) AS student_name,
+          COALESCE(sr.marks_obtained, 0) AS total_obtained,
+          COALESCE(sr.total_marks, 0) AS total_max,
+          COALESCE(sr.percentage, 0) AS percentage,
+          sr.grade,
+          sr.result
+        FROM enrollments e
+        JOIN students s ON s.id = e.student_id
+        LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
+        WHERE e.session_id = :session_id AND e.class_id = :class_id AND e.status = 'active'
+        ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer, e.roll_number, s.first_name;
+      `, { replacements: { session_id, class_id } });
+      students = studentRows;
+
+      const [markRows] = await sequelize.query(`
+        SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent, e.weightage
+        FROM exam_results er
+        JOIN exams e ON e.id = er.exam_id
+        WHERE e.session_id = :session_id 
+          AND e.class_id = :class_id
+          AND e.exam_type != 'compartment'
+          AND e.status = 'completed';
+      `, { replacements: { session_id, class_id } });
+      marks = markRows;
+    }
 
     const markMap = {};
     const isAbsentMap = {};
@@ -570,10 +868,14 @@ exports.downloadClassResultSheet = async (req, res, next) => {
         markMap[eid][sid] = 0;
       }
       
-      const weight = parseFloat(m.weightage || 100) / 100;
-      const obtained = m.is_absent ? 0 : parseFloat(m.marks_obtained || 0);
-      
-      markMap[eid][sid] += (obtained * weight);
+      if (exam_id) {
+        const obtained = m.is_absent ? 0 : parseFloat(m.marks_obtained || 0);
+        markMap[eid][sid] = obtained;
+      } else {
+        const weight = parseFloat(m.weightage || 100) / 100;
+        const obtained = m.is_absent ? 0 : parseFloat(m.marks_obtained || 0);
+        markMap[eid][sid] += (obtained * weight);
+      }
       if (m.is_absent) isAbsentMap[eid][sid] = true;
     });
 
@@ -581,15 +883,24 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Class_Result_Sheet_${meta.class_name}_${meta.session_name}.pdf"`);
+    const pdfFileName = (exam_id && exam)
+      ? `Result_Sheet_${meta.class_name}_${exam.name.replace(/\s+/g, '_')}_${meta.session_name}.pdf`
+      : `Class_Result_Sheet_${meta.class_name}_${meta.session_name}.pdf`;
+    res.setHeader('Content-Disposition', `attachment; filename="${pdfFileName}"`);
     doc.pipe(res);
 
     const drawHeader = () => {
       doc.fillColor('#0f766e').fontSize(16).font('Helvetica-Bold').text(school.name.toUpperCase(), { align: 'center' });
       doc.fillColor('#64748b').fontSize(8).font('Helvetica').text(school.address, { align: 'center' });
       doc.moveDown(0.5);
-      doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text('CONSOLIDATED CLASS RESULT SHEET', { align: 'center' });
-      doc.fontSize(10).text(`Class: ${meta.class_name} | Session: ${meta.session_name}`, { align: 'center' });
+      
+      if (exam_id && exam) {
+        doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text(`CLASS RESULT SHEET - ${exam.name.toUpperCase()}`, { align: 'center' });
+        doc.fontSize(10).text(`Class: ${meta.class_name} | Session: ${meta.session_name} | Status: ${exam.status.toUpperCase()}`, { align: 'center' });
+      } else {
+        doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text('CONSOLIDATED CLASS RESULT SHEET', { align: 'center' });
+        doc.fontSize(10).text(`Class: ${meta.class_name} | Session: ${meta.session_name}`, { align: 'center' });
+      }
       doc.moveDown(1);
     };
 
@@ -769,7 +1080,7 @@ exports.bulkCalculate = async (req, res, next) => {
           summary.calculated++;
         }
 
-        if (release) {
+        if (release !== undefined) {
           const [[exists]] = await sequelize.query(`
             SELECT id FROM student_results WHERE enrollment_id = :enrollment_id LIMIT 1;
           `, { replacements: { enrollment_id: enr.id } });
@@ -777,17 +1088,22 @@ exports.bulkCalculate = async (req, res, next) => {
           if (exists) {
             await sequelize.query(`
               UPDATE student_results
-              SET release_result = true,
+              SET release_result = :releaseVal,
                   released_by = :userId,
                   updated_at = NOW()
               WHERE enrollment_id = :enrollment_id;
             `, {
               replacements: {
                 enrollment_id: enr.id,
-                userId: req.user.id
+                userId: req.user.id,
+                releaseVal: !!release
               }
             });
-            summary.released++;
+            if (release) {
+              summary.released++;
+            } else {
+              summary.unreleased = (summary.unreleased || 0) + 1;
+            }
           }
         }
       } catch (err) {

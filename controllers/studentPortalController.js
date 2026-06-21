@@ -36,6 +36,32 @@ function attendanceBand(percentage) {
   return 'critical';
 }
 
+const checkFeeDuesUpToExamMonth = async (enrollmentId, examStartDate) => {
+  if (!examStartDate) return 0;
+  try {
+    const date = new Date(examStartDate);
+    const lastDay = new Date(date.getFullYear(), date.getMonth() + 1, 0);
+    const yyyy = lastDay.getFullYear();
+    const mm = String(lastDay.getMonth() + 1).padStart(2, '0');
+    const dd = String(lastDay.getDate()).padStart(2, '0');
+    const endOfExamMonth = `${yyyy}-${mm}-${dd}`;
+
+    const [[row]] = await sequelize.query(`
+      SELECT 
+        SUM(amount_due + late_fee_amount - concession_amount - amount_paid) AS balance
+      FROM fee_invoices
+      WHERE enrollment_id = :enrollmentId
+        AND status IN ('pending', 'partial')
+        AND due_date <= :endOfExamMonth;
+    `, { replacements: { enrollmentId, endOfExamMonth } });
+
+    return parseFloat(row?.balance || 0);
+  } catch (err) {
+    logger.error('Error checking fee dues up to exam month:', err);
+    return 0;
+  }
+};
+
 function gradeColor(grade) {
   if (grade === 'A+') return 'dark_green';
   if (grade === 'A') return 'green';
@@ -982,14 +1008,6 @@ exports.results = async (req, res, next) => {
     const context = await getStudentContext(req);
     await ensureAchievementsFresh(context);
 
-    // Fee check
-    const feeSummary = await getFeeSummary(context);
-    const [[sr]] = await sequelize.query(`
-      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
-    
-    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
-
     const [rows] = await sequelize.query(`
       SELECT
         ex.id,
@@ -998,11 +1016,14 @@ exports.results = async (req, res, next) => {
         ex.start_date,
         ex.end_date,
         ex.status,
+        ex.publish_controls,
         CASE
-          WHEN EXISTS (
-            SELECT 1 FROM exam_results er
-            WHERE er.exam_id = ex.id AND er.enrollment_id = :enrollmentId
-          ) THEN 'published'
+          WHEN ex.status IN ('published', 'completed')
+               AND COALESCE((ex.publish_controls->>'results_published')::boolean, false) = true
+               AND EXISTS (
+                 SELECT 1 FROM exam_results er
+                 WHERE er.exam_id = ex.id AND er.enrollment_id = :enrollmentId
+               ) THEN 'published'
           WHEN ex.start_date > CURRENT_DATE THEN 'upcoming'
           ELSE 'awaiting'
         END AS student_status
@@ -1017,7 +1038,26 @@ exports.results = async (req, res, next) => {
         classId: context.classId,
       },
     });
-    res.ok({ exams: rows, is_withheld: isWithheld, total_pending: feeSummary.total_pending }, `${rows.length} exam(s) found.`);
+
+    const examsWithWithheld = [];
+    for (const exam of rows) {
+      if (exam.student_status === 'published') {
+        const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+        examsWithWithheld.push({
+          ...exam,
+          is_withheld: dues > 0,
+          pending_balance: dues,
+        });
+      } else {
+        examsWithWithheld.push({
+          ...exam,
+          is_withheld: false,
+          pending_balance: 0,
+        });
+      }
+    }
+
+    res.ok({ exams: examsWithWithheld, is_withheld: false, total_pending: 0 }, `${examsWithWithheld.length} exam(s) found.`);
   } catch (err) { next(err); }
 };
 
@@ -1026,21 +1066,9 @@ exports.resultByExam = async (req, res, next) => {
     const context = await getStudentContext(req);
     await ensureAchievementsFresh(context);
 
-    // Fee check
-    const feeSummary = await getFeeSummary(context);
-    const [[sr]] = await sequelize.query(`
-      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
-    
-    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
-
-    if (isWithheld) {
-      return res.fail(`Result withheld due to pending fees of ${feeSummary.total_pending}. Please clear dues to view marks.`, [], 403);
-    }
-
     const examId = Number(req.params.examId);
     const [[exam]] = await sequelize.query(`
-      SELECT id, name, exam_type, start_date, end_date, status
+      SELECT id, name, exam_type, start_date, end_date, status, publish_controls
       FROM exams
       WHERE id = :examId
         AND session_id = :sessionId
@@ -1061,6 +1089,15 @@ exports.resultByExam = async (req, res, next) => {
         return res.fail('You are not allowed to access this exam.', [], 403);
       }
       return res.fail('Exam not found.', [], 404);
+    }
+
+    if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
+      return res.fail('Result not yet released or access denied.', [], 403);
+    }
+
+    const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+    if (dues > 0) {
+      return res.fail(`Result withheld due to pending fees of ${dues}. Please clear dues to view marks.`, [], 403);
     }
 
     const [rows] = await sequelize.query(`
@@ -1145,19 +1182,32 @@ exports.reportCard = async (req, res, next) => {
     const context = await getStudentContext(req);
     await ensureAchievementsFresh(context);
 
-    // Fee check
-    const feeSummary = await getFeeSummary(context);
-    const [[sr]] = await sequelize.query(`
-      SELECT release_result FROM student_results WHERE enrollment_id = :enrollmentId LIMIT 1;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
-    
-    const isWithheld = feeSummary.total_pending > 0 && !sr?.release_result;
+    const examId = Number(req.params.examId);
+    const [[exam]] = await sequelize.query(`
+      SELECT id, start_date, status, publish_controls
+      FROM exams
+      WHERE id = :examId
+        AND session_id = :sessionId
+        AND class_id = :classId
+      LIMIT 1;
+    `, {
+      replacements: {
+        examId,
+        sessionId: context.sessionId,
+        classId: context.classId,
+      },
+    });
 
-    if (isWithheld) {
-      return res.fail(`Report card withheld due to pending fees of ${feeSummary.total_pending}. Please clear dues to download.`, [], 403);
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
+      return res.fail('Result not yet released or access denied.', [], 403);
     }
 
-    const examId = Number(req.params.examId);
+    const dues = await checkFeeDuesUpToExamMonth(context.enrollmentId, exam.start_date);
+    if (dues > 0) {
+      return res.fail(`Report card withheld due to pending fees of ${dues}. Please clear dues to download.`, [], 403);
+    }
     const attendance = await getAttendanceSummary(context.enrollmentId);
     const sharedRemarks = await getSharedStudentRemarks(context.studentId, context.enrollmentId, { limit: 5 });
     const latestSharedRemark = sharedRemarks[0] || null;

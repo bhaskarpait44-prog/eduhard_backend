@@ -505,10 +505,18 @@ exports.create = async (req, res, next) => {
 exports.update = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const {
+      name,
+      start_date,
+      end_date,
+      status,
+      weightage,
+      subjects,
+      publish_controls,
+    } = req.body;
 
     const [[exam]] = await sequelize.query(`
-      SELECT e.id, e.status, e.session_id, e.class_id
+      SELECT e.*
       FROM exams e
       JOIN sessions s ON s.id = e.session_id
       WHERE e.id = :id
@@ -518,44 +526,205 @@ exports.update = async (req, res, next) => {
 
     if (!exam) return res.fail('Exam not found.', [], 404);
     if (!await assertSessionNotLocked(exam.session_id, req.user.school_id, res)) return;
-    if (!['draft', 'published'].includes(status)) {
-      return res.fail('status must be draft or published.', [], 422);
-    }
 
-    if (status === 'published') {
-      const [[reviewRow]] = await sequelize.query(`
-        SELECT COUNT(*) AS pending_count
-        FROM exam_subjects
-        WHERE exam_id = :examId
-          AND review_status IN ('submitted', 'rejected');
-      `, { replacements: { examId: id } });
-
-      if (Number(reviewRow?.pending_count || 0) > 0) {
-        return res.fail('Approve all submitted subjects before publishing the exam.', [], 422);
+    // Validation for status change
+    if (status && status !== exam.status) {
+      if (!['draft', 'published'].includes(status)) {
+        return res.fail('status must be draft or published.', [], 422);
       }
 
-      const [[subjectRow]] = await sequelize.query(`
-        SELECT COUNT(*) AS subject_count
-        FROM exam_subjects
-        WHERE exam_id = :examId;
-      `, { replacements: { examId: id } });
+      if (status === 'published') {
+        // If not updating subjects now, check existing subjects
+        if (!subjects) {
+          const [[reviewRow]] = await sequelize.query(`
+            SELECT COUNT(*) AS pending_count
+            FROM exam_subjects
+            WHERE exam_id = :examId
+              AND review_status IN ('submitted', 'rejected');
+          `, { replacements: { examId: id } });
 
-      if (Number(subjectRow?.subject_count || 0) === 0) {
-        return res.fail('Cannot publish an exam without subjects.', [], 422);
+          if (Number(reviewRow?.pending_count || 0) > 0) {
+            return res.fail('Approve all submitted subjects before publishing the exam.', [], 422);
+          }
+
+          const [[subjectRow]] = await sequelize.query(`
+            SELECT COUNT(*) AS subject_count
+            FROM exam_subjects
+            WHERE exam_id = :examId;
+          `, { replacements: { examId: id } });
+
+          if (Number(subjectRow?.subject_count || 0) === 0) {
+            return res.fail('Cannot publish an exam without subjects.', [], 422);
+          }
+        }
       }
     }
 
-    await sequelize.query(`
-      UPDATE exams
-      SET status = :status,
-          published_at = CASE WHEN :status = 'published' THEN NOW() ELSE NULL END,
-          published_by = CASE WHEN :status = 'published' THEN :userId ELSE NULL END,
-          updated_by = :userId,
-          updated_at = NOW()
-      WHERE id = :id;
-    `, { replacements: { id, status, userId: req.user.id } });
+    const finalStartDate = start_date || exam.start_date;
+    const finalEndDate = end_date || exam.end_date;
+    if (new Date(finalEndDate) < new Date(finalStartDate)) {
+      return res.fail('end_date must be on or after start_date.');
+    }
 
-    res.ok({ id: Number(id), status }, `Exam ${status === 'published' ? 'published' : 'moved back to draft'}.`);
+    let normalizedSubjects = null;
+    let total_marks = exam.total_marks;
+    let passing_marks = exam.passing_marks;
+
+    if (subjects && Array.isArray(subjects)) {
+      if (subjects.length === 0) {
+        return res.fail('At least one subject must be selected for the exam.', [], 422);
+      }
+
+      // Check if we are removing subjects that have marks
+      const [existingMarks] = await sequelize.query(`
+        SELECT DISTINCT subject_id FROM exam_results WHERE exam_id = :id;
+      `, { replacements: { id } });
+      const markedSubjectIds = existingMarks.map(m => Number(m.subject_id));
+      const newSubjectIds = subjects.map(s => Number(s.subject_id));
+
+      for (const msid of markedSubjectIds) {
+        if (!newSubjectIds.includes(msid)) {
+          return res.fail(`Cannot remove subject (ID: ${msid}) because marks have already been entered for it.`, [], 422);
+        }
+      }
+
+      const [subjectRows] = await sequelize.query(`
+        SELECT id, class_id, name, code, subject_type,
+               theory_total_marks, theory_passing_marks,
+               practical_total_marks, practical_passing_marks
+        FROM subjects
+        WHERE class_id = :classId
+          AND is_deleted = false
+          AND id IN (:subjectIds);
+      `, {
+        replacements: {
+          classId: exam.class_id,
+          subjectIds: newSubjectIds.filter(Boolean),
+        },
+      });
+
+      if (subjectRows.length !== subjects.length) {
+        return res.fail('One or more selected subjects are invalid or do not belong to this class.', [], 422);
+      }
+
+      const subjectMap = new Map(subjectRows.map((row) => [Number(row.id), row]));
+      normalizedSubjects = subjects.map((item) => {
+        const subject = subjectMap.get(Number(item.subject_id));
+        return normalizeExamSubjectConfig(subject, item);
+      });
+
+      total_marks = normalizedSubjects.reduce((sum, item) => sum + Number(item.combined_total_marks || 0), 0);
+      passing_marks = normalizedSubjects.reduce((sum, item) => sum + Number(item.combined_passing_marks || 0), 0);
+    }
+
+    await sequelize.transaction(async (transaction) => {
+      // 1. Update exam main table
+      await sequelize.query(`
+        UPDATE exams
+        SET name = COALESCE(:name, name),
+            start_date = COALESCE(:start_date, start_date),
+            end_date = COALESCE(:end_date, end_date),
+            status = COALESCE(:status, status),
+            weightage = COALESCE(:weightage, weightage),
+            publish_controls = COALESCE(:publish_controls, publish_controls),
+            total_marks = :total_marks,
+            passing_marks = :passing_marks,
+            published_at = CASE 
+              WHEN :status = 'published' AND status != 'published' THEN NOW() 
+              WHEN :status = 'draft' THEN NULL
+              ELSE published_at 
+            END,
+            published_by = CASE 
+              WHEN :status = 'published' AND status != 'published' THEN :userId 
+              WHEN :status = 'draft' THEN NULL
+              ELSE published_by 
+            END,
+            updated_by = :userId,
+            updated_at = NOW()
+        WHERE id = :id;
+      `, {
+        replacements: {
+          id,
+          name: name || null,
+          start_date: start_date || null,
+          end_date: end_date || null,
+          status: status || null,
+          weightage: weightage !== undefined ? parseFloat(weightage) : null,
+          publish_controls: publish_controls ? JSON.stringify(publish_controls) : null,
+          total_marks,
+          passing_marks,
+          userId: req.user.id,
+        },
+        transaction,
+      });
+
+      // 2. Update subjects if provided
+      if (normalizedSubjects) {
+        // Simple strategy: delete and re-insert, but preserve some fields if needed?
+        // Actually, we already checked for results conflict.
+        // We might want to preserve review_status for existing subjects if not publishing.
+        
+        const [existingSubjects] = await sequelize.query(`
+          SELECT subject_id, review_status, reviewed_by, reviewed_at, created_by, created_at 
+          FROM exam_subjects WHERE exam_id = :id;
+        `, { replacements: { id }, transaction });
+        
+        const existingSubMap = new Map(existingSubjects.map(s => [Number(s.subject_id), s]));
+
+        await sequelize.query(`DELETE FROM exam_subjects WHERE exam_id = :id;`, {
+          replacements: { id },
+          transaction,
+        });
+
+        const nextStatus = status || exam.status;
+
+        await sequelize.getQueryInterface().bulkInsert('exam_subjects', normalizedSubjects.map((item) => {
+          const existing = existingSubMap.get(Number(item.subject_id));
+          return {
+            exam_id: id,
+            subject_id: item.subject_id,
+            subject_type: item.subject_type,
+            theory_total_marks: item.theory_total_marks,
+            theory_passing_marks: item.theory_passing_marks,
+            practical_total_marks: item.practical_total_marks,
+            practical_passing_marks: item.practical_passing_marks,
+            combined_total_marks: item.combined_total_marks,
+            combined_passing_marks: item.combined_passing_marks,
+            assigned_teacher_id: item.assigned_teacher_id || (existing ? existing.assigned_teacher_id : null),
+            exam_date: item.exam_date || (existing ? existing.exam_date : null),
+            start_time: item.start_time || (existing ? existing.start_time : null),
+            end_time: item.end_time || (existing ? existing.end_time : null),
+            invigilator_teacher_id: item.invigilator_teacher_id || (existing ? existing.invigilator_teacher_id : null),
+            review_status: nextStatus === 'published' ? 'approved' : (existing ? existing.review_status : 'draft'),
+            reviewed_by: nextStatus === 'published' ? req.user.id : (existing ? existing.reviewed_by : null),
+            reviewed_at: nextStatus === 'published' ? new Date() : (existing ? existing.reviewed_at : null),
+            created_by: existing ? existing.created_by : req.user.id,
+            updated_by: req.user.id,
+            created_at: existing ? existing.created_at : new Date(),
+            updated_at: new Date(),
+          };
+        }), { transaction });
+      }
+    });
+
+    const [[updatedExam]] = await sequelize.query(`
+      SELECT e.*,
+        c.name as class_name,
+        c.stream as class_stream,
+        s.name as session_name,
+        COUNT(es.id) AS subject_count,
+        SUM(CASE WHEN es.review_status = 'submitted' THEN 1 ELSE 0 END) AS pending_review_count,
+        SUM(CASE WHEN es.review_status = 'approved' THEN 1 ELSE 0 END) AS approved_subject_count
+      FROM exams e
+      JOIN classes c ON c.id = e.class_id
+      JOIN sessions s ON s.id = e.session_id
+      LEFT JOIN exam_subjects es ON es.exam_id = e.id
+      WHERE e.id = :id
+      GROUP BY e.id, c.id, c.name, c.stream, s.name
+      LIMIT 1;
+    `, { replacements: { id } });
+
+    res.ok(updatedExam, 'Exam updated successfully.');
     invalidateCache(req.user.school_id, '/api/exams*');
     invalidateCache(req.user.school_id, '/api/analytics*');
     invalidateCache(req.user.school_id, '/api/dashboard*');

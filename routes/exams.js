@@ -43,7 +43,14 @@ router.post('/', requireAdmin, [
 
 router.patch('/:id', requireAdmin, [
   param('id').isInt(),
-  body('status').isIn(['draft', 'published']),
+  body('name').optional().notEmpty().withMessage('Name cannot be empty'),
+  body('start_date').optional().isDate().withMessage('Invalid start date'),
+  body('end_date').optional().isDate().withMessage('Invalid end date'),
+  body('status').optional().isIn(['draft', 'published']).withMessage('Invalid status'),
+  body('weightage').optional().isFloat({ min: 0, max: 100 }).withMessage('Weightage must be between 0 and 100'),
+  body('publish_controls').optional().isObject().withMessage('publish_controls must be an object'),
+  body('subjects').optional().isArray().withMessage('Subjects must be an array'),
+  body('subjects.*.subject_id').optional().isInt().withMessage('Invalid subject ID'),
 ], validate, ctrl.update);
 
 router.patch('/:id/timetable', requireAdmin, [

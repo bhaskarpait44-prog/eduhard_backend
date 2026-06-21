@@ -91,6 +91,11 @@ router.patch('/marks/override',
   ctrl.overrideMark
 );
 
+router.get('/exam-marks',
+  requirePermission('results.view'),
+  ctrl.getExamMarks
+);
+
 // ─────────────────────────────────────────────
 // 📊 Class Results
 // ─────────────────────────────────────────────

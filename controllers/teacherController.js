@@ -1664,6 +1664,7 @@ exports.marksEntry = async (req, res, next) => {
         es.practical_passing_marks,
         es.combined_total_marks,
         es.combined_passing_marks,
+        es.exam_date,
         s.name AS subject_name,
         s.code AS subject_code
       FROM exam_subjects es
@@ -1695,13 +1696,17 @@ exports.marksEntry = async (req, res, next) => {
         er.practical_marks_obtained,
         er.is_absent,
         er.grade,
-        er.is_pass
+        er.is_pass,
+        att.status AS attendance_status
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       LEFT JOIN exam_results er
         ON er.exam_id = :examId
        AND er.enrollment_id = e.id
        AND er.subject_id = :subjectId
+      LEFT JOIN attendance att
+        ON att.enrollment_id = e.id
+       AND att.date = :examDate
       WHERE e.session_id = :sessionId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
@@ -1714,6 +1719,7 @@ exports.marksEntry = async (req, res, next) => {
         sessionId: session?.id || 0,
         classId: class_id,
         sectionId: section_id,
+        examDate: examSubject?.exam_date || null,
       },
     });
 
@@ -1836,7 +1842,8 @@ async function saveOneMark(req, payload, context = null, transaction = null) {
       es.theory_total_marks,
       es.theory_passing_marks,
       es.practical_total_marks,
-      es.practical_passing_marks
+      es.practical_passing_marks,
+      es.exam_date
     FROM exam_subjects es
     JOIN subjects s ON s.id = es.subject_id
     WHERE es.exam_id = :examId
@@ -1848,6 +1855,30 @@ async function saveOneMark(req, payload, context = null, transaction = null) {
     const error = new Error('Subject not found.');
     error.status = 404;
     throw error;
+  }
+
+  if (subject.exam_date) {
+    const [[att]] = await sequelize.query(`
+      SELECT status
+      FROM attendance
+      WHERE enrollment_id = :enrollmentId
+        AND date = :examDate
+      LIMIT 1;
+    `, {
+      replacements: {
+        enrollmentId: enrollment_id,
+        examDate: subject.exam_date,
+      },
+      transaction,
+    });
+
+    if (att && att.status === 'absent') {
+      if (!is_absent && (marks_obtained !== null && marks_obtained !== '' || theory_marks_obtained !== null && theory_marks_obtained !== '' || practical_marks_obtained !== null && practical_marks_obtained !== '')) {
+        const error = new Error('Cannot enter marks for a student who was absent on the examination day.');
+        error.status = 422;
+        throw error;
+      }
+    }
   }
 
   if (Number(subject.class_id) !== Number(class_id) || Number(exam.class_id) !== Number(class_id)) {

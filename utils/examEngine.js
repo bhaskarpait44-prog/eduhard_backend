@@ -153,7 +153,7 @@ async function calculateResult(enrollmentId, sessionId) {
   // ── Step 2: Attendance check ─────────────────────────────────────────────
   const attendanceStats = await getAttendancePercent(enrollmentId);
   const attendancePct   = attendanceStats.percentage;
-  const failedAttendance = attendancePct < RESULT_RULES.minAttendancePercent;
+  const failedAttendance = false; // Attendance ignored for pass/fail
 
   // ── Step 3: Aggregate marks with Weightage ───────────────────────────────
   let weightedTotalMax    = 0;
@@ -233,28 +233,14 @@ async function calculateResult(enrollmentId, sessionId) {
   }
 
   // ── Step 4: Apply result rules ────────────────────────────────────────────
-  const percentage         = parseFloat(((weightedTotalObtained / weightedTotalMax) * 100).toFixed(2));
+  const percentage = weightedTotalMax > 0
+    ? parseFloat(((weightedTotalObtained / weightedTotalMax) * 100).toFixed(2))
+    : 0.00;
   const overallGrade       = percentageToGrade(percentage, gradingScale);
-  const failedCoreCount    = failedCoreSubjects.length;
 
-  let result;
-  let compartmentSubjects = null;
-  let isPromoted          = false;
-
-  if (failedAttendance) {
-    result      = 'fail';
-    isPromoted  = false;
-  } else if (failedCoreCount === 0) {
-    result      = 'pass';
-    isPromoted  = true;
-  } else if (failedCoreCount <= RESULT_RULES.maxCoreFailuresForCompartment) {
-    result             = 'compartment';
-    compartmentSubjects = failedCoreSubjects.map(s => s.subject_id);
-    isPromoted         = false;
-  } else {
-    result      = 'fail';
-    isPromoted  = false;
-  }
+  const result             = percentage >= 30 ? 'pass' : 'fail';
+  const compartmentSubjects = null;
+  const isPromoted          = percentage >= 30;
 
   // ── Step 5: Upsert student_results ───────────────────────────────────────
   const [existing] = await sequelize.query(`
