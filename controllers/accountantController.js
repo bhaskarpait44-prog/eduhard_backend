@@ -1399,6 +1399,9 @@ exports.getConcessionReport = exports.getConcessions;
 exports.getDailyReport = async (req, res, next) => {
   try {
     const date = req.query.date || new Date().toISOString().slice(0, 10);
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
+    if (!session) return res.fail('No active session found.', [], 404);
+
     const [transactions] = await sequelize.query(`
       SELECT
         fp.id,
@@ -1416,11 +1419,12 @@ exports.getDailyReport = async (req, res, next) => {
       JOIN students s ON s.id = e.student_id
       LEFT JOIN classes c ON c.id = e.class_id
       WHERE s.school_id = :schoolId
+        AND e.session_id = :sessionId
         AND fp.payment_date = :date
       ORDER BY fp.id DESC;
-    `, { replacements: { schoolId: req.user.school_id, date } });
+    `, { replacements: { schoolId: req.user.school_id, sessionId: session.id, date } });
 
-    const summary = transactions.reduce((acc, row) => {
+    const aggregate = transactions.reduce((acc, row) => {
       acc.total_collection += toNumber(row.amount);
       acc.total_transactions += 1;
       acc.by_mode[row.payment_mode] = acc.by_mode[row.payment_mode] || { amount: 0, count: 0 };
@@ -1429,7 +1433,22 @@ exports.getDailyReport = async (req, res, next) => {
       return acc;
     }, { total_collection: 0, total_transactions: 0, by_mode: {} });
 
-    res.ok({ date, summary, transactions }, 'Daily report loaded.');
+    const mode_breakdown = Object.entries(aggregate.by_mode).map(([payment_mode, value]) => ({
+      payment_mode,
+      amount: value.amount,
+      count: value.count,
+    }));
+
+    res.ok({
+      date,
+      session,
+      summary: {
+        total_collection: aggregate.total_collection,
+        total_transactions: aggregate.total_transactions,
+      },
+      mode_breakdown,
+      transactions,
+    }, 'Daily report loaded.');
   } catch (err) { next(err); }
 };
 
@@ -1437,6 +1456,8 @@ exports.getMonthlyReport = async (req, res, next) => {
   try {
     const month = Number(req.query.month || new Date().getMonth() + 1);
     const year = Number(req.query.year || new Date().getFullYear());
+    const session = await resolveSessionId(req.query.session_id, req.user.school_id, true);
+    if (!session) return res.fail('No active session found.', [], 404);
 
     const [days] = await sequelize.query(`
       SELECT
@@ -1448,13 +1469,14 @@ exports.getMonthlyReport = async (req, res, next) => {
       JOIN enrollments e ON e.id = fi.enrollment_id
       JOIN students s ON s.id = e.student_id
       WHERE s.school_id = :schoolId
+        AND e.session_id = :sessionId
         AND EXTRACT(MONTH FROM fp.payment_date::date) = :month
         AND EXTRACT(YEAR FROM fp.payment_date::date) = :year
       GROUP BY fp.payment_date
       ORDER BY fp.payment_date;
-    `, { replacements: { schoolId: req.user.school_id, month, year } });
+    `, { replacements: { schoolId: req.user.school_id, sessionId: session.id, month, year } });
 
-    res.ok({ month, year, days }, 'Monthly report loaded.');
+    res.ok({ month, year, session, days }, 'Monthly report loaded.');
   } catch (err) { next(err); }
 };
 
