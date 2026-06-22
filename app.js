@@ -25,12 +25,10 @@ const corsOrigins = (() => {
   const isDev = process.env.NODE_ENV === 'development';
   const raw = process.env.CORS_ORIGIN;
 
-  // Only allow wildcard/all origins in development if explicitly requested or unset
-  if (isDev && (!raw || raw.trim() === '*')) return true;
+  // If CORS_ORIGIN is not specified, or is set to wildcard '*', allow all origins
+  if (!raw || raw.trim() === '*' || raw.trim() === 'all') return true;
   
-  const allowed = (raw && raw.trim() !== '*')
-    ? raw.split(',').map((origin) => origin.trim()).filter(Boolean)
-    : [];
+  const allowed = raw.split(',').map((origin) => origin.trim()).filter(Boolean);
 
   // Include common local dev origins by default ONLY in development
   if (isDev) {
