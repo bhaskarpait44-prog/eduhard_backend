@@ -9,8 +9,8 @@ module.exports = {
     dialectOptions: {
       ssl: {
         require: true,
-        // Default to true (secure) unless explicitly set to 'false' in environment
-        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false',
+        // Default to false (compatible with Render self-signed certs) unless explicitly set to 'true' in environment
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'true',
         // Support custom CA if provided
         ca: process.env.DB_SSL_CA ? [process.env.DB_SSL_CA] : undefined,
       },
