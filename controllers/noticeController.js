@@ -568,10 +568,11 @@ exports.listAccountantNotices = async (req, res, next) => {
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
       FROM combined_notices n
       WHERE 
-        n.is_school_wide = true OR
-        LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
-        LOWER(n.audience::text) = 'accountants' OR
-        (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant')
+        (n.is_school_wide = true OR
+         LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+         LOWER(n.audience::text) = 'accountants' OR
+         (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant'))
+        AND LOWER(n.audience::text) NOT IN ('student', 'specific_student')
       ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId, role } });
     res.ok({ notices });
@@ -631,10 +632,11 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
              (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
       FROM combined_notices n
       WHERE 
-        n.is_school_wide = true OR
-        LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
-        LOWER(n.audience::text) = 'accountants' OR
-        (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant')
+        (n.is_school_wide = true OR
+         LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+         LOWER(n.audience::text) = 'accountants' OR
+         (n.posted_by_user_id = :userId AND n.posted_by_role = 'accountant'))
+        AND LOWER(n.audience::text) NOT IN ('student', 'specific_student')
       ORDER BY n.created_at DESC
     `, { replacements: { userId, schoolId } });
 

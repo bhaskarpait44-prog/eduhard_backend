@@ -13,6 +13,7 @@ const {
   Student, 
   Class, 
   Section,
+  Notice,
   sequelize 
 } = require('../models');
 const feeManager = require('../utils/feeManager');
@@ -557,11 +558,14 @@ exports.searchStudents = async (req, res, next) => {
         e.id AS enrollment_id,
         c.name AS class_name,
         sec.name AS section_name,
+        f.primary_contact AS parent_name,
+        f.phone AS parent_phone,
         COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) AS pending_amount
       FROM students s
       JOIN enrollments e ON e.student_id = s.id AND e.session_id = :sessionId
       LEFT JOIN classes c ON c.id = e.class_id
       LEFT JOIN sections sec ON sec.id = e.section_id
+      LEFT JOIN families f ON f.id = s.family_id
       LEFT JOIN fee_invoices fi
         ON fi.enrollment_id = e.id
        AND fi.status IN ('pending', 'partial')
@@ -570,7 +574,7 @@ exports.searchStudents = async (req, res, next) => {
           s.admission_no ILIKE :query
           OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :query
         )
-      GROUP BY s.id, e.id, e.roll_number, c.name, sec.name
+      GROUP BY s.id, e.id, e.roll_number, c.name, sec.name, f.primary_contact, f.phone
       ORDER BY pending_amount DESC, s.first_name
       LIMIT 10;
     `, {
@@ -1785,13 +1789,15 @@ exports.confirmUpiRequest = async (req, res, next) => {
     const { transaction_ref } = req.body;
     const adminId = req.user.id;
 
+    let request;
     await sequelize.transaction(async (t) => {
-      const [[request]] = await sequelize.query(`
+      const [[reqData]] = await sequelize.query(`
         SELECT * FROM upi_payment_requests WHERE id = :id FOR UPDATE;
       `, { replacements: { id }, transaction: t });
 
-      if (!request) throw new Error('Request not found.');
-      if (request.status !== 'pending') throw new Error(`Request is already ${request.status}.`);
+      if (!reqData) throw new Error('Request not found.');
+      if (reqData.status !== 'pending') throw new Error(`Request is already ${reqData.status}.`);
+      request = reqData;
 
       const feeManager = require('../utils/feeManager');
       const paymentDate = new Date().toISOString().slice(0, 10);
@@ -1840,6 +1846,18 @@ exports.confirmUpiRequest = async (req, res, next) => {
           type: 'fee_payment',
           data: { requestId: id }
         });
+
+        await Notice.create({
+          school_id: req.user.school_id,
+          title: 'Payment Confirmed',
+          body: `Your UPI payment of Rs.${request.amount} for ${studentInfo.fee_name} has been confirmed. Thank you!`,
+          posted_by_user_id: adminId,
+          posted_by_role: req.user.role === 'admin' ? 'admin' : 'accountant',
+          audience: 'student',
+          target_student_id: studentInfo.student_id,
+          priority: 'normal',
+          is_school_wide: false
+        });
       }
     } catch (notifyErr) {
       console.error('[UPI-Notify-Student-Error]', notifyErr);
@@ -1868,7 +1886,7 @@ exports.rejectUpiRequest = async (req, res, next) => {
     // Notify student
     try {
       const [[studentInfo]] = await sequelize.query(`
-        SELECT e.student_id, fs.name AS fee_name
+        SELECT e.student_id, fs.name AS fee_name, upr.amount
         FROM upi_payment_requests upr
         JOIN enrollments e ON e.id = upr.enrollment_id
         JOIN fee_invoices fi ON fi.id = upr.invoice_id
@@ -1884,6 +1902,18 @@ exports.rejectUpiRequest = async (req, res, next) => {
           content: `Your UPI payment for ${studentInfo.fee_name} was rejected. Reason: ${reason}`,
           type: 'fee_payment',
           data: { requestId: id }
+        });
+
+        await Notice.create({
+          school_id: req.user.school_id,
+          title: 'Payment Request Rejected',
+          body: `Your UPI payment of Rs.${studentInfo.amount} for ${studentInfo.fee_name} was rejected. Reason: ${reason}`,
+          posted_by_user_id: req.user.id,
+          posted_by_role: req.user.role === 'admin' ? 'admin' : 'accountant',
+          audience: 'student',
+          target_student_id: studentInfo.student_id,
+          priority: 'normal',
+          is_school_wide: false
         });
       }
     } catch (notifyErr) {

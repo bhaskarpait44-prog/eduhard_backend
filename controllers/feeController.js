@@ -839,6 +839,7 @@ exports.getDashboard = async (req, res, next) => {
       WHERE e.session_id = :sessionId
         AND s.school_id = :schoolId
         AND fi.status IN ('pending', 'partial')
+        AND fi.due_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
       GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name
       ORDER BY balance DESC, last_due_date ASC
       LIMIT 8;
@@ -1093,6 +1094,7 @@ exports.getDefaulters = async (req, res, next) => {
       WHERE e.session_id = :sessionId
         AND s.school_id = :schoolId
         AND fi.status IN ('pending', 'partial')
+        AND fi.due_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
         AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
         AND (
           :search = '%%'
@@ -1141,6 +1143,7 @@ exports.downloadDefaultersPdf = async (req, res, next) => {
       WHERE e.session_id = :sessionId
         AND s.school_id = :schoolId
         AND fi.status IN ('pending', 'partial')
+        AND fi.due_date < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
         AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
       GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name, sec.name, e.id
       HAVING COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) > 0
