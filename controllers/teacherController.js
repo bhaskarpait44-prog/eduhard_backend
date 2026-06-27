@@ -428,7 +428,7 @@ async function getPendingMarkCount(scope, sessionId, teacherId) {
 
   const [[row]] = await sequelize.query(`
     SELECT
-      COUNT(DISTINCT ex.id) AS pending_exams,
+      COUNT(DISTINCT CASE WHEN er.id IS NULL THEN ex.id ELSE NULL END) AS pending_exams,
       COUNT(*) FILTER (WHERE er.id IS NULL) AS missing_students
     FROM exams ex
     JOIN enrollments e ON e.class_id = ex.class_id AND e.session_id = ex.session_id AND e.status = 'active'
@@ -1115,6 +1115,23 @@ exports.attendanceStudents = async (req, res, next) => {
     if (!session) {
       return res.fail('No active session found. Cannot proceed with attendance.', [], 422);
     }
+
+    // Check if teacher has an approved leave application overlapping this date
+    const [[leave]] = await sequelize.query(`
+      SELECT id
+      FROM teacher_leaves
+      WHERE teacher_id = :teacherId
+        AND status = 'approved'
+        AND :date >= from_date
+        AND :date <= to_date
+      LIMIT 1;
+    `, {
+      replacements: {
+        teacherId: req.user.id,
+        date,
+      },
+    });
+
     await assertAttendanceAccess(req.user.id, Number(class_id), Number(section_id), date, scope);
     const access = getAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
 
@@ -1175,6 +1192,7 @@ exports.attendanceStudents = async (req, res, next) => {
       is_holiday: !!holiday,
       holiday,
       is_non_working_day: isNonWorkingDay,
+      is_on_leave: !!leave,
       already_marked: alreadyMarked,
       requires_reason: date < TODAY() || alreadyMarked,
       students: students.map((student) => ({
@@ -1193,6 +1211,26 @@ exports.markAttendance = async (req, res, next) => {
     const { session, scope } = await getTeacherContext(req);
     if (!session) {
       return res.fail('No active session found. Cannot proceed with attendance.', [], 422);
+    }
+
+    // Check if teacher has an approved leave application overlapping this date
+    const [[leave]] = await sequelize.query(`
+      SELECT id
+      FROM teacher_leaves
+      WHERE teacher_id = :teacherId
+        AND status = 'approved'
+        AND :date >= from_date
+        AND :date <= to_date
+      LIMIT 1;
+    `, {
+      replacements: {
+        teacherId: req.user.id,
+        date,
+      },
+    });
+
+    if (leave) {
+      return res.fail('Cannot mark attendance. You are on approved leave for this date.', [], 422);
     }
 
     // Check if holiday
@@ -1332,43 +1370,7 @@ exports.bulkMarkAttendance = async (req, res, next) => {
 };
 
 exports.updateAttendance = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { status, reason } = req.body;
-    requireFields(req.body, ['status', 'reason']);
-
-    const { scope } = await getTeacherContext(req);
-    const record = await getEnrollmentByAttendanceId(Number(id), req.user.school_id);
-    if (!record) return res.fail('Attendance record not found or access denied.', [], 404);
-
-    assertAccess(scope, record.class_id, record.section_id);
-
-    await sequelize.query(`
-      UPDATE attendance
-      SET status = :status,
-          override_reason = :reason,
-          marked_by = :teacherId,
-          marked_at = NOW(),
-          updated_at = NOW()
-      WHERE id = :id;
-    `, {
-      replacements: {
-        id,
-        status,
-        reason,
-        teacherId: req.user.id,
-      },
-    });
-
-    await audit('attendance', Number(id), {
-      field: 'status',
-      oldValue: record.status,
-      newValue: status,
-      reason,
-    }, req);
-
-    res.ok({ id: Number(id), status }, 'Attendance updated successfully.');
-  } catch (err) { next(err); }
+  return res.fail('Manual attendance override is disabled for teachers.', [], 403);
 };
 
 exports.attendanceRegister = async (req, res, next) => {
@@ -2177,6 +2179,26 @@ exports.marksSummary = async (req, res, next) => {
     const { session, scope } = await getTeacherContext(req);
     assertMarksAccess(scope, Number(class_id), Number(section_id), Number(subject_id));
 
+    const reviewStatus = await getMarksReviewStatus(Number(exam_id), Number(subject_id));
+
+    if (reviewStatus.status !== 'approved') {
+      return res.ok({
+        review_status: reviewStatus,
+        summary: {
+          highest: null,
+          lowest: null,
+          average: null,
+          pass_count: 0,
+          fail_count: 0,
+          absent_count: 0,
+          highest_student: null,
+          lowest_student: null,
+        },
+        students: [],
+        is_locked: true,
+      }, 'Marks summary is locked until approved by administrator.');
+    }
+
     const [rows] = await sequelize.query(`
       SELECT
         e.roll_number,
@@ -2193,18 +2215,22 @@ exports.marksSummary = async (req, res, next) => {
         es.subject_type,
         es.combined_total_marks,
         es.combined_passing_marks
-      FROM exam_results er
-      JOIN enrollments e ON e.id = er.enrollment_id
+      FROM enrollments e
       JOIN students s ON s.id = e.student_id
-      JOIN subjects sub ON sub.id = er.subject_id
-      JOIN exam_subjects es
-        ON es.exam_id = er.exam_id
-       AND es.subject_id = er.subject_id
-      WHERE er.exam_id = :examId
-        AND er.subject_id = :subjectId
+      CROSS JOIN exam_subjects es
+      JOIN exams ex ON ex.id = es.exam_id AND ex.class_id = e.class_id
+      JOIN subjects sub ON sub.id = es.subject_id
+      LEFT JOIN exam_results er
+        ON er.enrollment_id = e.id
+       AND er.exam_id = es.exam_id
+       AND er.subject_id = es.subject_id
+      WHERE es.exam_id = :examId
+        AND es.subject_id = :subjectId
         AND e.session_id = :sessionId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
+        AND e.status = 'active'
+        AND s.is_deleted = false
       ORDER BY er.marks_obtained DESC NULLS LAST, e.roll_number;
     `, {
       replacements: {
@@ -2228,7 +2254,6 @@ exports.marksSummary = async (req, res, next) => {
 
     const topStudent = rows.find((row) => row.marks_obtained != null) || null;
     const bottomStudent = [...rows].reverse().find((row) => row.marks_obtained != null) || null;
-    const reviewStatus = await getMarksReviewStatus(Number(exam_id), Number(subject_id));
 
     res.ok({
       review_status: reviewStatus,
@@ -2269,12 +2294,6 @@ exports.studentList = async (req, res, next) => {
           WHEN ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) < 75 THEN 'warning'
           ELSE 'good'
         END AS attendance_status,
-        (
-          SELECT SUM((fi.amount_due + fi.late_fee_amount - fi.concession_amount) - fi.amount_paid)
-          FROM fee_invoices fi
-          WHERE fi.enrollment_id = e.id
-            AND fi.status IN ('pending', 'partial')
-        ) AS fee_balance,
         (
           SELECT STRING_AGG(ss.subject_id::text, ',')
           FROM student_subjects ss
@@ -2343,13 +2362,13 @@ exports.studentList = async (req, res, next) => {
       return {
         ...row,
         is_online,
-        fee_balance: classTeacherSections.has(`${row.class_id}:${row.section_id}`) ? row.fee_balance : null,
       };
     }));
 
     res.ok({
       students: formattedStudents,
       available_subjects: [...subjectsMap.values()],
+      class_teacher_sections: Array.from(classTeacherSections),
     }, `${formattedStudents.length} student(s) loaded.`);
   } catch (err) { next(err); }
 };
@@ -2369,18 +2388,6 @@ exports.studentDetail = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { studentId: student.id } });
 
-    let feeStatus = null;
-    if (access.isClassTeacher) {
-      const [[fee]] = await sequelize.query(`
-        SELECT
-          COUNT(*) FILTER (WHERE status IN ('pending', 'partial')) AS open_invoices,
-          COALESCE(SUM((amount_due + late_fee_amount - concession_amount) - amount_paid), 0) AS balance
-        FROM fee_invoices
-        WHERE enrollment_id = :enrollmentId;
-      `, { replacements: { enrollmentId: student.enrollment_id } });
-      feeStatus = fee;
-    }
-
     res.ok({
       ...student,
       profile: access.isClassTeacher ? profile : {
@@ -2390,7 +2397,7 @@ exports.studentDetail = async (req, res, next) => {
         photo_path: profile?.photo_path || null,
       },
       access,
-      fee_status: feeStatus,
+      fee_status: null,
     }, 'Student detail loaded.');
   } catch (err) { next(err); }
 };
@@ -2413,7 +2420,7 @@ exports.studentAttendance = async (req, res, next) => {
 
 exports.studentResults = async (req, res, next) => {
   try {
-    const { scope } = await getTeacherContext(req);
+    const { session, scope } = await getTeacherContext(req);
     const { student, access } = await getAccessibleStudent(scope, req.user.school_id, Number(req.params.id));
 
     const subjectRows = access.isClassTeacher
@@ -2440,9 +2447,11 @@ exports.studentResults = async (req, res, next) => {
 
     const subjectFilter = access.isClassTeacher
       ? ''
-      : 'AND er.subject_id IN (:subjectIds)';
+      : 'AND es.subject_id IN (:subjectIds)';
     const replacements = {
       enrollmentId: student.enrollment_id,
+      classId: student.class_id,
+      sessionId: session?.id || 0,
       subjectIds: subjectIds.length ? subjectIds : [-1],
     };
 
@@ -2455,12 +2464,20 @@ exports.studentResults = async (req, res, next) => {
         er.grade,
         er.is_pass,
         er.is_absent,
-        es.combined_total_marks AS max_marks
-      FROM exam_results er
-      JOIN exams ex ON ex.id = er.exam_id
-      JOIN subjects sub ON sub.id = er.subject_id
-      JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
-      WHERE er.enrollment_id = :enrollmentId
+        es.combined_total_marks AS max_marks,
+        ROUND(er.marks_obtained::numeric / NULLIF(es.combined_total_marks, 0) * 100, 2) AS percentage
+      FROM exam_subjects es
+      JOIN exams ex
+        ON ex.id = es.exam_id
+       AND ex.class_id = :classId
+       AND ex.session_id = :sessionId
+       AND ex.status <> 'draft'
+      JOIN subjects sub ON sub.id = es.subject_id
+      LEFT JOIN exam_results er
+        ON er.exam_id = es.exam_id
+       AND er.subject_id = es.subject_id
+       AND er.enrollment_id = :enrollmentId
+      WHERE 1=1
       ${subjectFilter}
       ORDER BY ex.start_date DESC, sub.name ASC;
     `, { replacements });
@@ -2477,15 +2494,27 @@ exports.studentRemarks = async (req, res, next) => {
     const [rows] = await sequelize.query(`
       SELECT
         sr.id,
+        sr.student_id,
+        sr.teacher_id,
         sr.remark_type,
         sr.remark_text,
         CASE WHEN sr.visibility = 'share_parent' THEN 'share_student' ELSE sr.visibility END AS visibility,
         sr.is_edited,
         sr.edited_at,
         sr.created_at,
-        CONCAT(u.first_name, ' ', u.last_name) AS teacher_name,
-        sr.teacher_id
+        s.first_name,
+        s.last_name,
+        e.roll_number,
+        e.class_id,
+        e.section_id,
+        c.name AS class_name,
+        sec.name AS section_name,
+        CONCAT(u.first_name, ' ', u.last_name) AS teacher_name
       FROM student_remarks sr
+      JOIN students s ON s.id = sr.student_id
+      JOIN enrollments e ON e.id = sr.enrollment_id
+      JOIN classes c ON c.id = e.class_id
+      JOIN sections sec ON sec.id = e.section_id
       JOIN teachers u ON u.id = sr.teacher_id
       WHERE sr.student_id = :studentId
         AND sr.is_deleted = false

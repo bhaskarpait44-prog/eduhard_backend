@@ -6,7 +6,7 @@ const validate = require('../middlewares/validate');
 const { requireRole } = require('../middlewares/auth');
 const ctrl = require('../controllers/settingsController');
 
-router.get('/', requireRole('admin'), ctrl.getSettings);
+router.get('/', requireRole('admin', 'accountant'), ctrl.getSettings);
 router.put('/', requireRole('admin'), [
   body('upi_id').optional({ nullable: true }).isString().trim(),
 ], validate, ctrl.updateSettings);

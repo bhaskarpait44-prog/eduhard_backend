@@ -1020,6 +1020,7 @@ exports.getReceipts = async (req, res, next) => {
         fp.payment_mode,
         COALESCE(NULLIF(fp.transaction_ref, ''), CONCAT('RCPT-', fp.id)) AS receipt_no,
         fi.id AS invoice_id,
+        fi.due_date,
         fs.name AS fee_name,
         s.id AS student_id,
         s.admission_no,

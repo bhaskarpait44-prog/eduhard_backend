@@ -237,6 +237,31 @@ exports.admit = async (req, res, next) => {
     if (aadhar_no && !/^\d{12}$/.test(aadhar_no))
       return res.fail('Aadhaar number must be exactly 12 digits.', [], 422);
 
+    // Validate emergency contact, father's phone, and other phone numbers
+    const emergencyContact = profile?.emergency_contact;
+    if (!emergencyContact?.trim()) {
+      return res.fail('Emergency contact is required.', [], 422);
+    }
+    if (!/^[6-9]\d{9}$/.test(emergencyContact.trim())) {
+      return res.fail('Emergency contact is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.', [], 422);
+    }
+
+    const fatherPhone = profile?.father_phone;
+    if (!fatherPhone?.trim()) {
+      return res.fail("Father's phone is required.", [], 422);
+    }
+    if (!/^[6-9]\d{9}$/.test(fatherPhone.trim())) {
+      return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+
+    const phoneFields = ['phone', 'whatsapp_no', 'mother_phone', 'guardian_phone'];
+    for (const field of phoneFields) {
+      const val = profile?.[field];
+      if (val && val.trim() !== '' && !/^[6-9]\d{9}$/.test(val.trim())) {
+        return res.fail(`${field.replace('_', ' ')} is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.`, [], 422);
+      }
+    }
+
     // Prevent student email and parent email being identical
     const studentEmail = profile?.email?.trim().toLowerCase();
     const parentEmailCheck = (profile?.father_email || profile?.mother_email || profile?.email || profile?.parent_email)?.trim().toLowerCase();
@@ -387,6 +412,7 @@ exports.admit = async (req, res, next) => {
           data         : { 
             ...profile, 
             email: studentEmail,
+            parent_email: parentEmail,
             photo_path: uploadedPhotoPath 
           },
           changedBy    : req.user.id,
@@ -990,9 +1016,10 @@ exports.getById = async (req, res, next) => {
              sp.identification_marks, sp.pen_no, sp.apaar_id,
              sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
              sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
-             sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
+             sp.perm_post_office, sp.perm_district, sp.perm_city, sp.perm_state, sp.perm_pincode,
              sp.village, sp.police_station, sp.post_office, sp.district,
-             sp.blood_group, sp.medical_notes, sp.photo_path,
+             sp.father_occupation,
+             sp.blood_group, sp.medical_notes, sp.photo_path, sp.emergency_contact,
              ts.name AS transport_stop, tr.name AS transport_route
       FROM students s
       LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
@@ -1200,6 +1227,50 @@ exports.updateProfile = async (req, res, next) => {
     }
     if (aadhar_no && aadhar_no.trim() !== '' && !/^\d{12}$/.test(aadhar_no))
       return res.fail('Aadhaar must be exactly 12 digits.', [], 422);
+
+    // Validate emergency contact, father's phone, and other phone numbers if provided
+    const emergencyContact = newData.emergency_contact;
+    if (emergencyContact !== undefined) {
+      if (!emergencyContact?.trim()) {
+        return res.fail('Emergency contact is required.', [], 422);
+      }
+      if (!/^[6-9]\d{9}$/.test(emergencyContact.trim())) {
+        return res.fail('Emergency contact is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.', [], 422);
+      }
+    }
+
+    if (newData.father_phone !== undefined) {
+      if (!newData.father_phone?.trim()) {
+        return res.fail("Father's phone is required.", [], 422);
+      }
+      if (!/^[6-9]\d{9}$/.test(newData.father_phone.trim())) {
+        return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+      }
+    }
+
+    const phoneFields = ['phone', 'whatsapp_no', 'mother_phone', 'guardian_phone'];
+    for (const field of phoneFields) {
+      const val = newData[field];
+      if (val !== undefined && val !== null && String(val).trim() !== '') {
+        if (!/^[6-9]\d{9}$/.test(String(val).trim())) {
+          return res.fail(`${field.replace('_', ' ')} is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.`, [], 422);
+        }
+      }
+    }
+
+    // Get existing emails from current profile to verify update conflict
+    const [[existingEmails]] = await sequelize.query(`
+      SELECT sp.email, sp.parent_email 
+      FROM student_profiles sp 
+      WHERE sp.student_id = :id AND sp.is_current = true LIMIT 1;
+    `, { replacements: { id } });
+
+    const finalStudentEmail = (newData.email !== undefined ? newData.email : (existingEmails?.email || ''))?.trim().toLowerCase();
+    const finalParentEmail = (newData.parent_email !== undefined ? newData.parent_email : (existingEmails?.parent_email || ''))?.trim().toLowerCase();
+
+    if (finalStudentEmail && finalParentEmail && finalStudentEmail === finalParentEmail) {
+      return res.fail('Student email and parent email cannot be the same address.', [], 422);
+    }
     // ──────────────────────────────────────────────────────────────────
 
     const [[student]] = await sequelize.query(`
@@ -1244,7 +1315,7 @@ exports.updateProfile = async (req, res, next) => {
         transaction  : t
       });
 
-      // Sync parent login email in users table if parent_email was updated
+      // Sync parent login email in users and families tables if parent_email was updated
       if (newData.parent_email) {
         const cleanEmail = newData.parent_email.trim().toLowerCase();
         await sequelize.query(`
@@ -1256,6 +1327,18 @@ exports.updateProfile = async (req, res, next) => {
             AND s.school_id = :schoolId
             AND f.user_id = u.id
             AND u.role = 'parent';
+        `, {
+          replacements: { newEmail: cleanEmail, studentId: parseInt(id), schoolId: req.user.school_id },
+          transaction: t
+        });
+
+        await sequelize.query(`
+          UPDATE families f
+          SET email = :newEmail, updated_at = NOW()
+          FROM students s
+          WHERE s.id = :studentId
+            AND s.school_id = :schoolId
+            AND s.family_id = f.id;
         `, {
           replacements: { newEmail: cleanEmail, studentId: parseInt(id), schoolId: req.user.school_id },
           transaction: t
@@ -1280,9 +1363,10 @@ exports.updateProfile = async (req, res, next) => {
                sp.identification_marks, sp.pen_no, sp.apaar_id,
                sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
                sp.is_permanent_same, sp.perm_address, sp.perm_village, sp.perm_police_station,
-               sp.perm_post_office, sp.perm_district, sp.perm_state, sp.perm_pincode,
+               sp.perm_post_office, sp.perm_district, sp.perm_city, sp.perm_state, sp.perm_pincode,
                sp.village, sp.police_station, sp.post_office, sp.district,
-               sp.blood_group, sp.medical_notes, sp.photo_path
+               sp.father_occupation,
+               sp.blood_group, sp.medical_notes, sp.photo_path, sp.emergency_contact
         FROM students s
         LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
         WHERE s.id = :id AND s.is_deleted = false;

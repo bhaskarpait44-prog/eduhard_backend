@@ -114,6 +114,7 @@ async function getReceiptPayload(paymentId, schoolId) {
       fi.amount_due,
       fi.amount_paid,
       fi.status,
+      fi.due_date,
       fs.name AS fee_name,
       s.id AS student_id,
       s.admission_no,
@@ -202,6 +203,7 @@ async function getStudentFinanceSummary(studentId, sessionId, schoolId) {
       fp.payment_mode,
       fp.transaction_ref,
       fp.invoice_id,
+      fi.due_date,
       fs.name AS fee_name,
       COALESCE(NULLIF(fp.transaction_ref, ''), CONCAT('RCP-', EXTRACT(YEAR FROM fp.payment_date)::int, '-', LPAD(fp.id::text, 5, '0'))) AS receipt_no
     FROM fee_payments fp
