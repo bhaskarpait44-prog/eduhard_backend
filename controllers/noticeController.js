@@ -290,8 +290,8 @@ exports.listAllNotices = async (req, res, next) => {
              CONCAT(st.first_name, ' ', st.last_name) as student_name,
              CONCAT(tt.first_name, ' ', tt.last_name) as target_teacher_name
       FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN users u ON u.id = n.posted_by_user_id
+      LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
@@ -370,8 +370,38 @@ exports.deleteNotice = async (req, res, next) => {
 
 exports.listTeacherNotices = async (req, res, next) => {
   try {
-    const userId = req.user.id;
+    const userId = req.user.id; // teachers.id
     const schoolId = req.user.school_id;
+    const teacherEmail = req.user.email;
+
+    // Resolve teacher's users.id dynamically for read receipt tracking
+    let resolvedUserId;
+    const [[userRecord]] = await sequelize.query(`
+      SELECT id FROM users WHERE LOWER(email) = LOWER(:teacherEmail) AND school_id = :schoolId AND role = 'teacher' LIMIT 1
+    `, { replacements: { teacherEmail, schoolId } });
+
+    if (userRecord) {
+      resolvedUserId = userRecord.id;
+    } else {
+      // Dynamically create a user record in the users table for the teacher
+      const [[teacherRecord]] = await sequelize.query(`
+        SELECT password_hash, CONCAT(first_name, ' ', last_name) as name
+        FROM teachers
+        WHERE id = :userId AND is_deleted = false
+        LIMIT 1
+      `, { replacements: { userId } });
+      
+      const passwordHash = teacherRecord?.password_hash || 'placeholder';
+      const name = teacherRecord?.name || req.user.name || 'Teacher';
+
+      const [[newTeacherUser]] = await sequelize.query(`
+        INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+        VALUES (:schoolId, :name, :teacherEmail, :passwordHash, 'teacher', true, NOW(), NOW())
+        RETURNING id
+      `, { replacements: { schoolId, name, teacherEmail, passwordHash } });
+      
+      resolvedUserId = newTeacherUser.id;
+    }
 
     const [notices] = await sequelize.query(`
       WITH combined_notices AS (
@@ -383,11 +413,10 @@ exports.listTeacherNotices = async (req, res, next) => {
           COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
-
 
         UNION ALL
 
@@ -422,38 +451,37 @@ exports.listTeacherNotices = async (req, res, next) => {
                WHEN n.source = 'unified' THEN EXISTS(
                  SELECT 1 FROM notice_reads nr 
                  WHERE nr.notice_id = n.id 
-                 AND nr.user_id = :userId
+                 AND nr.user_id = :resolvedUserId
                ) 
                WHEN n.source = 'teacher_notices' THEN EXISTS(
                  SELECT 1 FROM teacher_notice_reads tnr 
                  WHERE tnr.notice_id = n.id 
-                 AND tnr.user_id = :userId
+                 AND tnr.user_id = :resolvedUserId
                )
                ELSE false 
              END) as is_read,
              (
-               (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :userId)
+               (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :resolvedUserId)
                OR
-               (n.source = 'teacher_notices' AND n.posted_by_user_id IN (
-                 SELECT id FROM teachers WHERE email = (SELECT email FROM users WHERE id = :userId)
-               ))
+               (n.source = 'teacher_notices' AND n.posted_by_user_id = :userId)
              ) as can_manage
       FROM combined_notices n
       WHERE 
         n.is_school_wide = true 
         OR LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone')
         OR LOWER(n.audience::text) = 'teachers'
-        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id IN (
-          SELECT id FROM teachers WHERE email = (SELECT email FROM users WHERE id = :userId)
-        ))
-        OR (n.posted_by_user_id = :userId AND n.posted_by_role = 'teacher')
+        OR (LOWER(n.audience::text) = 'specific_teacher' AND n.target_teacher_id = :userId)
+        OR (
+          (n.source = 'unified' AND n.posted_by_role = 'teacher' AND n.posted_by_user_id = :resolvedUserId)
+          OR
+          (n.source = 'teacher_notices' AND n.posted_by_user_id = :userId)
+        )
         OR (
           LOWER(n.audience::text) = 'class'
           AND n.target_class_id IN (
             SELECT ta.class_id
             FROM teacher_assignments ta
-            JOIN teachers t ON t.id = ta.teacher_id
-            WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+            WHERE ta.teacher_id = :userId
               AND ta.is_active = true
           )
         )
@@ -462,13 +490,12 @@ exports.listTeacherNotices = async (req, res, next) => {
           AND n.target_section_id IN (
             SELECT ta.section_id
             FROM teacher_assignments ta
-            JOIN teachers t ON t.id = ta.teacher_id
-            WHERE t.email = (SELECT email FROM users WHERE id = :userId)
+            WHERE ta.teacher_id = :userId
               AND ta.is_active = true
           )
         )
       ORDER BY n.created_at DESC
-    `, { replacements: { userId, schoolId } });
+    `, { replacements: { userId, resolvedUserId, schoolId } });
 
     res.ok({ notices });
   } catch (err) { next(err); }
@@ -479,13 +506,44 @@ exports.markTeacherRead = async (req, res, next) => {
     const { id } = req.params;
     const { source = 'unified' } = req.query;
     const userId = req.user.id; // teacher_id
+    const teacherEmail = req.user.email;
+    const schoolId = req.user.school_id;
+
+    // Resolve teacher's users.id dynamically for read receipt tracking
+    let resolvedUserId;
+    const [[userRecord]] = await sequelize.query(`
+      SELECT id FROM users WHERE LOWER(email) = LOWER(:teacherEmail) AND school_id = :schoolId AND role = 'teacher' LIMIT 1
+    `, { replacements: { teacherEmail, schoolId } });
+
+    if (userRecord) {
+      resolvedUserId = userRecord.id;
+    } else {
+      // Dynamically create a user record in the users table for the teacher
+      const [[teacherRecord]] = await sequelize.query(`
+        SELECT password_hash, CONCAT(first_name, ' ', last_name) as name
+        FROM teachers
+        WHERE id = :userId AND is_deleted = false
+        LIMIT 1
+      `, { replacements: { userId } });
+      
+      const passwordHash = teacherRecord?.password_hash || 'placeholder';
+      const name = teacherRecord?.name || req.user.name || 'Teacher';
+
+      const [[newTeacherUser]] = await sequelize.query(`
+        INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+        VALUES (:schoolId, :name, :teacherEmail, :passwordHash, 'teacher', true, NOW(), NOW())
+        RETURNING id
+      `, { replacements: { schoolId, name, teacherEmail, passwordHash } });
+      
+      resolvedUserId = newTeacherUser.id;
+    }
 
     if (source === 'teacher_notices') {
       await sequelize.query(`
         INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
-        VALUES (:noticeId, :userId, NOW())
+        VALUES (:noticeId, :resolvedUserId, NOW())
         ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-      `, { replacements: { noticeId: id, userId } });
+      `, { replacements: { noticeId: id, resolvedUserId } });
     } else {
       // Check if it's actually a unified notice first
       const [[exists]] = await sequelize.query(`SELECT id FROM notices WHERE id = :id LIMIT 1`, { replacements: { id } });
@@ -493,16 +551,16 @@ exports.markTeacherRead = async (req, res, next) => {
       if (exists) {
         await sequelize.query(`
           INSERT INTO notice_reads (notice_id, user_id, read_at)
-          VALUES (:noticeId, :userId, NOW())
+          VALUES (:noticeId, :resolvedUserId, NOW())
           ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-        `, { replacements: { noticeId: id, userId } });
+        `, { replacements: { noticeId: id, resolvedUserId } });
       } else {
         // Fallback: try teacher_notices if it wasn't specified but ID exists there
         await sequelize.query(`
           INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
-          VALUES (:noticeId, :userId, NOW())
+          VALUES (:noticeId, :resolvedUserId, NOW())
           ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-        `, { replacements: { noticeId: id, userId } });
+        `, { replacements: { noticeId: id, resolvedUserId } });
       }
     }
     res.ok(null, 'Notice marked as read.');
@@ -527,8 +585,8 @@ exports.listAccountantNotices = async (req, res, next) => {
           c.name as class_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         LEFT JOIN classes c ON c.id = n.target_class_id
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
@@ -594,8 +652,8 @@ exports.listAccountantPortalNotices = async (req, res, next) => {
           COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -660,8 +718,8 @@ exports.listReceptionistNotices = async (req, res, next) => {
           COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -723,8 +781,8 @@ exports.listLibrarianNotices = async (req, res, next) => {
           COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
           'unified' as source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -808,11 +866,10 @@ exports.getStudentNotices = async (req, res, next) => {
           n.posted_by_role::text, n.attachment_path,
           'unified' AS source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
-
 
         UNION ALL
 
@@ -853,7 +910,12 @@ exports.getStudentNotices = async (req, res, next) => {
                )
                ELSE false 
              END) AS is_read,
-             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_pins np WHERE np.notice_id = n.id AND np.student_id = :studentId) ELSE false END) AS is_pinned
+             EXISTS(
+               SELECT 1 FROM notice_pins np 
+               WHERE np.notice_id = n.id 
+                 AND np.student_id = :studentId 
+                 AND np.source = n.source
+             ) AS is_pinned
       FROM combined_notices n
       WHERE 
         n.is_school_wide = true 
@@ -910,12 +972,13 @@ exports.markRead = async (req, res, next) => {
 exports.pinNotice = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { source = 'unified' } = req.query;
     const studentId = Number(req.user.student_id || req.user.id);
     await sequelize.query(`
-      INSERT INTO notice_pins (notice_id, student_id, pinned_at)
-      VALUES (:id, :studentId, NOW())
-      ON CONFLICT (notice_id, student_id) DO NOTHING
-    `, { replacements: { id, studentId } });
+      INSERT INTO notice_pins (notice_id, student_id, source, pinned_at)
+      VALUES (:id, :studentId, :source, NOW())
+      ON CONFLICT (notice_id, student_id, source) DO NOTHING
+    `, { replacements: { id, studentId, source } });
     res.ok(null, 'Notice pinned.');
   } catch (err) { next(err); }
 };
@@ -923,13 +986,18 @@ exports.pinNotice = async (req, res, next) => {
 exports.unpinNotice = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { source = 'unified' } = req.query;
     const studentId = Number(req.user.student_id || req.user.id);
     await sequelize.query(`
-      DELETE FROM notice_pins WHERE notice_id = :id AND student_id = :studentId
-    `, { replacements: { id, studentId } });
+      DELETE FROM notice_pins 
+      WHERE notice_id = :id 
+        AND student_id = :studentId 
+        AND source = :source
+    `, { replacements: { id, studentId, source } });
     res.ok(null, 'Notice unpinned.');
   } catch (err) { next(err); }
 };
+
 
 // ── Parent Functions ─────────────────────────────────────────────────────────
 
@@ -960,11 +1028,34 @@ exports.getParentNotices = async (req, res, next) => {
     const sectionIds = [...new Set(wards.map(w => w.section_id).filter(id => id))];
 
     // Resolve the parent's User ID (if they have one) for read tracking
-    let readTrackingId = req.user.id;
+    let readTrackingId;
     const [[user]] = await sequelize.query(`
       SELECT id FROM users WHERE LOWER(email) = LOWER(:parentEmail) AND school_id = :schoolId AND role = 'parent' LIMIT 1
     `, { replacements: { parentEmail, schoolId } });
-    if (user) readTrackingId = user.id;
+
+    if (user) {
+      readTrackingId = user.id;
+    } else {
+      // Dynamically create a linked user account for the parent to allow read tracking
+      const [[profile]] = await sequelize.query(`
+        SELECT sp.parent_password_hash as password_hash, COALESCE(sp.father_name, sp.mother_name, 'Parent') as name
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE sp.id = :id AND sp.is_current = true
+        LIMIT 1
+      `, { replacements: { id: req.user.id } });
+      
+      const passwordHash = profile?.password_hash || 'placeholder';
+      const name = profile?.name || req.user.name || 'Parent';
+
+      const [[newParent]] = await sequelize.query(`
+        INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+        VALUES (:schoolId, :name, :parentEmail, :passwordHash, 'parent', true, NOW(), NOW())
+        RETURNING id
+      `, { replacements: { schoolId, name, parentEmail, passwordHash } });
+      
+      readTrackingId = newParent.id;
+    }
 
     const [notices] = await sequelize.query(`
       WITH combined_notices AS (
@@ -976,8 +1067,8 @@ exports.getParentNotices = async (req, res, next) => {
           n.posted_by_role::text, n.attachment_path,
           'unified' AS source
         FROM notices n
-        LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-        LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
         WHERE n.school_id = :schoolId AND n.is_deleted = false
           AND (n.expires_at IS NULL OR n.expires_at > NOW())
 
@@ -1010,7 +1101,17 @@ exports.getParentNotices = async (req, res, next) => {
           AND t.school_id = :schoolId
       )
       SELECT n.*,
-             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :readTrackingId) ELSE false END) as is_read,
+             (CASE 
+               WHEN n.source = 'unified' THEN EXISTS(
+                 SELECT 1 FROM notice_reads nr 
+                 WHERE nr.notice_id = n.id AND nr.user_id = :readTrackingId
+               ) 
+               WHEN n.source = 'teacher_notices' THEN EXISTS(
+                 SELECT 1 FROM teacher_notice_reads tnr 
+                 WHERE tnr.notice_id = n.id AND tnr.user_id = :readTrackingId
+               )
+               ELSE false 
+             END) as is_read,
              (SELECT s.first_name FROM students s WHERE s.id = n.target_student_id AND s.id IN (:studentIds)) as target_ward_name
       FROM combined_notices n
       WHERE 
@@ -1034,10 +1135,11 @@ exports.getParentNotices = async (req, res, next) => {
 exports.markParentRead = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const { source = 'unified' } = req.query;
     const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
-    let readTrackingId = req.user.id;
+    let readTrackingId;
     const [[user]] = await sequelize.query(`
       SELECT id FROM users WHERE LOWER(email) = LOWER(:parentEmail) AND school_id = :schoolId AND role = 'parent' LIMIT 1
     `, { replacements: { parentEmail, schoolId } });
@@ -1045,14 +1147,40 @@ exports.markParentRead = async (req, res, next) => {
     if (user) {
       readTrackingId = user.id;
     } else {
-      return res.ok(null, 'Notice status update skipped (No linked user account).');
+      // Dynamically create a linked user account for the parent to allow read tracking
+      const [[profile]] = await sequelize.query(`
+        SELECT sp.parent_password_hash as password_hash, COALESCE(sp.father_name, sp.mother_name, 'Parent') as name
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE sp.id = :id AND sp.is_current = true
+        LIMIT 1
+      `, { replacements: { id: req.user.id } });
+      
+      const passwordHash = profile?.password_hash || 'placeholder';
+      const name = profile?.name || req.user.name || 'Parent';
+
+      const [[newParent]] = await sequelize.query(`
+        INSERT INTO users (school_id, name, email, password_hash, role, is_active, created_at, updated_at)
+        VALUES (:schoolId, :name, :parentEmail, :passwordHash, 'parent', true, NOW(), NOW())
+        RETURNING id
+      `, { replacements: { schoolId, name, parentEmail, passwordHash } });
+      
+      readTrackingId = newParent.id;
     }
 
-    await sequelize.query(`
-      INSERT INTO notice_reads (notice_id, user_id, read_at)
-      VALUES (:noticeId, :readTrackingId, NOW())
-      ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
-    `, { replacements: { noticeId: id, readTrackingId } });
+    if (source === 'teacher_notices') {
+      await sequelize.query(`
+        INSERT INTO teacher_notice_reads (notice_id, user_id, read_at)
+        VALUES (:noticeId, :readTrackingId, NOW())
+        ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
+      `, { replacements: { noticeId: id, readTrackingId } });
+    } else {
+      await sequelize.query(`
+        INSERT INTO notice_reads (notice_id, user_id, read_at)
+        VALUES (:noticeId, :readTrackingId, NOW())
+        ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
+      `, { replacements: { noticeId: id, readTrackingId } });
+    }
     res.ok(null, 'Notice marked as read.');
   } catch (err) { next(err); }
 };
@@ -1067,8 +1195,8 @@ exports.getNoticeById = async (req, res, next) => {
       SELECT n.*, COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
              c.name as class_name, s.name as section_name, CONCAT(st.first_name, ' ', st.last_name) as student_name
       FROM notices n
-      LEFT JOIN users u ON u.id = n.posted_by_user_id AND n.posted_by_role IN ('admin', 'accountant', 'receptionist', 'librarian')
-      LEFT JOIN teachers t ON t.id = n.posted_by_user_id AND n.posted_by_role = 'teacher'
+      LEFT JOIN users u ON u.id = n.posted_by_user_id
+      LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
       LEFT JOIN classes c ON c.id = n.target_class_id
       LEFT JOIN sections s ON s.id = n.target_section_id
       LEFT JOIN students st ON st.id = n.target_student_id
