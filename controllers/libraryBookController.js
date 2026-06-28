@@ -349,6 +349,15 @@ const httpGetJson = (url) => {
   });
 };
 
+const isbnCache = new Map();
+const setCache = (key, value) => {
+  if (isbnCache.size > 500) {
+    const firstKey = isbnCache.keys().next().value;
+    isbnCache.delete(firstKey);
+  }
+  isbnCache.set(key, value);
+};
+
 exports.lookupISBN = async (req, res, next) => {
   try {
     const { isbn } = req.params;
@@ -357,17 +366,54 @@ exports.lookupISBN = async (req, res, next) => {
       return res.fail('Invalid ISBN.', [], 400);
     }
 
-    // 1. Try Open Library
-    const openLibraryUrl = `https://openlibrary.org/api/books?bibkeys=ISBN:${cleanIsbn}&format=json&jscmd=data`;
-    const data = await httpGetJson(openLibraryUrl).catch(err => {
-      console.error('[Lookup] OpenLibrary error:', err.message);
-      return null;
-    });
+    // 1. Check in-memory cache first (0ms, instant!)
+    if (isbnCache.has(cleanIsbn)) {
+      return res.ok(isbnCache.get(cleanIsbn));
+    }
 
+    // 2. Check local database catalog next (~2ms, extremely fast!)
+    const [[localBook]] = await sequelize.query(`
+      SELECT title, author, publisher, publication_year, cover_image_url, description, category
+      FROM library_books
+      WHERE school_id = :schoolId AND is_deleted = false AND isbn = :cleanIsbn
+      LIMIT 1
+    `, { replacements: { schoolId: req.user.school_id, cleanIsbn } });
+
+    if (localBook) {
+      const bookData = {
+        source: 'local_catalog',
+        title: localBook.title || '',
+        author: localBook.author || '',
+        publisher: localBook.publisher || '',
+        publication_year: localBook.publication_year || null,
+        cover_image_url: localBook.cover_image_url || '',
+        description: localBook.description || '',
+        category: localBook.category || 'other'
+      };
+      setCache(cleanIsbn, bookData);
+      return res.ok(bookData);
+    }
+
+    // 3. Fetch from external APIs in parallel (approx. 200ms - 400ms instead of 1000ms+)
+    const openLibraryUrl = `https://openlibrary.org/api/books?bibkeys=ISBN:${cleanIsbn}&format=json&jscmd=data`;
+    const googleBooksUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${cleanIsbn}`;
+
+    const [olData, gbData] = await Promise.all([
+      httpGetJson(openLibraryUrl).catch(err => {
+        console.error('[Lookup] OpenLibrary error:', err.message);
+        return null;
+      }),
+      httpGetJson(googleBooksUrl).catch(err => {
+        console.error('[Lookup] GoogleBooks error:', err.message);
+        return null;
+      })
+    ]);
+
+    // Parse Open Library
     const bookKey = `ISBN:${cleanIsbn}`;
-    if (data && data[bookKey]) {
-      const info = data[bookKey];
-      return res.ok({
+    if (olData && olData[bookKey]) {
+      const info = olData[bookKey];
+      const bookData = {
         source: 'open_library',
         title: info.title || '',
         author: info.authors?.map(a => a.name).join(', ') || '',
@@ -375,19 +421,15 @@ exports.lookupISBN = async (req, res, next) => {
         publication_year: info.publish_date ? parseInt(info.publish_date.match(/\d{4}/)?.[0], 10) || null : null,
         cover_image_url: info.cover?.large || info.cover?.medium || info.cover?.small || '',
         description: info.notes || ''
-      });
+      };
+      setCache(cleanIsbn, bookData);
+      return res.ok(bookData);
     }
 
-    // 2. Fallback to Google Books
-    const googleBooksUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${cleanIsbn}`;
-    const gData = await httpGetJson(googleBooksUrl).catch(err => {
-      console.error('[Lookup] GoogleBooks error:', err.message);
-      return null;
-    });
-
-    if (gData && gData.items && gData.items.length > 0) {
-      const info = gData.items[0].volumeInfo;
-      return res.ok({
+    // Parse Google Books fallback
+    if (gbData && gbData.items && gbData.items.length > 0) {
+      const info = gbData.items[0].volumeInfo;
+      const bookData = {
         source: 'google_books',
         title: info.title || '',
         author: info.authors?.join(', ') || '',
@@ -395,7 +437,9 @@ exports.lookupISBN = async (req, res, next) => {
         publication_year: info.publishedDate ? parseInt(info.publishedDate.match(/\d{4}/)?.[0], 10) || null : null,
         cover_image_url: info.imageLinks?.thumbnail || '',
         description: info.description || ''
-      });
+      };
+      setCache(cleanIsbn, bookData);
+      return res.ok(bookData);
     }
 
     return res.fail('No book found for this ISBN. You can still enter details manually.', [], 404);
