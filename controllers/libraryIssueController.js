@@ -224,7 +224,7 @@ exports.getIssues = async (req, res, next) => {
     if (status) whereClause += ' AND li.status = :status';
     if (borrower_type) whereClause += ' AND li.borrower_type = :borrower_type';
     if (start_date && end_date) whereClause += ' AND li.issue_date BETWEEN :start_date AND :end_date';
-    if (search) whereClause += ` AND (lb.title ILIKE :search OR (s.first_name || ' ' || s.last_name) ILIKE :search OR u.name ILIKE :search)`;
+    if (search) whereClause += ` AND (lb.title ILIKE :search OR (s.first_name || ' ' || s.last_name) ILIKE :search OR (t.first_name || ' ' || t.last_name) ILIKE :search OR u.name ILIKE :search)`;
 
     const [issues] = await sequelize.query(`
       SELECT 
@@ -232,10 +232,12 @@ exports.getIssues = async (req, res, next) => {
         lb.title AS book_title,
         CASE 
           WHEN li.borrower_type = 'student' THEN CONCAT(s.first_name, ' ', s.last_name)
+          WHEN li.borrower_type = 'teacher' THEN CONCAT(t.first_name, ' ', t.last_name)
           ELSE u.name 
         END AS borrower_name,
         CASE 
           WHEN li.borrower_type = 'student' THEN s.admission_no
+          WHEN li.borrower_type = 'teacher' THEN t.email
           ELSE u.email
         END AS borrower_identifier,
         c.name AS class_name
@@ -244,6 +246,7 @@ exports.getIssues = async (req, res, next) => {
       LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
       LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
       LEFT JOIN classes c ON c.id = e.class_id
+      LEFT JOIN teachers t ON t.id = li.borrower_id AND li.borrower_type = 'teacher'
       LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
       ${whereClause}
       ORDER BY li.issue_date DESC
@@ -254,6 +257,7 @@ exports.getIssues = async (req, res, next) => {
        SELECT COUNT(*)::int FROM library_issues li
        JOIN library_books lb ON lb.id = li.book_id
        LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
+       LEFT JOIN teachers t ON t.id = li.borrower_id AND li.borrower_type = 'teacher'
        LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
        ${whereClause}
     `, { replacements });
@@ -285,6 +289,8 @@ exports.getMyIssues = async (req, res, next) => {
       if (!student) return res.fail('Student record not found', [], 404);
       borrowerId = student.id;
       borrowerType = 'student';
+    } else if (role === 'teacher') {
+      borrowerType = 'teacher';
     }
 
     const [issues] = await sequelize.query(`

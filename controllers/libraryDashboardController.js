@@ -23,11 +23,13 @@ exports.getDashboardStats = async (req, res, next) => {
              lb.title AS book_title,
              CASE 
                WHEN li.borrower_type = 'student' THEN CONCAT(s.first_name, ' ', s.last_name)
+               WHEN li.borrower_type = 'teacher' THEN CONCAT(t.first_name, ' ', t.last_name)
                ELSE u.name 
              END AS borrower_name
       FROM library_issues li
       JOIN library_books lb ON lb.id = li.book_id
       LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
+      LEFT JOIN teachers t ON t.id = li.borrower_id AND li.borrower_type = 'teacher'
       LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
       WHERE li.school_id = :schoolId AND li.status IN ('issued', 'overdue')
       ORDER BY li.issue_date DESC

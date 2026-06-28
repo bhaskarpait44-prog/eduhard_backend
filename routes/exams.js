@@ -14,6 +14,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 router.get('/', requireAdminOrTeacher, ctrl.list);
 
 router.get('/class/timetable/pdf', requireAdminOrTeacher, ctrl.downloadClassTimetablePdf);
+router.get('/timetable/all-classes/pdf', requireAdminOrTeacher, ctrl.downloadAllClassesTimetablePdf);
 router.get('/:id/timetable/pdf', requireAdminOrTeacher, ctrl.downloadTimetablePdf);
 
 router.get('/:id/subjects/:subjectId/template', requireAdminOrTeacher, ctrl.getTemplate);
@@ -23,6 +24,16 @@ router.post('/:id/subjects/:subjectId/upload-marks',
   upload.single('file'), 
   ctrl.uploadMarks
 );
+
+// POST /api/exams/bulk - Create bulk exam for all classes
+router.post('/bulk', requireAdmin, [
+  body('name').notEmpty(),
+  body('exam_type').isIn(['term', 'midterm', 'final', 'compartment']),
+  body('start_date').isDate(),
+  body('end_date').isDate(),
+  body('status').optional().isIn(['draft', 'published']),
+  body('weightage').optional().isFloat({ min: 0, max: 100 }),
+], validate, ctrl.createBulk);
 
 // POST /api/exams - Create exam
 router.post('/', requireAdmin, [

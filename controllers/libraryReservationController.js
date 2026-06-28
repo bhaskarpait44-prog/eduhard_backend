@@ -1,6 +1,6 @@
 'use strict';
 
-const { LibraryReservation, LibraryBook, Student, User, sequelize } = require('../models');
+const { LibraryReservation, LibraryBook, Student, User, Teacher, sequelize } = require('../models');
 
 exports.getReservations = async (req, res, next) => {
   try {
@@ -26,6 +26,12 @@ exports.getReservations = async (req, res, next) => {
           model: User, 
           as: 'staffBorrower', 
           attributes: ['name', 'email'],
+          required: false 
+        },
+        { 
+          model: Teacher, 
+          as: 'teacherBorrower', 
+          attributes: ['first_name', 'last_name', 'email'],
           required: false 
         }
       ],
@@ -144,6 +150,8 @@ exports.getMyReservations = async (req, res, next) => {
       if (!student) return res.fail('Student record not found', [], 404);
       borrowerId = student.id;
       borrowerType = 'student';
+    } else if (role === 'teacher') {
+      borrowerType = 'teacher';
     }
 
     const reservations = await LibraryReservation.findAll({

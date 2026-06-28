@@ -18,7 +18,7 @@ exports.getFines = async (req, res, next) => {
     };
 
     if (fine_status) whereClause += ' AND li.fine_status = :fine_status';
-    if (search) whereClause += ` AND (lb.title ILIKE :search OR (s.first_name || ' ' || s.last_name) ILIKE :search OR u.name ILIKE :search)`;
+    if (search) whereClause += ` AND (lb.title ILIKE :search OR (s.first_name || ' ' || s.last_name) ILIKE :search OR (t.first_name || ' ' || t.last_name) ILIKE :search OR u.name ILIKE :search)`;
 
     const [fines] = await sequelize.query(`
       SELECT 
@@ -26,15 +26,18 @@ exports.getFines = async (req, res, next) => {
         lb.title AS book_title,
         CASE 
           WHEN li.borrower_type = 'student' THEN CONCAT(s.first_name, ' ', s.last_name)
+          WHEN li.borrower_type = 'teacher' THEN CONCAT(t.first_name, ' ', t.last_name)
           ELSE u.name 
         END AS borrower_name,
         CASE 
           WHEN li.borrower_type = 'student' THEN s.admission_no
+          WHEN li.borrower_type = 'teacher' THEN t.email
           ELSE u.email
         END AS borrower_identifier
       FROM library_issues li
       JOIN library_books lb ON lb.id = li.book_id
       LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
+      LEFT JOIN teachers t ON t.id = li.borrower_id AND li.borrower_type = 'teacher'
       LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
       ${whereClause}
       ORDER BY li.return_date DESC
@@ -45,6 +48,7 @@ exports.getFines = async (req, res, next) => {
        SELECT COUNT(*)::int FROM library_issues li
        JOIN library_books lb ON lb.id = li.book_id
        LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
+       LEFT JOIN teachers t ON t.id = li.borrower_id AND li.borrower_type = 'teacher'
        LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
        ${whereClause}
     `, { replacements });

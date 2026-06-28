@@ -1430,3 +1430,322 @@ exports.downloadClassTimetablePdf = async (req, res, next) => {
 
   } catch (err) { next(err); }
 };
+
+exports.createBulk = async (req, res, next) => {
+  try {
+    const {
+      name,
+      exam_type,
+      start_date,
+      end_date,
+      status = 'draft',
+      weightage = 100.00,
+    } = req.body;
+
+    const [[session]] = await sequelize.query(`
+      SELECT id, is_locked FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+    `, { replacements: { schoolId: req.user.school_id } });
+
+    if (!session) return res.fail('No active session. Activate a session first.');
+    if (session.is_locked) return res.fail('Current session is locked. Cannot create exams.', [], 403);
+
+    if (new Date(end_date) < new Date(start_date)) {
+      return res.fail('end_date must be on or after start_date.');
+    }
+
+    if (!['draft', 'published'].includes(status)) {
+      return res.fail('status must be draft or published.', [], 422);
+    }
+
+    // Fetch all active classes
+    const [classes] = await sequelize.query(`
+      SELECT id, name FROM classes WHERE school_id = :schoolId AND is_active = true AND is_deleted = false;
+    `, { replacements: { schoolId: req.user.school_id } });
+
+    if (classes.length === 0) {
+      return res.fail('No active classes found for this school.');
+    }
+
+    // Fetch all active subjects for these classes
+    const classIds = classes.map(c => c.id);
+    const [subjectRows] = await sequelize.query(`
+      SELECT id, class_id, name, code, subject_type,
+             theory_total_marks, theory_passing_marks,
+             practical_total_marks, practical_passing_marks,
+             combined_total_marks, combined_passing_marks
+      FROM subjects
+      WHERE class_id IN (:classIds)
+        AND is_deleted = false
+        AND is_active = true;
+    `, { replacements: { classIds } });
+
+    // Group subjects by class_id
+    const subjectsByClass = {};
+    subjectRows.forEach(row => {
+      if (!subjectsByClass[row.class_id]) {
+        subjectsByClass[row.class_id] = [];
+      }
+      subjectsByClass[row.class_id].push(row);
+    });
+
+    const createdExams = [];
+
+    await sequelize.transaction(async (transaction) => {
+      for (const cls of classes) {
+        const classSubjects = subjectsByClass[cls.id] || [];
+        if (classSubjects.length === 0) {
+          // Skip classes that don't have any subjects
+          continue;
+        }
+
+        // Normalize subjects using their default configuration
+        const normalizedSubjects = [];
+        for (const subject of classSubjects) {
+          try {
+            // Ensure default marks are set, fallback to combined if theory/practical total marks are null
+            const subject_type = subject.subject_type || 'theory';
+            const itemInput = {
+              subject_id: subject.id,
+              subject_type,
+            };
+            
+            // Safe fallbacks to prevent errors if default marks are missing
+            if (subject_type === 'theory' || subject_type === 'both') {
+              if (subject.theory_total_marks == null) {
+                subject.theory_total_marks = subject.combined_total_marks || 100.00;
+              }
+              if (subject.theory_passing_marks == null) {
+                subject.theory_passing_marks = subject.combined_passing_marks || 40.00;
+              }
+            }
+            if (subject_type === 'practical' || subject_type === 'both') {
+              if (subject.practical_total_marks == null) {
+                subject.practical_total_marks = subject.combined_total_marks || 100.00;
+              }
+              if (subject.practical_passing_marks == null) {
+                subject.practical_passing_marks = subject.combined_passing_marks || 40.00;
+              }
+            }
+
+            const normalized = normalizeExamSubjectConfig(subject, itemInput);
+            normalizedSubjects.push(normalized);
+          } catch (subErr) {
+            console.error(`Skipping subject ${subject.name} (ID: ${subject.id}) in class ${cls.name} due to normalization error:`, subErr.message);
+          }
+        }
+
+        if (normalizedSubjects.length === 0) {
+          continue;
+        }
+
+        const total_marks = normalizedSubjects.reduce((sum, item) => sum + Number(item.combined_total_marks || 0), 0);
+        const passing_marks = normalizedSubjects.reduce((sum, item) => sum + Number(item.combined_passing_marks || 0), 0);
+
+        const [[createdExam]] = await sequelize.query(`
+          INSERT INTO exams (
+            session_id, class_id, name, exam_type, start_date, end_date,
+            total_marks, passing_marks, weightage, status, published_at, published_by,
+            created_by, updated_by, created_at, updated_at
+          )
+          VALUES (
+            :session_id, :class_id, :name, :exam_type, :start_date, :end_date,
+            :total_marks, :passing_marks, :weightage, :status,
+            CASE WHEN :status = 'published' THEN NOW() ELSE NULL END,
+            CASE WHEN :status = 'published' THEN :userId ELSE NULL END,
+            :userId, :userId, NOW(), NOW()
+          )
+          RETURNING id, session_id, class_id, name, exam_type, start_date, end_date, total_marks, passing_marks, weightage, status, published_at;
+        `, {
+          replacements: {
+            session_id: session.id,
+            class_id: cls.id,
+            name,
+            exam_type,
+            start_date,
+            end_date,
+            total_marks,
+            passing_marks,
+            weightage: parseFloat(weightage),
+            status,
+            userId: req.user.id,
+          },
+          transaction,
+        });
+
+        await sequelize.getQueryInterface().bulkInsert('exam_subjects', normalizedSubjects.map((item) => ({
+          exam_id: createdExam.id,
+          subject_id: item.subject_id,
+          subject_type: item.subject_type,
+          theory_total_marks: item.theory_total_marks,
+          theory_passing_marks: item.theory_passing_marks,
+          practical_total_marks: item.practical_total_marks,
+          practical_passing_marks: item.practical_passing_marks,
+          combined_total_marks: item.combined_total_marks,
+          combined_passing_marks: item.combined_passing_marks,
+          assigned_teacher_id: item.assigned_teacher_id,
+          exam_date: item.exam_date,
+          start_time: item.start_time,
+          end_time: item.end_time,
+          invigilator_teacher_id: item.invigilator_teacher_id,
+          review_status: status === 'published' ? 'approved' : 'draft',
+          reviewed_by: status === 'published' ? req.user.id : null,
+          reviewed_at: status === 'published' ? new Date() : null,
+          created_by: req.user.id,
+          updated_by: req.user.id,
+          created_at: new Date(),
+          updated_at: new Date(),
+        })), { transaction });
+
+        createdExams.push(createdExam);
+      }
+    });
+
+    res.ok({ count: createdExams.length, exams: createdExams }, `${createdExams.length} exams created bulk.`, 201);
+    invalidateCache(req.user.school_id, '/api/exams*');
+    invalidateCache(req.user.school_id, '/api/analytics*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
+  } catch (err) { next(err); }
+};
+
+exports.downloadAllClassesTimetablePdf = async (req, res, next) => {
+  try {
+    const { session_id, exam_name } = req.query;
+    const schoolId = req.user.school_id;
+
+    if (!session_id || !exam_name) {
+      return res.fail('session_id and exam_name are required.', [], 422);
+    }
+
+    const [exams] = await sequelize.query(`
+      SELECT e.id, e.name, e.class_id, c.name AS class_name
+      FROM exams e
+      JOIN classes c ON c.id = e.class_id
+      JOIN sessions s ON s.id = e.session_id
+      WHERE s.school_id = :schoolId
+        AND e.session_id = :sessionId
+        AND LOWER(e.name) = LOWER(:examName)
+        AND c.is_deleted = false
+      ORDER BY c.order_number ASC, c.name ASC;
+    `, {
+      replacements: {
+        schoolId: Number(schoolId),
+        sessionId: Number(session_id),
+        examName: exam_name.trim(),
+      }
+    });
+
+    if (exams.length === 0) {
+      return res.fail('No exams found with the specified name in this session.', [], 404);
+    }
+
+    const examIds = exams.map(e => e.id);
+
+    let sql = `
+      SELECT es.exam_id, s.name, s.code, es.exam_date, es.start_time, es.end_time,
+             CONCAT(t.first_name, ' ', t.last_name) AS invigilator_name
+      FROM exam_subjects es
+      JOIN subjects s ON s.id = es.subject_id
+      LEFT JOIN teachers t ON t.id = es.invigilator_teacher_id
+      WHERE es.exam_id IN (:examIds)
+    `;
+    if (req.user.role === 'teacher') {
+      sql += " AND EXISTS(SELECT 1 FROM exams ex WHERE ex.id = es.exam_id AND ex.status != 'draft')";
+    }
+    sql += " ORDER BY es.exam_date ASC, es.start_time ASC, s.name ASC;";
+
+    const [subjects] = await sequelize.query(sql, {
+      replacements: { examIds }
+    });
+
+    const subjectsByExam = {};
+    subjects.forEach(s => {
+      if (!subjectsByExam[s.exam_id]) {
+        subjectsByExam[s.exam_id] = [];
+      }
+      subjectsByExam[s.exam_id].push(s);
+    });
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ size: 'A4', margin: 50 });
+
+    const filename = `${exam_name.replace(/\s+/g, '_')}_All_Classes_Timetable.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    doc.pipe(res);
+
+    let classIndex = 0;
+    for (const exam of exams) {
+      const examSubjects = subjectsByExam[exam.id] || [];
+      if (examSubjects.length === 0) continue;
+
+      if (classIndex > 0) {
+        doc.addPage();
+      }
+      classIndex++;
+
+      // Header
+      doc.font('Helvetica-Bold').fontSize(16).text(school?.name || 'School Name', { align: 'center' });
+      doc.fontSize(12).text('EXAMINATION TIMETABLE', { align: 'center' });
+      doc.moveDown(0.3);
+      doc.fontSize(11).text(`${exam_name} - Class: ${exam.class_name}`, { align: 'center' });
+      doc.moveDown(1);
+
+      // Table Header
+      const tableTop = doc.y;
+      const colSubject = 50;
+      const colDate = 200;
+      const colTime = 300;
+      const colInvigilator = 420;
+
+      doc.font('Helvetica-Bold').fontSize(9);
+      doc.text('Subject', colSubject, tableTop);
+      doc.text('Date', colDate, tableTop);
+      doc.text('Time', colTime, tableTop);
+      doc.text('Invigilator', colInvigilator, tableTop);
+
+      doc.moveTo(50, tableTop + 12).lineTo(550, tableTop + 12).stroke();
+
+      let y = tableTop + 20;
+      doc.font('Helvetica').fontSize(8);
+
+      examSubjects.forEach((s) => {
+        if (y > 750) {
+          doc.addPage();
+          y = 50;
+          doc.font('Helvetica-Bold').fontSize(9);
+          doc.text('Subject', colSubject, y);
+          doc.text('Date', colDate, y);
+          doc.text('Time', colTime, y);
+          doc.text('Invigilator', colInvigilator, y);
+          doc.moveTo(50, y + 12).lineTo(550, y + 12).stroke();
+          y += 20;
+          doc.font('Helvetica').fontSize(8);
+        }
+
+        const dateStr = s.exam_date ? new Date(s.exam_date).toLocaleDateString() : 'TBA';
+        const timeStr = s.start_time && s.end_time ? `${s.start_time.slice(0, 5)} - ${s.end_time.slice(0, 5)}` : 'TBA';
+
+        doc.text(s.name, colSubject, y, { width: 140 });
+        doc.text(dateStr, colDate, y);
+        doc.text(timeStr, colTime, y);
+        doc.text(s.invigilator_name || 'TBA', colInvigilator, y, { width: 130 });
+
+        y += 18;
+        doc.moveTo(50, y - 4).lineTo(550, y - 4).strokeColor('#eeeeee').stroke().strokeColor('black');
+      });
+    }
+
+    if (classIndex === 0) {
+      doc.font('Helvetica').fontSize(10).text('No timetables available for download.', 50, 50);
+    }
+
+    doc.end();
+
+  } catch (err) { next(err); }
+};
