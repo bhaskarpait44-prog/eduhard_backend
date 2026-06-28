@@ -1684,60 +1684,55 @@ exports.downloadAllClassesTimetablePdf = async (req, res, next) => {
       const examSubjects = subjectsByExam[exam.id] || [];
       if (examSubjects.length === 0) continue;
 
-      if (classIndex > 0) {
+      const half = classIndex % 2;
+      
+      if (classIndex > 0 && half === 0) {
         doc.addPage();
       }
       classIndex++;
 
+      const startY = half === 0 ? 40 : 440;
+      
+      if (half === 1) {
+        doc.moveTo(40, 420).lineTo(555, 420).dash(5, { space: 5 }).stroke().undash();
+      }
+
       // Header
-      doc.font('Helvetica-Bold').fontSize(16).text(school?.name || 'School Name', { align: 'center' });
-      doc.fontSize(12).text('EXAMINATION TIMETABLE', { align: 'center' });
-      doc.moveDown(0.3);
-      doc.fontSize(11).text(`${exam_name} - Class: ${exam.class_name}`, { align: 'center' });
-      doc.moveDown(1);
+      doc.font('Helvetica-Bold').fontSize(12).text(school?.name || 'School Name', 40, startY, { align: 'center' });
+      doc.fontSize(9).text('EXAMINATION TIMETABLE', { align: 'center' });
+      doc.moveDown(0.2);
+      doc.fontSize(10).text(`${exam_name} - Class: ${exam.class_name}`, { align: 'center' });
+      doc.moveDown(0.5);
 
       // Table Header
       const tableTop = doc.y;
       const colSubject = 50;
-      const colDate = 200;
-      const colTime = 300;
-      const colInvigilator = 420;
+      const colDate = 220;
+      const colTime = 320;
+      const colInvigilator = 440;
 
-      doc.font('Helvetica-Bold').fontSize(9);
+      doc.font('Helvetica-Bold').fontSize(8);
       doc.text('Subject', colSubject, tableTop);
       doc.text('Date', colDate, tableTop);
       doc.text('Time', colTime, tableTop);
       doc.text('Invigilator', colInvigilator, tableTop);
 
-      doc.moveTo(50, tableTop + 12).lineTo(550, tableTop + 12).stroke();
+      doc.moveTo(40, tableTop + 10).lineTo(555, tableTop + 10).stroke();
 
-      let y = tableTop + 20;
+      let y = tableTop + 16;
       doc.font('Helvetica').fontSize(8);
 
       examSubjects.forEach((s) => {
-        if (y > 750) {
-          doc.addPage();
-          y = 50;
-          doc.font('Helvetica-Bold').fontSize(9);
-          doc.text('Subject', colSubject, y);
-          doc.text('Date', colDate, y);
-          doc.text('Time', colTime, y);
-          doc.text('Invigilator', colInvigilator, y);
-          doc.moveTo(50, y + 12).lineTo(550, y + 12).stroke();
-          y += 20;
-          doc.font('Helvetica').fontSize(8);
-        }
-
         const dateStr = s.exam_date ? new Date(s.exam_date).toLocaleDateString() : 'TBA';
         const timeStr = s.start_time && s.end_time ? `${s.start_time.slice(0, 5)} - ${s.end_time.slice(0, 5)}` : 'TBA';
 
-        doc.text(s.name, colSubject, y, { width: 140 });
+        doc.text(s.name, colSubject, y, { width: 160 });
         doc.text(dateStr, colDate, y);
         doc.text(timeStr, colTime, y);
-        doc.text(s.invigilator_name || 'TBA', colInvigilator, y, { width: 130 });
+        doc.text(s.invigilator_name || 'TBA', colInvigilator, y, { width: 110 });
 
-        y += 18;
-        doc.moveTo(50, y - 4).lineTo(550, y - 4).strokeColor('#eeeeee').stroke().strokeColor('black');
+        y += 15;
+        doc.moveTo(40, y - 3).lineTo(555, y - 3).strokeColor('#eeeeee').stroke().strokeColor('black');
       });
     }
 

@@ -46,6 +46,7 @@ router.delete('/assignments/:id', ctrl.deleteAssignment);
 router.get('/timetable', ctrl.timetable);
 router.post('/timetable', ctrl.createTimetableSlot);
 router.patch('/timetable/:id', ctrl.updateTimetableSlot);
+router.delete('/timetable/:id', ctrl.deleteTimetableSlot);
 
 router.get('/homework', ctrl.homework);
 router.patch('/homework/:id', ctrl.updateHomework);

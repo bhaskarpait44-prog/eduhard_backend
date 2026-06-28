@@ -753,7 +753,7 @@ exports.updateTimetableSlot = async (req, res, next) => {
     const schoolId = req.user.school_id;
 
     const [[slot]] = await sequelize.query(`
-      SELECT ts.id, ts.is_active, s.status, s.is_locked FROM timetable_slots ts
+      SELECT ts.*, s.status, s.is_locked FROM timetable_slots ts
       JOIN sessions s ON s.id = ts.session_id
       WHERE ts.id = :id AND s.school_id = :schoolId
       LIMIT 1;
@@ -764,9 +764,87 @@ exports.updateTimetableSlot = async (req, res, next) => {
       return res.fail(`Timetable session is ${slot.status || 'inactive'}${slot.is_locked ? ' (locked)' : ''}. Cannot modify timetable slot.`, [], 422);
     }
 
-    const fields = ['room_number', 'start_time', 'end_time', 'is_active'];
+    const fields = [
+      'teacher_id', 'class_id', 'section_id', 'subject_id',
+      'day_of_week', 'period_number', 'start_time', 'end_time',
+      'room_number', 'is_active'
+    ];
     const updates = fields.filter((field) => req.body[field] !== undefined);
     if (!updates.length) return res.fail('No timetable fields provided.', [], 422);
+
+    const finalTeacherId = req.body.teacher_id !== undefined ? Number(req.body.teacher_id) : slot.teacher_id;
+    const finalClassId = req.body.class_id !== undefined ? Number(req.body.class_id) : slot.class_id;
+    const finalSectionId = req.body.section_id !== undefined ? Number(req.body.section_id) : slot.section_id;
+    const finalSubjectId = req.body.subject_id !== undefined ? Number(req.body.subject_id) : slot.subject_id;
+    const finalDayOfWeek = req.body.day_of_week !== undefined ? req.body.day_of_week : slot.day_of_week;
+
+    if (req.body.day_of_week !== undefined && !DAY_NAMES.includes(finalDayOfWeek)) {
+      return res.fail('Invalid day_of_week.', [], 422);
+    }
+
+    // Validate teacher exists
+    if (req.body.teacher_id !== undefined) {
+      const [[teacherValid]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { teacherId: finalTeacherId, schoolId } });
+      if (!teacherValid) return res.fail('Teacher not found or unauthorized.', [], 404);
+    }
+
+    // Validate class exists
+    if (req.body.class_id !== undefined) {
+      const [[classValid]] = await sequelize.query(`
+        SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+      `, { replacements: { classId: finalClassId, schoolId } });
+      if (!classValid) return res.fail('Class not found or unauthorized.', [], 404);
+    }
+
+    // Validate section belongs to class
+    if (req.body.section_id !== undefined || req.body.class_id !== undefined) {
+      const [[sectionValid]] = await sequelize.query(`
+        SELECT id FROM sections WHERE id = :sectionId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { sectionId: finalSectionId, classId: finalClassId } });
+      if (!sectionValid) return res.fail('Section not found in the selected class.', [], 404);
+    }
+
+    // Validate subject belongs to class
+    if (req.body.subject_id !== undefined || req.body.class_id !== undefined) {
+      const [[subjectValid]] = await sequelize.query(`
+        SELECT id FROM subjects WHERE id = :subjectId AND class_id = :classId AND is_deleted = false LIMIT 1;
+      `, { replacements: { subjectId: finalSubjectId, classId: finalClassId } });
+      if (!subjectValid) return res.fail('Subject not found in the selected class.', [], 404);
+    }
+
+    // Validate teacher assignment
+    if (
+      req.body.teacher_id !== undefined ||
+      req.body.class_id !== undefined ||
+      req.body.section_id !== undefined ||
+      req.body.subject_id !== undefined
+    ) {
+      const [[assignment]] = await sequelize.query(`
+        SELECT id
+        FROM teacher_assignments
+        WHERE session_id = :sessionId
+          AND teacher_id = :teacherId
+          AND class_id = :classId
+          AND section_id = :sectionId
+          AND subject_id = :subjectId
+          AND is_active = true
+        LIMIT 1;
+      `, {
+        replacements: {
+          sessionId: slot.session_id,
+          teacherId: finalTeacherId,
+          classId: finalClassId,
+          sectionId: finalSectionId,
+          subjectId: finalSubjectId,
+        },
+      });
+
+      if (!assignment) {
+        return res.fail('The teacher is not actively assigned to this subject for the chosen class and section.', [], 422);
+      }
+    }
 
     const setClause = updates.map((field) => `${field} = :${field}`).join(', ');
     await sequelize.query(`
@@ -777,12 +855,42 @@ exports.updateTimetableSlot = async (req, res, next) => {
 
     await audit('timetable_slots', Number(id), {
       field: 'updated',
-      oldValue: slot.is_active,
-      newValue: req.body.is_active ?? slot.is_active,
-      reason: 'Admin updated timetable slot',
+      oldValue: JSON.stringify(slot),
+      newValue: JSON.stringify({ ...slot, ...req.body }),
+      reason: 'Admin updated timetable slot details',
     }, req);
 
     res.ok({ id: Number(id) }, 'Timetable slot updated.');
+  } catch (err) { next(err); }
+};
+
+exports.deleteTimetableSlot = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const [[slot]] = await sequelize.query(`
+      SELECT ts.*, s.status, s.is_locked FROM timetable_slots ts
+      JOIN sessions s ON s.id = ts.session_id
+      WHERE ts.id = :id AND s.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!slot) return res.fail('Timetable slot not found or unauthorized.', [], 404);
+    if (slot.status !== 'active' || slot.is_locked) {
+      return res.fail(`Timetable session is ${slot.status || 'inactive'}${slot.is_locked ? ' (locked)' : ''}. Cannot modify timetable slot.`, [], 422);
+    }
+
+    await sequelize.query(`DELETE FROM timetable_slots WHERE id = :id;`, { replacements: { id } });
+
+    await audit('timetable_slots', Number(id), {
+      field: 'deleted',
+      oldValue: JSON.stringify(slot),
+      newValue: null,
+      reason: 'Admin deleted timetable slot',
+    }, req);
+
+    res.ok({ id: Number(id) }, 'Timetable slot deleted.');
   } catch (err) { next(err); }
 };
 
