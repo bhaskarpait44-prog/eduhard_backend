@@ -635,7 +635,7 @@ exports.getStudentFees = async (req, res, next) => {
     const { enrollment_id } = req.params;
 
     const [invoices] = await sequelize.query(`
-      SELECT fi.id, fs.name AS fee_name, fi.amount_due, fi.amount_paid,
+      SELECT fi.id, fs.name AS fee_name, fs.frequency AS fee_frequency, fi.amount_due, fi.amount_paid,
              fi.late_fee_amount, fi.concession_amount,
              (fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid) AS balance,
              fi.due_date, fi.paid_date, fi.status,

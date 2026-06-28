@@ -14,17 +14,30 @@ exports.getHealthProfile = async (req, res, next) => {
 
     if (!student) return res.fail('Student not found.', [], 404);
 
+    // Fetch blood group from current student profile version
+    const [[sp]] = await sequelize.query(`
+      SELECT blood_group FROM student_profiles WHERE student_id = :student_id AND is_current = true;
+    `, { replacements: { student_id } });
+    const studentBloodGroup = sp?.blood_group || null;
+
     let [[profile]] = await sequelize.query(`
       SELECT * FROM student_health_profiles WHERE student_id = :student_id
     `, { replacements: { student_id } });
 
     if (!profile) {
       const [newProfile] = await sequelize.query(`
-        INSERT INTO student_health_profiles (student_id, created_at, updated_at)
-        VALUES (:student_id, NOW(), NOW())
+        INSERT INTO student_health_profiles (student_id, blood_group, created_at, updated_at)
+        VALUES (:student_id, :blood_group, NOW(), NOW())
         RETURNING *
-      `, { replacements: { student_id } });
+      `, { replacements: { student_id, blood_group: studentBloodGroup } });
       profile = newProfile[0];
+    } else if (!profile.blood_group && studentBloodGroup) {
+      const [updatedProfile] = await sequelize.query(`
+        UPDATE student_health_profiles SET blood_group = :blood_group, updated_at = NOW()
+        WHERE id = :profileId
+        RETURNING *
+      `, { replacements: { blood_group: studentBloodGroup, profileId: profile.id } });
+      profile = updatedProfile[0];
     }
 
     const [vaccinations] = await sequelize.query(`

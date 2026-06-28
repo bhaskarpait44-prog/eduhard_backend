@@ -1873,10 +1873,11 @@ exports.getStudentResultByExam = async (req, res, next) => {
     const [rows] = await sequelize.query(`
       SELECT
         sub.id AS subject_id, sub.name AS subject_name, sub.code AS subject_code, sub.subject_type,
-        sub.combined_total_marks, sub.combined_passing_marks,
+        es.combined_total_marks, es.combined_passing_marks,
         er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained,
         er.is_absent, er.grade, er.is_pass
       FROM subjects sub
+      JOIN exam_subjects es ON es.subject_id = sub.id AND es.exam_id = :examId
       LEFT JOIN exam_results er ON er.subject_id = sub.id AND er.exam_id = :examId AND er.enrollment_id = :enrollmentId
       WHERE sub.class_id = :classId AND sub.is_deleted = false
       ORDER BY sub.order_number ASC, sub.name ASC;
@@ -1889,7 +1890,8 @@ exports.getStudentResultByExam = async (req, res, next) => {
     });
 
     const subjects = rows.map((row) => {
-      const total_obtained = row.is_absent
+      const isPending = row.marks_obtained === null && row.theory_marks_obtained === null && row.practical_marks_obtained === null;
+      const total_obtained = row.is_absent || isPending
         ? null
         : Number(row.marks_obtained ?? (Number(row.theory_marks_obtained || 0) + Number(row.practical_marks_obtained || 0)));
       const max_marks = Number(row.combined_total_marks || 0);
@@ -1897,7 +1899,7 @@ exports.getStudentResultByExam = async (req, res, next) => {
         ...row,
         total_obtained,
         percentage: total_obtained == null || max_marks === 0 ? null : roundNumber((total_obtained / max_marks) * 100),
-        status: row.is_absent ? 'absent' : row.is_pass ? 'pass' : 'fail',
+        status: row.is_absent ? 'absent' : isPending ? 'pending' : row.is_pass ? 'pass' : 'fail',
       };
     });
 
@@ -1958,7 +1960,7 @@ exports.getStudentTimetable = async (req, res, next) => {
       replacements: {
         sessionId: student.session_id,
         classId: student.class_id,
-        section_id: student.section_id,
+        sectionId: student.section_id,
       },
     });
 

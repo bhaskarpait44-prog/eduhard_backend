@@ -1126,14 +1126,14 @@ exports.resultByExam = async (req, res, next) => {
         sub.name AS subject_name,
         sub.code AS subject_code,
         sub.subject_type,
-        sub.combined_total_marks AS total_marks,
-        sub.combined_passing_marks AS passing_marks,
-        sub.theory_total_marks,
-        sub.theory_passing_marks,
-        sub.practical_total_marks,
-        sub.practical_passing_marks,
-        sub.combined_total_marks,
-        sub.combined_passing_marks,
+        es.combined_total_marks AS total_marks,
+        es.combined_passing_marks AS passing_marks,
+        es.theory_total_marks,
+        es.theory_passing_marks,
+        es.practical_total_marks,
+        es.practical_passing_marks,
+        es.combined_total_marks,
+        es.combined_passing_marks,
         er.marks_obtained,
         er.theory_marks_obtained,
         er.practical_marks_obtained,
@@ -1141,6 +1141,7 @@ exports.resultByExam = async (req, res, next) => {
         er.grade,
         er.is_pass
       FROM subjects sub
+      JOIN exam_subjects es ON es.subject_id = sub.id AND es.exam_id = :examId
       LEFT JOIN exam_results er
         ON er.subject_id = sub.id
        AND er.exam_id = :examId
@@ -1157,7 +1158,8 @@ exports.resultByExam = async (req, res, next) => {
     });
 
     const subjects = rows.map((row) => {
-      const total_obtained = row.is_absent
+      const isPending = row.marks_obtained === null && row.theory_marks_obtained === null && row.practical_marks_obtained === null;
+      const total_obtained = row.is_absent || isPending
         ? null
         : Number(row.marks_obtained ?? (Number(row.theory_marks_obtained || 0) + Number(row.practical_marks_obtained || 0)));
       const max_marks = Number(row.combined_total_marks || row.total_marks || 0);
@@ -1166,8 +1168,8 @@ exports.resultByExam = async (req, res, next) => {
         ...row,
         total_obtained,
         percentage,
-        status: row.is_absent ? 'absent' : row.is_pass ? 'pass' : 'fail',
-        borderline: !row.is_absent && Number(total_obtained || 0) === Number(row.combined_passing_marks || row.passing_marks || -1),
+        status: row.is_absent ? 'absent' : isPending ? 'pending' : row.is_pass ? 'pass' : 'fail',
+        borderline: !row.is_absent && !isPending && Number(total_obtained || 0) === Number(row.combined_passing_marks || row.passing_marks || -1),
       };
     });
 
