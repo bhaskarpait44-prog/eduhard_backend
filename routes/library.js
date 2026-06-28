@@ -23,6 +23,7 @@ router.put('/settings', requireRole('admin', 'librarian'), settingsController.up
 
 // Books
 router.get('/books', bookController.getBooks);
+router.get('/books/lookup/:isbn', requireRole('admin', 'librarian'), bookController.lookupISBN);
 router.get('/books/:id', bookController.getBook);
 router.post('/books', requireRole('admin', 'librarian'), bookController.createBook);
 router.post('/books/import/preview', requireRole('admin', 'librarian'), bookController.previewImportBooks);
@@ -42,6 +43,7 @@ router.get('/reservations', requireRole('admin', 'librarian'), reservationContro
 router.get('/reservations/my', reservationController.getMyReservations);
 router.post('/reservations', reservationController.createReservation);
 router.patch('/reservations/:id/cancel', reservationController.cancelReservation);
+router.patch('/reservations/:id/ready', requireRole('admin', 'librarian'), reservationController.markReady);
 
 // Fines
 router.get('/fines', requireRole('admin', 'librarian', 'accountant'), fineController.getFines);

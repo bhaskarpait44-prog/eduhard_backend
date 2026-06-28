@@ -20,6 +20,7 @@ const sequelize = require('./config/database');
 const app = require('./app');
 const { initBrowser } = require('./utils/pdfGenerator');
 const { initializeFirebase } = require('./utils/firebase');
+require('./utils/libraryScheduler');
 
 const PORT = process.env.PORT || 5000;
 const NODE_ENV = process.env.NODE_ENV || 'development';

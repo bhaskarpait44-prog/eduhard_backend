@@ -159,6 +159,8 @@ LibraryIssue.belongsTo(LibraryBook, { foreignKey: 'book_id', as: 'book' });
 
 LibraryBook.hasMany(LibraryReservation, { foreignKey: 'book_id', as: 'reservations' });
 LibraryReservation.belongsTo(LibraryBook, { foreignKey: 'book_id', as: 'book' });
+LibraryReservation.belongsTo(Student, { foreignKey: 'borrower_id', as: 'studentBorrower', constraints: false });
+LibraryReservation.belongsTo(User, { foreignKey: 'borrower_id', as: 'staffBorrower', constraints: false });
 
 LibraryIssue.belongsTo(User, { foreignKey: 'issued_by', as: 'issuer' });
 

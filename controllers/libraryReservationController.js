@@ -155,3 +155,29 @@ exports.getMyReservations = async (req, res, next) => {
     res.ok(reservations);
   } catch (err) { next(err); }
 };
+
+exports.markReady = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    const reservation = await LibraryReservation.findOne({
+      where: { id, school_id: schoolId, status: 'pending' }
+    });
+
+    if (!reservation) return res.fail('Pending reservation not found.', [], 404);
+
+    // Set expires_at to 2 days from now
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 2);
+
+    reservation.status = 'ready';
+    reservation.expires_at = expiresAt;
+    await reservation.save();
+
+    // Decrement available_copies — book is now "held" for this borrower
+    await LibraryBook.decrement('available_copies', { where: { id: reservation.book_id } });
+
+    res.ok(reservation, 'Reservation marked as ready for pickup.');
+  } catch (err) { next(err); }
+};

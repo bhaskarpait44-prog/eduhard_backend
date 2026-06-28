@@ -270,6 +270,26 @@ exports.confirmImportBooks = async (req, res, next) => {
     const schoolId = req.user.school_id;
     let successCount = 0;
 
+    // Re-validate: ensure required fields and no ISBN duplicates (server-side guard)
+    const missingFields = rows.filter(r => !r.title || !r.author);
+    if (missingFields.length > 0) {
+      await t.rollback();
+      return res.fail(`${missingFields.length} row(s) are missing required fields (title, author).`, [], 400);
+    }
+
+    const isbnsToInsert = rows.map(r => r.isbn).filter(Boolean);
+    if (isbnsToInsert.length > 0) {
+      const [existingBooks] = await sequelize.query(
+        `SELECT isbn FROM library_books WHERE school_id = :schoolId AND is_deleted = false AND isbn = ANY(:isbns)`,
+        { replacements: { schoolId, isbns: isbnsToInsert }, transaction: t }
+      );
+      if (existingBooks.length > 0) {
+        await t.rollback();
+        const dupes = existingBooks.map(b => b.isbn).join(', ');
+        return res.fail(`Import rejected: duplicate ISBN(s) found in catalog: ${dupes}`, [], 400);
+      }
+    }
+
     for (const row of rows) {
       await sequelize.query(`
         INSERT INTO library_books (
@@ -294,6 +314,92 @@ exports.confirmImportBooks = async (req, res, next) => {
     res.ok({ successCount }, `${successCount} books imported successfully.`);
   } catch (err) {
     await t.rollback();
+    next(err);
+  }
+};
+
+const https = require('https');
+
+const httpGetJson = (url) => {
+  return new Promise((resolve, reject) => {
+    const options = {
+      headers: {
+        'User-Agent': 'EduCore-Library-Portal/1.0 (contact: admin@eduhard.com)'
+      }
+    };
+    https.get(url, options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      res.on('end', () => {
+        try {
+          if (res.statusCode >= 200 && res.statusCode < 300) {
+            resolve(JSON.parse(data));
+          } else {
+            resolve(null); // Resolve with null on non-200 status to allow fallbacks
+          }
+        } catch (e) {
+          reject(e);
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+};
+
+exports.lookupISBN = async (req, res, next) => {
+  try {
+    const { isbn } = req.params;
+    const cleanIsbn = isbn.replace(/[- ]/g, '').trim();
+    if (!cleanIsbn) {
+      return res.fail('Invalid ISBN.', [], 400);
+    }
+
+    // 1. Try Open Library
+    const openLibraryUrl = `https://openlibrary.org/api/books?bibkeys=ISBN:${cleanIsbn}&format=json&jscmd=data`;
+    const data = await httpGetJson(openLibraryUrl).catch(err => {
+      console.error('[Lookup] OpenLibrary error:', err.message);
+      return null;
+    });
+
+    const bookKey = `ISBN:${cleanIsbn}`;
+    if (data && data[bookKey]) {
+      const info = data[bookKey];
+      return res.ok({
+        source: 'open_library',
+        title: info.title || '',
+        author: info.authors?.map(a => a.name).join(', ') || '',
+        publisher: info.publishers?.map(p => p.name).join(', ') || '',
+        publication_year: info.publish_date ? parseInt(info.publish_date.match(/\d{4}/)?.[0], 10) || null : null,
+        cover_image_url: info.cover?.large || info.cover?.medium || info.cover?.small || '',
+        description: info.notes || ''
+      });
+    }
+
+    // 2. Fallback to Google Books
+    const googleBooksUrl = `https://www.googleapis.com/books/v1/volumes?q=isbn:${cleanIsbn}`;
+    const gData = await httpGetJson(googleBooksUrl).catch(err => {
+      console.error('[Lookup] GoogleBooks error:', err.message);
+      return null;
+    });
+
+    if (gData && gData.items && gData.items.length > 0) {
+      const info = gData.items[0].volumeInfo;
+      return res.ok({
+        source: 'google_books',
+        title: info.title || '',
+        author: info.authors?.join(', ') || '',
+        publisher: info.publisher || '',
+        publication_year: info.publishedDate ? parseInt(info.publishedDate.match(/\d{4}/)?.[0], 10) || null : null,
+        cover_image_url: info.imageLinks?.thumbnail || '',
+        description: info.description || ''
+      });
+    }
+
+    return res.fail('No book found for this ISBN. You can still enter details manually.', [], 404);
+  } catch (err) {
     next(err);
   }
 };

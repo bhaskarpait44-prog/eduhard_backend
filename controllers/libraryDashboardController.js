@@ -29,7 +29,7 @@ exports.getDashboardStats = async (req, res, next) => {
       JOIN library_books lb ON lb.id = li.book_id
       LEFT JOIN students s ON s.id = li.borrower_id AND li.borrower_type = 'student'
       LEFT JOIN users u ON u.id = li.borrower_id AND li.borrower_type = 'staff'
-      WHERE li.school_id = :schoolId
+      WHERE li.school_id = :schoolId AND li.status IN ('issued', 'overdue')
       ORDER BY li.issue_date DESC
       LIMIT 5
     `, { replacements: { schoolId } });

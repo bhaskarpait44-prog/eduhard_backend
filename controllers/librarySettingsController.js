@@ -25,6 +25,17 @@ exports.updateSettings = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const { fine_per_day, max_books_per_borrower, max_issue_days } = req.body;
 
+    // Validate settings values
+    if (!fine_per_day || parseFloat(fine_per_day) <= 0) {
+      return res.fail('Fine per day must be a positive number.', [], 400);
+    }
+    if (!max_books_per_borrower || parseInt(max_books_per_borrower) < 1) {
+      return res.fail('Max books per borrower must be at least 1.', [], 400);
+    }
+    if (!max_issue_days || parseInt(max_issue_days) < 1) {
+      return res.fail('Max issue days must be at least 1.', [], 400);
+    }
+
     const [[existing]] = await sequelize.query(`
       SELECT id FROM library_settings WHERE school_id = :schoolId
     `, { replacements: { schoolId } });

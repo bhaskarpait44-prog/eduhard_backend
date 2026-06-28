@@ -4,7 +4,7 @@ const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
 const { requireAdmin, requireRole } = require('../middlewares/auth');
-const requireAdminOrTeacherOrAccountant = requireRole('admin', 'teacher', 'accountant');
+const requireAdminOrTeacherOrAccountant = requireRole('admin', 'teacher', 'accountant', 'librarian', 'receptionist', 'student', 'parent');
 const ctrl     = require('../controllers/sessionController');
 
 router.post('/',                requireAdmin, [
