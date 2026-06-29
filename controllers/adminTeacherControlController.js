@@ -711,6 +711,33 @@ exports.createTimetableSlot = async (req, res, next) => {
       return res.fail('The selected teacher is not actively assigned to this subject for the chosen class and section.', [], 422);
     }
 
+    // Check if teacher is already allocated to another slot on this day and period
+    const [[teacherConflict]] = await sequelize.query(`
+      SELECT ts.id, c.name AS class_name, sec.name AS section_name, CONCAT(t.first_name, ' ', t.last_name) AS teacher_name
+      FROM timetable_slots ts
+      JOIN classes c ON c.id = ts.class_id
+      JOIN sections sec ON sec.id = ts.section_id
+      JOIN teachers t ON t.id = ts.teacher_id
+      WHERE ts.session_id = :sessionId
+        AND ts.teacher_id = :teacherId
+        AND ts.day_of_week = :dayOfWeek
+        AND ts.period_number = :periodNumber
+        AND ts.is_active = true
+      LIMIT 1;
+    `, {
+      replacements: {
+        sessionId: session?.id || 0,
+        teacherId: teacher_id,
+        dayOfWeek: day_of_week,
+        periodNumber: Number(period_number),
+      }
+    });
+
+    if (teacherConflict) {
+      const formattedDay = day_of_week.charAt(0).toUpperCase() + day_of_week.slice(1);
+      return res.fail(`Teacher ${teacherConflict.teacher_name} is already scheduled for Period ${period_number} on ${formattedDay} in Class ${teacherConflict.class_name} ${teacherConflict.section_name}.`, [], 422);
+    }
+
     const [[slot]] = await sequelize.query(`
       INSERT INTO timetable_slots (
         session_id, class_id, section_id, teacher_id, subject_id, day_of_week,
@@ -844,6 +871,37 @@ exports.updateTimetableSlot = async (req, res, next) => {
       if (!assignment) {
         return res.fail('The teacher is not actively assigned to this subject for the chosen class and section.', [], 422);
       }
+    }
+
+    // Check if teacher is already allocated to another slot on this day and period
+    const [[teacherConflict]] = await sequelize.query(`
+      SELECT ts.id, c.name AS class_name, sec.name AS section_name, CONCAT(t.first_name, ' ', t.last_name) AS teacher_name
+      FROM timetable_slots ts
+      JOIN classes c ON c.id = ts.class_id
+      JOIN sections sec ON sec.id = ts.section_id
+      JOIN teachers t ON t.id = ts.teacher_id
+      WHERE ts.session_id = :sessionId
+        AND ts.teacher_id = :teacherId
+        AND ts.day_of_week = :dayOfWeek
+        AND ts.period_number = :periodNumber
+        AND ts.is_active = true
+        AND ts.id <> :slotId
+      LIMIT 1;
+    `, {
+      replacements: {
+        sessionId: slot.session_id,
+        teacherId: finalTeacherId,
+        dayOfWeek: finalDayOfWeek,
+        periodNumber: Number(req.body.period_number !== undefined ? req.body.period_number : slot.period_number),
+        slotId: Number(id),
+      }
+    });
+
+    if (teacherConflict) {
+      const targetDay = finalDayOfWeek;
+      const formattedDay = targetDay.charAt(0).toUpperCase() + targetDay.slice(1);
+      const targetPeriod = req.body.period_number !== undefined ? req.body.period_number : slot.period_number;
+      return res.fail(`Teacher ${teacherConflict.teacher_name} is already scheduled for Period ${targetPeriod} on ${formattedDay} in Class ${teacherConflict.class_name} ${teacherConflict.section_name}.`, [], 422);
     }
 
     const setClause = updates.map((field) => `${field} = :${field}`).join(', ');
