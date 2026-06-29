@@ -248,9 +248,24 @@ exports.getResults = async (req, res, next) => {
 exports.getReportCardData = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
+    const { exam_id } = req.query;
     const schoolId = req.user.school_id;
 
-    // 0. Fetch Final Result
+    // 0. Fetch/Check Exam if exam_id is supplied
+    let examInfo = null;
+    if (exam_id) {
+      const [[examCheck]] = await sequelize.query(`
+        SELECT id, name, session_id, class_id, start_date, publish_controls
+        FROM exams
+        WHERE id = :exam_id LIMIT 1;
+      `, { replacements: { exam_id: Number(exam_id) } });
+      examInfo = examCheck;
+      if (!examInfo) {
+        return res.fail('Selected exam not found.', [], 404);
+      }
+    }
+
+    // 0a. Fetch Final Result (checks both existence and release flag)
     const [[finalResult]] = await sequelize.query(`
       SELECT sr.release_result, sr.total_marks, sr.marks_obtained, sr.percentage, sr.grade, sr.result, sr.grace_marks_info
       FROM student_results sr
@@ -259,13 +274,8 @@ exports.getReportCardData = async (req, res, next) => {
       LIMIT 1;
     `, { replacements: { enrollment_id, schoolId } });
 
-    if (!finalResult) {
+    if (!exam_id && !finalResult) {
       return res.fail('Result not yet calculated for this student or access denied.', [], 400);
-    }
-
-    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
-    if (isUserRestricted && !finalResult.release_result) {
-      return res.fail('Result not yet released or access denied.', [], 403);
     }
 
     // 1. Fetch Enrollment, Student, School, Session
@@ -292,19 +302,77 @@ exports.getReportCardData = async (req, res, next) => {
     if (!data) return res.fail('Enrollment not found.', [], 404);
 
     // 2. Fetch Subject Results
-    const [subjectResults] = await sequelize.query(`
-      SELECT 
-        sub.name AS subject, sub.code,
-        er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
-        es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks
-      FROM exam_results er
-      JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
-      JOIN subjects sub ON sub.id = er.subject_id
-      JOIN exams e ON e.id = er.exam_id
-      WHERE er.enrollment_id = :enrollment_id
-        AND e.exam_type != 'compartment'
-      ORDER BY sub.order_number;
-    `, { replacements: { enrollment_id } });
+    let subjectResultsQuery;
+    let replacements = { enrollment_id };
+
+    if (exam_id) {
+      subjectResultsQuery = `
+        SELECT 
+          sub.name AS subject, sub.code,
+          er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
+          es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks,
+          es.combined_passing_marks AS passing_marks
+        FROM exam_results er
+        JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
+        JOIN subjects sub ON sub.id = er.subject_id
+        WHERE er.enrollment_id = :enrollment_id
+          AND er.exam_id = :exam_id
+        ORDER BY sub.order_number;
+      `;
+      replacements.exam_id = Number(exam_id);
+    } else {
+      subjectResultsQuery = `
+        SELECT 
+          sub.name AS subject, sub.code,
+          er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
+          es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks
+        FROM exam_results er
+        JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
+        JOIN subjects sub ON sub.id = er.subject_id
+        JOIN exams e ON e.id = er.exam_id
+        WHERE er.enrollment_id = :enrollment_id
+          AND e.exam_type != 'compartment'
+        ORDER BY sub.order_number;
+      `;
+    }
+
+    const [subjectResults] = await sequelize.query(subjectResultsQuery, { replacements });
+
+    // Calculate dynamic Final Result object if exam_id query param is supplied
+    let finalResultData;
+    if (exam_id) {
+      const totalObtained = subjectResults.reduce((sum, row) => sum + (row.is_absent ? 0 : Number(row.marks_obtained || 0)), 0);
+      const totalMax = subjectResults.reduce((sum, row) => sum + Number(row.total_marks || 0), 0);
+      const percentage = totalMax > 0 ? Number(((totalObtained / totalMax) * 100).toFixed(2)) : 0;
+      
+      let grade = 'F';
+      if (percentage >= 90) grade = 'A+';
+      else if (percentage >= 80) grade = 'A';
+      else if (percentage >= 70) grade = 'B';
+      else if (percentage >= 60) grade = 'C';
+      else if (percentage >= 50) grade = 'D';
+
+      const failedCount = subjectResults.filter(
+        (er) => er.is_absent || Number(er.marks_obtained || 0) < Number(er.passing_marks || 0)
+      ).length;
+      const result = failedCount === 0 ? 'pass' : failedCount <= 2 ? 'compartment' : 'fail';
+
+      finalResultData = {
+        release_result: examInfo?.publish_controls?.results_published === true,
+        total_marks: totalMax,
+        marks_obtained: totalObtained,
+        percentage,
+        grade,
+        result
+      };
+    } else {
+      finalResultData = finalResult;
+    }
+
+    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
+    if (isUserRestricted && !finalResultData.release_result) {
+      return res.fail('Result not yet released or access denied.', [], 403);
+    }
 
     // 3. Fetch Attendance
     const { getAttendancePercent } = require('../utils/attendanceCalculator');
@@ -347,8 +415,9 @@ exports.getReportCardData = async (req, res, next) => {
       },
       results: subjectResults,
       attendance,
-      finalResult,
-      remarks: remarks[0]?.remark_text || 'Satisfactory performance. Keep it up.'
+      finalResult: finalResultData,
+      remarks: remarks[0]?.remark_text || 'Satisfactory performance. Keep it up.',
+      exam_name: examInfo?.name || null
     });
   } catch (err) { next(err); }
 };
