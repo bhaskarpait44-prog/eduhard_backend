@@ -232,7 +232,7 @@ exports.getApplicationStatus = async (req, res, next) => {
 exports.checkUniqueness = async (req, res, next) => {
   try {
     const { field, value, excludeStudentId } = req.query;
-    const schoolId = req.query.school_id || 1;
+    const schoolId = req.user.school_id;
 
     if (!field || !value) {
       return res.fail('Field and value are required.', [], 422);

@@ -246,15 +246,32 @@ exports.admit = async (req, res, next) => {
       return res.fail('Emergency contact is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.', [], 422);
     }
 
-    const fatherPhone = profile?.father_phone;
-    if (!fatherPhone?.trim()) {
-      return res.fail("Father's phone is required.", [], 422);
-    }
-    if (!/^[6-9]\d{9}$/.test(fatherPhone.trim())) {
+    const fatherName = profile?.father_name?.trim();
+    const fatherPhone = profile?.father_phone?.trim();
+    const motherName = profile?.mother_name?.trim();
+    const motherPhone = profile?.mother_phone?.trim();
+    const guardianName = profile?.guardian_name?.trim();
+    const guardianPhone = profile?.guardian_phone?.trim();
+
+    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
       return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
+    if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
+      return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+    if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
+      return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
 
-    const phoneFields = ['phone', 'mother_phone', 'guardian_phone'];
+    const hasFather = fatherName && fatherPhone;
+    const hasMother = motherName && motherPhone;
+    const hasGuardian = guardianName && guardianPhone;
+
+    if (!hasFather && !hasMother && !hasGuardian) {
+      return res.fail("At least one parent or guardian details (Name and Phone) must be fully provided.", [], 422);
+    }
+
+    const phoneFields = ['phone'];
     for (const field of phoneFields) {
       const val = profile?.[field];
       if (val && val.trim() !== '' && !/^[6-9]\d{9}$/.test(val.trim())) {
@@ -264,17 +281,24 @@ exports.admit = async (req, res, next) => {
 
     // Prevent student email and parent email being identical
     const studentEmail = profile?.email?.trim().toLowerCase();
-    const parentEmailCheck = (profile?.father_email || profile?.mother_email || profile?.email || profile?.parent_email)?.trim().toLowerCase();
+    const parentEmailCheck = (profile?.parent_email || profile?.father_email || profile?.mother_email || profile?.email)?.trim().toLowerCase();
     if (studentEmail && parentEmailCheck && studentEmail === parentEmailCheck)
       return res.fail('Student email and parent email cannot be the same address.', [], 422);
 
     const schoolId = req.user.school_id;
     const parentEmail = parentEmailCheck;
-    const parentName = profile?.father_name || profile?.mother_name || `${last_name} Family`;
-    const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.phone;
+    const parentName = profile?.father_name || profile?.mother_name || profile?.guardian_name || `${last_name} Family`;
+    const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.guardian_phone || profile?.phone;
 
     if (!parentEmail) {
       return res.fail('Parent email is required for account creation.', [], 422);
+    }
+
+    if (password && password.length < 8) {
+      return res.fail('Student password must be at least 8 characters long.', [], 422);
+    }
+    if (parent_password && parent_password.length < 8) {
+      return res.fail('Parent password must be at least 8 characters long.', [], 422);
     }
 
     const generatedPassword = password || generateStudentPassword();
@@ -296,14 +320,6 @@ exports.admit = async (req, res, next) => {
         { field: 'aadhar_no', label: 'Aadhar Card No.', table: 'students', isProfile: false },
         { field: 'phone', label: 'Student Phone Number', table: 'student_profiles', isProfile: true },
         { field: 'email', label: 'Student email', table: 'student_profiles', isProfile: true },
-        { field: 'mother_email', label: 'Mother email', table: 'student_profiles', isProfile: true },
-        { field: 'parent_email', label: 'Father email', table: 'student_profiles', isProfile: true },
-        { field: 'mother_aadhar', label: 'Mother Aadhar', table: 'student_profiles', isProfile: true },
-        { field: 'father_aadhar', label: 'Father Aadhar', table: 'student_profiles', isProfile: true },
-        { field: 'father_phone', label: 'Father Phone Number', table: 'student_profiles', isProfile: true },
-        { field: 'mother_phone', label: 'Mother Phone Number', table: 'student_profiles', isProfile: true },
-        { field: 'guardian_phone', label: 'Guardian Phone Number', table: 'student_profiles', isProfile: true },
-        { field: 'guardian_aadhar', label: 'Guardian Aadhar Number', table: 'student_profiles', isProfile: true },
       ];
 
       for (const item of uniqueFieldsToCheck) {
@@ -1292,16 +1308,40 @@ exports.updateProfile = async (req, res, next) => {
       }
     }
 
-    if (newData.father_phone !== undefined) {
-      if (!newData.father_phone?.trim()) {
-        return res.fail("Father's phone is required.", [], 422);
-      }
-      if (!/^[6-9]\d{9}$/.test(newData.father_phone.trim())) {
-        return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-      }
+    // Relax father's phone validation during update profile.
+    // First, fetch current profile to perform mutual validation on merged values
+    const [[currentProfile]] = await sequelize.query(`
+      SELECT * FROM student_profiles WHERE student_id = :id AND is_current = true LIMIT 1;
+    `, { replacements: { id } });
+
+    const mergedProfile = { ...currentProfile, ...newData };
+
+    const fatherName = mergedProfile.father_name?.trim();
+    const fatherPhone = mergedProfile.father_phone?.trim();
+    const motherName = mergedProfile.mother_name?.trim();
+    const motherPhone = mergedProfile.mother_phone?.trim();
+    const guardianName = mergedProfile.guardian_name?.trim();
+    const guardianPhone = mergedProfile.guardian_phone?.trim();
+
+    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
+      return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+    if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
+      return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+    if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
+      return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
 
-    const phoneFields = ['phone', 'mother_phone', 'guardian_phone'];
+    const hasFather = fatherName && fatherPhone;
+    const hasMother = motherName && motherPhone;
+    const hasGuardian = guardianName && guardianPhone;
+
+    if (!hasFather && !hasMother && !hasGuardian) {
+      return res.fail("At least one parent or guardian details (Name and Phone) must be fully provided.", [], 422);
+    }
+
+    const phoneFields = ['phone'];
     for (const field of phoneFields) {
       const val = newData[field];
       if (val !== undefined && val !== null && String(val).trim() !== '') {
@@ -1338,14 +1378,6 @@ exports.updateProfile = async (req, res, next) => {
         { field: 'aadhar_no', label: 'Aadhar Card No.', table: 'students', isProfile: false, val: aadhar_no },
         { field: 'phone', label: 'Student Phone Number', table: 'student_profiles', isProfile: true, val: newData.phone },
         { field: 'email', label: 'Student email', table: 'student_profiles', isProfile: true, val: newData.email },
-        { field: 'mother_email', label: 'Mother email', table: 'student_profiles', isProfile: true, val: newData.mother_email },
-        { field: 'parent_email', label: 'Father email', table: 'student_profiles', isProfile: true, val: newData.parent_email },
-        { field: 'mother_aadhar', label: 'Mother Aadhar', table: 'student_profiles', isProfile: true, val: newData.mother_aadhar },
-        { field: 'father_aadhar', label: 'Father Aadhar', table: 'student_profiles', isProfile: true, val: newData.father_aadhar },
-        { field: 'father_phone', label: 'Father Phone Number', table: 'student_profiles', isProfile: true, val: newData.father_phone },
-        { field: 'mother_phone', label: 'Mother Phone Number', table: 'student_profiles', isProfile: true, val: newData.mother_phone },
-        { field: 'guardian_phone', label: 'Guardian Phone Number', table: 'student_profiles', isProfile: true, val: newData.guardian_phone },
-        { field: 'guardian_aadhar', label: 'Guardian Aadhar Number', table: 'student_profiles', isProfile: true, val: newData.guardian_aadhar },
       ];
 
       for (const item of uniqueFieldsToCheck) {
