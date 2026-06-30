@@ -91,8 +91,10 @@ async function nextRollNumber(sectionId, sessionId, transaction) {
     transaction,
   });
 
-  return `R${String(Number(row?.max_roll || 0) + 1).padStart(3, '0')}`;
+  return String(Number(row?.max_roll || 0) + 1);
 }
+exports.nextRollNumber = nextRollNumber;
+
 
 function normalizePromotionOutcome(result) {
   const normalized = String(result || '').trim().toLowerCase();
@@ -114,58 +116,53 @@ exports.enroll = async (req, res, next) => {
       return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
     }
 
-    // Check if student is already enrolled in this session
-    const [[existingEnrollment]] = await sequelize.query(`
-      SELECT id FROM enrollments 
-      WHERE student_id = :student_id 
-        AND session_id = :session_id 
-        AND status = 'active'
-      LIMIT 1;
-    `, { replacements: { student_id, session_id } });
-
-    if (existingEnrollment) {
-      return res.fail('Student is already enrolled in an active class for this session.', [], 409);
-    }
-
-    // Check section capacity
-    const [[capacityCheck]] = await sequelize.query(`
-      SELECT sec.capacity,
-             COUNT(e.id) AS current_count
-      FROM sections sec
-      LEFT JOIN enrollments e ON e.section_id = sec.id
-        AND e.session_id = :session_id AND e.status = 'active'
-      WHERE sec.id = :section_id
-      GROUP BY sec.capacity;
-    `, { replacements: { section_id, session_id } });
-
-    if (capacityCheck && parseInt(capacityCheck.current_count) >= capacityCheck.capacity) {
-      return res.fail(`Section is at full capacity (${capacityCheck.capacity} students).`);
-    }
-
-    // Auto-assign roll number if not provided
-    let finalRollNumber = roll_number?.trim();
-    if (!finalRollNumber) {
-      const [[maxRoll]] = await sequelize.query(`
-        SELECT MAX(CAST(roll_number AS INTEGER)) AS max_roll
-        FROM enrollments
-        WHERE section_id = :section_id
-          AND session_id = :session_id
+    const enrollment = await sequelize.transaction(async (t) => {
+      // Check if student is already enrolled in this session
+      const [[existingEnrollment]] = await sequelize.query(`
+        SELECT id FROM enrollments 
+        WHERE student_id = :student_id 
+          AND session_id = :session_id 
           AND status = 'active'
-          AND roll_number ~ '^\\d+$';
-      `, { replacements: { section_id, session_id } });
+        LIMIT 1;
+      `, { replacements: { student_id, session_id }, transaction: t });
 
-      finalRollNumber = String((parseInt(maxRoll?.max_roll) || 0) + 1);
-    }
+      if (existingEnrollment) {
+        throw Object.assign(new Error('Student is already enrolled in an active class for this session.'), { status: 409 });
+      }
 
-    const [[enrollment]] = await sequelize.query(`
-      INSERT INTO enrollments
-        (student_id, session_id, class_id, section_id, stream, roll_number, joined_date,
-         joining_type, left_date, leaving_type, previous_enrollment_id, status, created_at, updated_at)
-      VALUES
-        (:student_id, :session_id, :class_id, :section_id, :stream, :roll_number, :joined_date,
-         :joining_type, NULL, NULL, NULL, 'active', NOW(), NOW())
-      RETURNING id, student_id, session_id, class_id, section_id, stream, roll_number, joining_type, status;
-    `, { replacements: { student_id, session_id, class_id, section_id, stream: normalizedStream, roll_number: finalRollNumber, joined_date, joining_type } });
+      // Check section capacity
+      const [[capacityCheck]] = await sequelize.query(`
+        SELECT sec.capacity,
+               COUNT(e.id) AS current_count
+        FROM sections sec
+        LEFT JOIN enrollments e ON e.section_id = sec.id
+          AND e.session_id = :session_id AND e.status = 'active'
+        WHERE sec.id = :section_id
+        GROUP BY sec.capacity;
+      `, { replacements: { section_id, session_id }, transaction: t });
+
+      if (capacityCheck && parseInt(capacityCheck.current_count) >= capacityCheck.capacity) {
+        throw Object.assign(new Error(`Section is at full capacity (${capacityCheck.capacity} students).`), { status: 409 });
+      }
+
+      // Auto-assign roll number if not provided
+      let finalRollNumber = roll_number?.trim();
+      if (!finalRollNumber) {
+        finalRollNumber = await nextRollNumber(section_id, session_id, t);
+      }
+
+      const [[newEnrollment]] = await sequelize.query(`
+        INSERT INTO enrollments
+          (student_id, session_id, class_id, section_id, stream, roll_number, joined_date,
+           joining_type, left_date, leaving_type, previous_enrollment_id, status, created_at, updated_at)
+        VALUES
+          (:student_id, :session_id, :class_id, :section_id, :stream, :roll_number, :joined_date,
+           :joining_type, NULL, NULL, NULL, 'active', NOW(), NOW())
+        RETURNING id, student_id, session_id, class_id, section_id, stream, roll_number, joining_type, status;
+      `, { replacements: { student_id, session_id, class_id, section_id, stream: normalizedStream, roll_number: finalRollNumber, joined_date, joining_type }, transaction: t });
+
+      return newEnrollment;
+    });
 
     await writeAuditLog(sequelize, {
       tableName: 'enrollments',
@@ -177,11 +174,14 @@ exports.enroll = async (req, res, next) => {
       deviceInfo: req.headers['user-agent']
     });
 
-    res.ok(enrollment, 'Student enrolled successfully.', 201);
     invalidateCache(req.user.school_id, '/api/enrollments*');
     invalidateCache(req.user.school_id, '/api/students*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
-  } catch (err) { next(err); }
+    res.ok(enrollment, 'Student enrolled successfully.', 201);
+  } catch (err) {
+    if (err.status) return res.fail(err.message, [], err.status);
+    next(err);
+  }
 };
 
 // ── GET /api/enrollments/:id ──────────────────────────────────────────────────

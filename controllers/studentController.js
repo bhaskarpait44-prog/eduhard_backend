@@ -468,6 +468,10 @@ exports.admit = async (req, res, next) => {
       return { student, parentAccountCreated, generatedParentPassword, parentEmail };
     });
 
+    // Invalidate student list cache (before response)
+    invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/dashboard*');
+
     res.ok({
       ...result.student,
       login_credentials: {
@@ -483,10 +487,6 @@ exports.admit = async (req, res, next) => {
         }
       },
     }, 'Student admitted and parent account linked/created successfully.', 201);
-
-    // Invalidate student list cache
-    invalidateCache(schoolId, '/api/students*');
-    invalidateCache(schoolId, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -1107,6 +1107,7 @@ exports.getById = async (req, res, next) => {
         e.section_id,
         e.session_id,
         e.stream,
+        e.joining_type,
         ${classLabelSelect} AS class,
         sec.name AS section,
         e.roll_number,
@@ -1138,13 +1139,22 @@ exports.getById = async (req, res, next) => {
       ORDER BY created_at DESC;
     `, { replacements: { id } });
 
+    // Fetch previous academic records
+    const [previous_academic_records] = await sequelize.query(`
+      SELECT school_name, location, class_name, year_of_study, percentage_grade
+      FROM student_previous_academic_records
+      WHERE student_id = :id
+      ORDER BY year_of_study DESC;
+    `, { replacements: { id } });
+
     res.ok({ 
       ...student, 
       is_online, 
       current_enrollment: enrollment || null,
       siblings,
       library_issues: libraryIssues,
-      documents
+      documents,
+      previous_academic_records,
     }, 'Student retrieved.');
   } catch (err) { next(err); }
 };

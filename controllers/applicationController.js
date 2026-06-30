@@ -8,6 +8,8 @@ const { escapeHtml } = require('../utils/helpers');
 const profileVersioning = require('../utils/profileVersioning');
 const { generateStudentPassword } = require('../utils/studentCredentials');
 const { invalidateCache } = require('../middlewares/cache');
+const { nextRollNumber } = require('./enrollmentController');
+
 
 // ── GET /api/applications ────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
@@ -159,6 +161,9 @@ exports.getNextAdmissionNumber = async (req, res, next) => {
     res.ok({ next_admission_no: `${prefix}${nextNum}` });
   } catch (err) { next(err); }
 };
+
+// ── POST /api/public/applications ───────────────────────────────────────────
+// (defined in publicController.js — this is a placeholder reference comment)
 
 // ── PATCH /api/applications/:id/status ────────────────────────────────────────
 exports.updateStatus = async (req, res, next) => {
@@ -373,30 +378,40 @@ exports.admitStudent = async (req, res, next) => {
         transaction: t,
       });
 
-      // 4. Enrollment
+      // 4a. Section capacity check (soft — frontend may have set override flag)
+      const [[capacityCheck]] = await sequelize.query(`
+        SELECT sec.capacity, COUNT(e.id)::int AS current_count
+        FROM sections sec
+        LEFT JOIN enrollments e ON e.section_id = sec.id
+          AND e.session_id = :sessionId AND e.status = 'active'
+        WHERE sec.id = :sectionId
+        GROUP BY sec.capacity;
+      `, { replacements: { sectionId: section_id, sessionId: application.session_id }, transaction: t });
+
+      if (capacityCheck && capacityCheck.current_count >= capacityCheck.capacity && !req.body.override_capacity) {
+        throw Object.assign(
+          new Error(`Section is at full capacity (${capacityCheck.capacity} students). Send override_capacity=true to admit anyway.`),
+          { status: 409, capacityWarning: true }
+        );
+      }
+
+      // 4b. Enrollment insert
       let rollNo = roll_number;
       if (!rollNo) {
-        const [[maxRoll]] = await sequelize.query(`
-          SELECT MAX(CAST(roll_number AS INTEGER)) AS max_roll
-          FROM enrollments
-          WHERE section_id = :section_id
-            AND session_id = :sessionId
-            AND status = 'active'
-            AND roll_number ~ '^\\d+$';
-        `, { 
-          replacements: { section_id, sessionId: application.session_id },
-          transaction: t
-        });
-        rollNo = String((parseInt(maxRoll?.max_roll) || 0) + 1);
+        rollNo = await nextRollNumber(section_id, application.session_id, t);
       }
 
       const joiningTypeMap = {
         'New Admission': 'fresh',
-        'Transfer': 'transfer_in',
-        'Re-admission': 're_admission',
-        'Lateral Entry': 'lateral_entry'
+        'Transfer':      'transfer_in',
+        'Re-admission':  'rejoined',
+        'Lateral Entry': 'fresh',
       };
+      const VALID_JOINING_TYPES = ['fresh', 'promoted', 'failed', 'transfer_in', 'rejoined'];
       const mappedJoiningType = joiningTypeMap[joining_type] || 'fresh';
+      if (!VALID_JOINING_TYPES.includes(mappedJoiningType)) {
+        throw Object.assign(new Error(`Invalid joining type: "${joining_type}". Must be one of: New Admission, Transfer, Re-admission, Lateral Entry.`), { status: 422 });
+      }
       const mappedStream = (stream || 'regular').toLowerCase();
 
       await sequelize.query(`
@@ -419,7 +434,36 @@ exports.admitStudent = async (req, res, next) => {
         transaction: t,
       });
 
-      // 5. Previous Academic Records
+      // 5. Profile versioning (Critical fix — was silently skipped before)
+      await profileVersioning.create({
+        studentId   : student.id,
+        data        : {
+          ...profile,
+          email       : studentEmail,
+          parent_email: parentEmail,
+        },
+        changedBy   : req.user.id,
+        changeReason: 'Initial profile created on admission from online application',
+        transaction : t,
+      });
+
+      // 6. Link uploaded application documents into student_documents
+      const appDocs = data.documents || {};
+      const docEntries = Object.entries(appDocs).filter(([, filePath]) => filePath);
+      if (docEntries.length > 0) {
+        const docRows = docEntries.map(([key, filePath]) => ({
+          student_id   : student.id,
+          name         : key.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          document_type: key,
+          file_path    : filePath,
+          file_size    : null,
+          created_at   : new Date(),
+          updated_at   : new Date(),
+        }));
+        await sequelize.getQueryInterface().bulkInsert('student_documents', docRows, { transaction: t });
+      }
+
+      // 7. Previous Academic Records
       if (Array.isArray(previous_academic_records) && previous_academic_records.length > 0) {
         const records = previous_academic_records.map(r => ({
           student_id: student.id,
@@ -502,7 +546,9 @@ exports.admitStudent = async (req, res, next) => {
     res.ok(result, 'Student admitted successfully.');
 
   } catch (err) {
-    if (err.name === 'CustomError') return res.fail(err.message, [], err.status || 400);
+    if (err.capacityWarning) {
+      return res.fail(err.message, [{ capacityWarning: true }], 409);
+    }
     next(err);
   }
 };

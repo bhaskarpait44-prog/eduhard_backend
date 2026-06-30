@@ -58,7 +58,7 @@ router.get('/import/:jobId/status', requirePermission('students.create'), ctrl.g
 
 router.get('/bulk/id-cards/data', requireRole('admin', 'teacher', 'receptionist', 'librarian'), ctrl.getBulkIdCardsData);
 
-router.post('/',                  requireAdmin, upload.fields([
+router.post('/',                  requirePermission('students.create'), upload.fields([
   { name: 'photo', maxCount: 1 },
   { name: 'birth_certificate', maxCount: 1 },
   { name: 'transfer_certificate', maxCount: 1 },

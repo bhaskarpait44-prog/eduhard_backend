@@ -40,7 +40,7 @@ exports.getClasses = async (req, res, next) => {
 };
 
 // ── POST /api/applications ───────────────────────────────────────────────────
-exports.createApplication = async (req, res, next) => {
+exports.createApplication = async (req, res, next, _attempt = 0) => {
   try {
     // When using multer (multipart/form-data), fields might be strings
     const body = req.body;
@@ -90,8 +90,16 @@ exports.createApplication = async (req, res, next) => {
       return res.fail('An active application already exists for this student.', [], 409);
     }
 
-    // Resolve school_id safely. 
-    const schoolId = 1; 
+    // Resolve school_id from query or body; default to 1 for single-school deployments
+    const schoolId = parseInt(req.query.school_id || req.body.school_id || 1, 10);
+
+    // Validate class_id belongs to this school
+    const [[classCheck]] = await sequelize.query(`
+      SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId AND is_active = true AND is_deleted = false LIMIT 1;
+    `, { replacements: { classId: class_id, schoolId } });
+    if (!classCheck) {
+      return res.fail('The selected class does not belong to this school or is not available.', [], 422);
+    }
 
     // ... existing school/session checks ...
     const [[school]] = await sequelize.query(`
@@ -172,8 +180,10 @@ exports.createApplication = async (req, res, next) => {
     res.ok(application, 'Application submitted successfully.', 201);
   } catch (err) {
     if (err.name === 'SequelizeUniqueConstraintError' || (err.parent && err.parent.code === '23505')) {
-       // Retry once if reference_no collided (unlikely)
-       return exports.createApplication(req, res, next);
+      if (_attempt < 2) {
+        return exports.createApplication(req, res, next, _attempt + 1);
+      }
+      return res.fail('Could not generate a unique reference number. Please try again.', [], 500);
     }
     next(err);
   }
