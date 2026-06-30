@@ -217,3 +217,64 @@ exports.getApplicationStatus = async (req, res, next) => {
     });
   } catch (err) { next(err); }
 };
+
+// ── GET /api/public/check-uniqueness ──────────────────────────────────────────
+exports.checkUniqueness = async (req, res, next) => {
+  try {
+    const { field, value, excludeStudentId } = req.query;
+    const schoolId = req.query.school_id || 1;
+
+    if (!field || !value) {
+      return res.fail('Field and value are required.', [], 422);
+    }
+
+    const allowedFields = [
+      'aadhar_no', 'phone', 'email', 'parent_email', 'father_phone', 
+      'mother_phone', 'guardian_phone', 'mother_email', 'father_aadhar', 
+      'mother_aadhar', 'guardian_aadhar', 'admission_no'
+    ];
+
+    if (!allowedFields.includes(field)) {
+      return res.fail('Invalid field for uniqueness check.', [], 422);
+    }
+
+    const cleanVal = value.trim();
+    if (cleanVal === '') {
+      return res.ok({ isUnique: true });
+    }
+
+    let query = '';
+    const replacements = { schoolId, val: cleanVal };
+
+    if (excludeStudentId) {
+      replacements.excludeId = parseInt(excludeStudentId, 10);
+    }
+
+    if (field === 'aadhar_no' || field === 'admission_no') {
+      query = `
+        SELECT id FROM students 
+        WHERE school_id = :schoolId 
+          AND is_deleted = false 
+          AND ${field} = :val
+          ${excludeStudentId ? 'AND id <> :excludeId' : ''}
+        LIMIT 1;
+      `;
+    } else {
+      query = `
+        SELECT sp.id 
+        FROM student_profiles sp
+        JOIN students s ON s.id = sp.student_id
+        WHERE s.school_id = :schoolId
+          AND s.is_deleted = false
+          AND sp.is_current = true
+          AND ${field === 'email' || field === 'parent_email' || field === 'mother_email' ? `LOWER(sp.${field}) = LOWER(:val)` : `sp.${field} = :val`}
+          ${excludeStudentId ? 'AND s.id <> :excludeId' : ''}
+        LIMIT 1;
+      `;
+    }
+
+    const [[conflict]] = await sequelize.query(query, { replacements });
+    res.ok({ isUnique: !conflict });
+  } catch (err) { next(err); }
+};
+

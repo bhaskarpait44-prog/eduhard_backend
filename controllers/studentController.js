@@ -254,7 +254,7 @@ exports.admit = async (req, res, next) => {
       return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
 
-    const phoneFields = ['phone', 'whatsapp_no', 'mother_phone', 'guardian_phone'];
+    const phoneFields = ['phone', 'mother_phone', 'guardian_phone'];
     for (const field of phoneFields) {
       const val = profile?.[field];
       if (val && val.trim() !== '' && !/^[6-9]\d{9}$/.test(val.trim())) {
@@ -291,19 +291,63 @@ exports.admit = async (req, res, next) => {
 
       if (existing) throw Object.assign(new Error('Admission number already exists.'), { status: 409 });
 
-      if (studentEmail) {
-        const [[emailInUse]] = await sequelize.query(`
-          SELECT sp.id
-          FROM student_profiles sp
-          JOIN students s ON s.id = sp.student_id
-          WHERE s.school_id = :schoolId
-            AND s.is_deleted = false
-            AND sp.is_current = true
-            AND LOWER(sp.email) = LOWER(:email)
-          LIMIT 1;
-        `, { replacements: { schoolId, email: studentEmail }, transaction: t });
+      // Uniqueness checks for multiple fields
+      const uniqueFieldsToCheck = [
+        { field: 'aadhar_no', label: 'Aadhar Card No.', table: 'students', isProfile: false },
+        { field: 'phone', label: 'Student Phone Number', table: 'student_profiles', isProfile: true },
+        { field: 'email', label: 'Student email', table: 'student_profiles', isProfile: true },
+        { field: 'mother_email', label: 'Mother email', table: 'student_profiles', isProfile: true },
+        { field: 'parent_email', label: 'Father email', table: 'student_profiles', isProfile: true },
+        { field: 'mother_aadhar', label: 'Mother Aadhar', table: 'student_profiles', isProfile: true },
+        { field: 'father_aadhar', label: 'Father Aadhar', table: 'student_profiles', isProfile: true },
+        { field: 'father_phone', label: 'Father Phone Number', table: 'student_profiles', isProfile: true },
+        { field: 'mother_phone', label: 'Mother Phone Number', table: 'student_profiles', isProfile: true },
+        { field: 'guardian_phone', label: 'Guardian Phone Number', table: 'student_profiles', isProfile: true },
+        { field: 'guardian_aadhar', label: 'Guardian Aadhar Number', table: 'student_profiles', isProfile: true },
+      ];
 
-        if (emailInUse) throw Object.assign(new Error('Student email already exists.'), { status: 409 });
+      for (const item of uniqueFieldsToCheck) {
+        let val;
+        if (item.isProfile) {
+          val = profile?.[item.field];
+        } else {
+          if (item.field === 'aadhar_no') val = aadhar_no;
+        }
+
+        if (val && String(val).trim() !== '') {
+          const cleanVal = String(val).trim();
+          let conflictFound = false;
+
+          if (item.isProfile) {
+            const query = `
+              SELECT sp.id 
+              FROM student_profiles sp
+              JOIN students s ON s.id = sp.student_id
+              WHERE s.school_id = :schoolId
+                AND s.is_deleted = false
+                AND sp.is_current = true
+                AND ${item.field === 'email' || item.field === 'parent_email' || item.field === 'mother_email' ? `LOWER(sp.${item.field}) = LOWER(:val)` : `sp.${item.field} = :val`}
+              LIMIT 1;
+            `;
+            const [[conflict]] = await sequelize.query(query, { replacements: { schoolId, val: cleanVal }, transaction: t });
+            if (conflict) conflictFound = true;
+          } else {
+            const query = `
+              SELECT id 
+              FROM students 
+              WHERE school_id = :schoolId 
+                AND is_deleted = false 
+                AND ${item.field} = :val
+              LIMIT 1;
+            `;
+            const [[conflict]] = await sequelize.query(query, { replacements: { schoolId, val: cleanVal }, transaction: t });
+            if (conflict) conflictFound = true;
+          }
+
+          if (conflictFound) {
+            throw Object.assign(new Error(`${item.label} already exists.`), { status: 409 });
+          }
+        }
       }
 
       // 2. Handle Parent User Account (Logic remains same)
@@ -606,7 +650,7 @@ exports.downloadAdmissionTemplate = async (req, res, next) => {
         { key: 'guardian_phone',  label: 'Guardian Phone',    example: '9876543210' },
         { key: 'address',         label: 'Address',           example: '123 Main St, Jorhat' },
         { key: 'blood_group',     label: 'Blood Group',       example: 'O+' },
-        { key: 'religion',        label: 'Religion',          example: 'Hindu' },
+        { key: 'religion',        label: 'Religion',          example: 'Hinduism' },
         { key: 'caste',           label: 'Caste',             example: 'General' },
         { key: 'previous_school', label: 'Previous School',   example: 'Little Angels' },
       ],
@@ -1007,11 +1051,10 @@ exports.getById = async (req, res, next) => {
              sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
              sp.mother_email AS mother_email,
              sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
-             sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
+             sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income, sp.mother_occupation,
              sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
-             sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
-             sp.parent_email AS parent_email, 
-             sp.whatsapp_no,
+             sp.guardian_occupation, sp.guardian_aadhar,
+             sp.parent_email AS parent_email,
              sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
              sp.identification_marks, sp.pen_no, sp.apaar_id,
              sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,
@@ -1248,7 +1291,7 @@ exports.updateProfile = async (req, res, next) => {
       }
     }
 
-    const phoneFields = ['phone', 'whatsapp_no', 'mother_phone', 'guardian_phone'];
+    const phoneFields = ['phone', 'mother_phone', 'guardian_phone'];
     for (const field of phoneFields) {
       const val = newData[field];
       if (val !== undefined && val !== null && String(val).trim() !== '') {
@@ -1280,6 +1323,60 @@ exports.updateProfile = async (req, res, next) => {
     if (!student) return res.fail('Student not found.', [], 404);
 
     const result = await sequelize.transaction(async (t) => {
+      // Uniqueness checks for multiple fields in updateProfile
+      const uniqueFieldsToCheck = [
+        { field: 'aadhar_no', label: 'Aadhar Card No.', table: 'students', isProfile: false, val: aadhar_no },
+        { field: 'phone', label: 'Student Phone Number', table: 'student_profiles', isProfile: true, val: newData.phone },
+        { field: 'email', label: 'Student email', table: 'student_profiles', isProfile: true, val: newData.email },
+        { field: 'mother_email', label: 'Mother email', table: 'student_profiles', isProfile: true, val: newData.mother_email },
+        { field: 'parent_email', label: 'Father email', table: 'student_profiles', isProfile: true, val: newData.parent_email },
+        { field: 'mother_aadhar', label: 'Mother Aadhar', table: 'student_profiles', isProfile: true, val: newData.mother_aadhar },
+        { field: 'father_aadhar', label: 'Father Aadhar', table: 'student_profiles', isProfile: true, val: newData.father_aadhar },
+        { field: 'father_phone', label: 'Father Phone Number', table: 'student_profiles', isProfile: true, val: newData.father_phone },
+        { field: 'mother_phone', label: 'Mother Phone Number', table: 'student_profiles', isProfile: true, val: newData.mother_phone },
+        { field: 'guardian_phone', label: 'Guardian Phone Number', table: 'student_profiles', isProfile: true, val: newData.guardian_phone },
+        { field: 'guardian_aadhar', label: 'Guardian Aadhar Number', table: 'student_profiles', isProfile: true, val: newData.guardian_aadhar },
+      ];
+
+      for (const item of uniqueFieldsToCheck) {
+        if (item.val !== undefined && item.val !== null && String(item.val).trim() !== '') {
+          const cleanVal = String(item.val).trim();
+          let conflictFound = false;
+
+          if (item.isProfile) {
+            const query = `
+              SELECT sp.id 
+              FROM student_profiles sp
+              JOIN students s ON s.id = sp.student_id
+              WHERE s.school_id = :schoolId
+                AND s.is_deleted = false
+                AND sp.is_current = true
+                AND s.id <> :studentId
+                AND ${item.field === 'email' || item.field === 'parent_email' || item.field === 'mother_email' ? `LOWER(sp.${item.field}) = LOWER(:val)` : `sp.${item.field} = :val`}
+              LIMIT 1;
+            `;
+            const [[conflict]] = await sequelize.query(query, { replacements: { schoolId: req.user.school_id, val: cleanVal, studentId: parseInt(id) }, transaction: t });
+            if (conflict) conflictFound = true;
+          } else {
+            const query = `
+              SELECT id 
+              FROM students 
+              WHERE school_id = :schoolId 
+                AND is_deleted = false 
+                AND id <> :studentId
+                AND ${item.field} = :val
+              LIMIT 1;
+            `;
+            const [[conflict]] = await sequelize.query(query, { replacements: { schoolId: req.user.school_id, val: cleanVal, studentId: parseInt(id) }, transaction: t });
+            if (conflict) conflictFound = true;
+          }
+
+          if (conflictFound) {
+            throw Object.assign(new Error(`${item.label} already exists.`), { status: 409 });
+          }
+        }
+      }
+
       // 1. Update Students table if identity fields provided
       const identityUpdates = {};
       if (first_name)    identityUpdates.first_name    = first_name;
@@ -1354,11 +1451,10 @@ exports.updateProfile = async (req, res, next) => {
                sp.father_name, sp.father_phone, sp.mother_name, sp.mother_phone,
                sp.mother_email AS mother_email,
                sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
-               sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income,
+               sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income, sp.mother_occupation,
                sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
-               sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_annual_income,
+               sp.guardian_occupation, sp.guardian_aadhar,
                sp.parent_email AS parent_email, 
-               sp.whatsapp_no,
                sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
                sp.identification_marks, sp.pen_no, sp.apaar_id,
                sp.is_hostel, sp.medium, sp.prev_attendance_days, sp.distance_km,

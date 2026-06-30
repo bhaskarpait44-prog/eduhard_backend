@@ -26,7 +26,6 @@ const StudentProfile = sequelize.define('StudentProfile', {
   police_station       : { type: DataTypes.STRING(150), allowNull: true },
   post_office          : { type: DataTypes.STRING(150), allowNull: true },
   district             : { type: DataTypes.STRING(100), allowNull: true },
-  whatsapp_no          : { type: DataTypes.STRING(20), allowNull: true },
   nationality          : { type: DataTypes.STRING(50), allowNull: true, defaultValue: 'Indian' },
   religion             : { type: DataTypes.STRING(50), allowNull: true },
   caste                : { type: DataTypes.ENUM('OBC', 'ST', 'SC', 'Gen'), allowNull: true },
@@ -46,6 +45,7 @@ const StudentProfile = sequelize.define('StudentProfile', {
   mother_qualification : { type: DataTypes.STRING(150), allowNull: true },
   mother_aadhar        : { type: DataTypes.STRING(20), allowNull: true },
   mother_annual_income : { type: DataTypes.STRING(50), allowNull: true },
+  mother_occupation    : { type: DataTypes.STRING(150), allowNull: true },
   
   guardian_name           : { type: DataTypes.STRING(150), allowNull: true },
   guardian_relation       : { type: DataTypes.STRING(50), allowNull: true },
@@ -53,7 +53,6 @@ const StudentProfile = sequelize.define('StudentProfile', {
   guardian_occupation     : { type: DataTypes.STRING(150), allowNull: true },
   guardian_qualification  : { type: DataTypes.STRING(150), allowNull: true },
   guardian_aadhar         : { type: DataTypes.STRING(20), allowNull: true },
-  guardian_annual_income  : { type: DataTypes.STRING(50), allowNull: true },
 
   blood_group       : {
     type      : DataTypes.ENUM('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown'),
@@ -112,16 +111,16 @@ const StudentProfile = sequelize.define('StudentProfile', {
       const dataFields = [
         'address','city','state','pincode','phone','email',
         'father_name','father_phone','father_occupation',
-        'mother_name','mother_phone','mother_email','parent_email',
+        'mother_name','mother_phone','mother_email','mother_occupation','parent_email',
         'emergency_contact','blood_group','medical_notes',
         'photo_path','valid_from','student_id',
-        'village', 'police_station', 'post_office', 'district', 'whatsapp_no',
+        'village', 'police_station', 'post_office', 'district',
         'nationality', 'religion', 'caste', 'mother_tongue', 'identification_marks',
         'is_hostel', 'medium', 'pen_no', 'apaar_id', 'prev_attendance_days', 'distance_km',
         'father_qualification', 'father_aadhar', 'father_annual_income',
         'mother_qualification', 'mother_aadhar', 'mother_annual_income',
         'guardian_name', 'guardian_relation', 'guardian_phone', 'guardian_occupation',
-        'guardian_qualification', 'guardian_aadhar', 'guardian_annual_income',
+        'guardian_qualification', 'guardian_aadhar',
         'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_city', 'perm_state', 'perm_pincode'
       ];
       const changed = dataFields.filter(f => instance.changed(f));

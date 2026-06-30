@@ -61,38 +61,156 @@ async function generateReportCard(data) {
       
       doc.moveDown(4);
 
+      // --- Group Results by Subject ---
+      const subjectsMap = {};
+      results.forEach(row => {
+        const subKey = row.subject_id || row.subject;
+        if (!subjectsMap[subKey]) {
+          subjectsMap[subKey] = {
+            subject_id: row.subject_id,
+            subject_name: row.subject,
+            subject_code: row.code,
+            exams: [],
+            weighted_max: 0,
+            weighted_obtained: 0,
+            weighted_passing: 0,
+            is_absent: true,
+          };
+        }
+        const sub = subjectsMap[subKey];
+        sub.exams.push(row);
+
+        const weight = parseFloat(row.exam_weightage || 100) / 100;
+        sub.weighted_max += parseFloat(row.total_marks || 0) * weight;
+        sub.weighted_obtained += (row.is_absent ? 0 : parseFloat(row.marks_obtained || 0)) * weight;
+        sub.weighted_passing += parseFloat(row.passing_marks || 0) * weight;
+
+        if (!row.is_absent) {
+          sub.is_absent = false;
+        }
+      });
+
+      // Calculate final weighted grades and status
+      const gradingScale = data.gradingScale || [
+        { min: 90, grade: 'A+' },
+        { min: 80, grade: 'A' },
+        { min: 70, grade: 'B+' },
+        { min: 60, grade: 'B' },
+        { min: 50, grade: 'C' },
+        { min: 40, grade: 'D' },
+      ];
+
+      const percentageToGrade = (pct, scale) => {
+        for (const band of scale) {
+          if (pct >= band.min) return band.grade;
+        }
+        return 'F';
+      };
+
+      Object.values(subjectsMap).forEach(sub => {
+        const pct = sub.weighted_max > 0 ? parseFloat(((sub.weighted_obtained / sub.weighted_max) * 100).toFixed(2)) : 0.00;
+        sub.final_percentage = pct;
+        sub.final_grade = percentageToGrade(pct, gradingScale);
+        sub.final_is_pass = sub.weighted_obtained >= sub.weighted_passing;
+      });
+
       // --- Results Table ---
       doc.font('Helvetica-Bold').fontSize(12).text('ACADEMIC PERFORMANCE', { underline: true });
       doc.moveDown(0.5);
       
       const tableTop = doc.y;
-      const col1 = 50, col2 = 180, col3 = 250, col4 = 320, col5 = 400, col6 = 480, col7 = 540;
+      const col1 = 50, col2 = 210, col3 = 270, col4 = 320, col5 = 370, col6 = 420, col7 = 475, col8 = 515;
       
       doc.fontSize(10);
-      doc.text('Subject', col1, tableTop);
-      doc.text('Theory', col2, tableTop);
-      doc.text('Prac.', col3, tableTop);
-      doc.text('Total', col4, tableTop);
-      doc.text('Obt.', col5, tableTop);
-      doc.text('Grade', col6, tableTop);
-      doc.text('Status', col7, tableTop);
+      doc.text('Subject / Exam Name', col1, tableTop);
+      doc.text('Weightage', col2, tableTop);
+      doc.text('Theory', col3, tableTop);
+      doc.text('Practical', col4, tableTop);
+      doc.text('Total', col5, tableTop);
+      doc.text('Obt.', col6, tableTop);
+      doc.text('Grade', col7, tableTop);
+      doc.text('Status', col8, tableTop);
       
       doc.moveTo(50, tableTop + 15).lineTo(580, tableTop + 15).strokeColor('#333').stroke();
       
       let y = tableTop + 25;
-      doc.font('Helvetica');
-      results.forEach(r => {
-        if (y > 750) { doc.addPage(); y = 50; }
-        doc.text(r.subject, col1, y);
-        doc.text(r.theory_marks_obtained !== null ? `${r.theory_marks_obtained}/${r.theory_total}` : '-', col2, y);
-        doc.text(r.practical_marks_obtained !== null ? `${r.practical_marks_obtained}/${r.practical_total}` : '-', col3, y);
-        doc.text(String(r.total_marks), col4, y);
-        doc.text(r.is_absent ? 'ABSENT' : String(r.marks_obtained), col5, y);
-        doc.text(r.grade, col6, y);
-        doc.text(r.is_pass ? 'PASS' : 'FAIL', col7, y);
-        y += 20;
+
+      const drawTableHeaders = (yPos) => {
+        doc.font('Helvetica-Bold').fontSize(10);
+        doc.text('Subject / Exam Name', col1, yPos);
+        doc.text('Weightage', col2, yPos);
+        doc.text('Theory', col3, yPos);
+        doc.text('Practical', col4, yPos);
+        doc.text('Total', col5, yPos);
+        doc.text('Obt.', col6, yPos);
+        doc.text('Grade', col7, yPos);
+        doc.text('Status', col8, yPos);
+        doc.moveTo(50, yPos + 15).lineTo(580, yPos + 15).strokeColor('#333').stroke();
+        return yPos + 25;
+      };
+
+      Object.values(subjectsMap).forEach(sub => {
+        // Calculate needed height for this subject block (Heading + exam rows + final row + spacing)
+        const neededHeight = 18 + (sub.exams.length * 16) + 22 + 10;
+        if (y + neededHeight > 750) {
+          doc.addPage();
+          y = 50;
+          y = drawTableHeaders(y);
+        }
+
+        // Draw Subject Header
+        doc.font('Helvetica-Bold').fontSize(10).text(sub.subject_name.toUpperCase(), col1, y);
+        y += 18;
+
+        // Draw Exams
+        sub.exams.forEach(exam => {
+          doc.font('Helvetica').fontSize(9);
+          doc.text(exam.exam_name || 'Exam', 65, y);
+          doc.text(`${parseFloat(exam.exam_weightage || 100)}%`, col2, y);
+          doc.text(exam.theory_marks_obtained !== null ? `${exam.theory_marks_obtained}/${exam.theory_total}` : '-', col3, y);
+          doc.text(exam.practical_marks_obtained !== null ? `${exam.practical_marks_obtained}/${exam.practical_total}` : '-', col4, y);
+          doc.text(String(exam.total_marks), col5, y);
+          doc.text(exam.is_absent ? 'ABSENT' : String(exam.marks_obtained), col6, y);
+          doc.text(exam.grade || '-', col7, y);
+          doc.text(exam.is_pass ? 'PASS' : 'FAIL', col8, y);
+          y += 16;
+        });
+
+        // Draw Weighted Total Row
+        doc.font('Helvetica-BoldOblique').fontSize(9);
+        doc.text('Weighted Total:', 65, y);
+        doc.text('100%', col2, y);
+
+        // Compute weighted theory/prac max/obtained for display
+        let weightedTheoryMax = 0, weightedTheoryObt = 0, hasTheory = false;
+        let weightedPracMax = 0, weightedPracObt = 0, hasPrac = false;
+        sub.exams.forEach(e => {
+          const w = parseFloat(e.exam_weightage || 100) / 100;
+          if (e.theory_total !== null) {
+            weightedTheoryMax += parseFloat(e.theory_total) * w;
+            weightedTheoryObt += (e.is_absent ? 0 : parseFloat(e.theory_marks_obtained || 0)) * w;
+            hasTheory = true;
+          }
+          if (e.practical_total !== null) {
+            weightedPracMax += parseFloat(e.practical_total) * w;
+            weightedPracObt += (e.is_absent ? 0 : parseFloat(e.practical_marks_obtained || 0)) * w;
+            hasPrac = true;
+          }
+        });
+
+        doc.text(hasTheory ? `${weightedTheoryObt.toFixed(1)}/${weightedTheoryMax.toFixed(1)}` : '-', col3, y);
+        doc.text(hasPrac ? `${weightedPracObt.toFixed(1)}/${weightedPracMax.toFixed(1)}` : '-', col4, y);
+        doc.text(sub.weighted_max.toFixed(1), col5, y);
+        doc.text(sub.is_absent ? 'ABSENT' : sub.weighted_obtained.toFixed(1), col6, y);
+        doc.text(sub.is_absent ? '-' : sub.final_grade, col7, y);
+        doc.text(sub.final_is_pass ? 'PASS' : 'FAIL', col8, y);
+        
+        y += 22;
+        // Subtle line between subject blocks
+        doc.moveTo(50, y - 6).lineTo(580, y - 6).strokeColor('#eee').stroke();
       });
 
+      doc.y = y;
       doc.moveDown(2);
 
       // --- Summary ---
@@ -104,14 +222,14 @@ async function generateReportCard(data) {
       doc.text(`Overall Grade: ${finalResult.grade}`, 50, summaryY + 50);
       doc.text(`Final Result: ${finalResult.result.toUpperCase()}`, 50, summaryY + 65);
 
-      doc.text(`Attendance: ${attendance.percentage}%`, 350, summaryY + 20);
-      doc.text(`Days Present: ${attendance.effectivePresent} / ${attendance.workingDays}`, 350, summaryY + 35);
+      doc.text(`Attendance: ${attendance ? attendance.percentage : 'N/A'}%`, 350, summaryY + 20);
+      doc.text(`Days Present: ${attendance ? attendance.effectivePresent + ' / ' + attendance.workingDays : 'N/A'}`, 350, summaryY + 35);
 
       doc.moveDown(5);
 
       // --- Signatures ---
       const sigY = doc.y;
-      doc.moveTo(50, sigY).lineTo(150, sigY).stroke();
+      doc.moveTo(50, sigY).lineTo(150, sigY).stroke().strokeColor('#333');
       doc.text('Class Teacher', 50, sigY + 5, { width: 100, align: 'center' });
 
       doc.moveTo(250, sigY).lineTo(350, sigY).stroke();

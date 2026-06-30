@@ -206,9 +206,11 @@ exports.getResults = async (req, res, next) => {
         es.theory_total_marks,
         es.practical_total_marks,
         es.combined_total_marks,
+        es.combined_passing_marks AS passing_marks,
         e.name AS exam_name,
         e.exam_type,
-        e.start_date
+        e.start_date,
+        e.weightage AS exam_weightage
       FROM exam_results er
       JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
       JOIN subjects sub ON sub.id = er.subject_id
@@ -475,21 +477,26 @@ exports.getReportCard = async (req, res, next) => {
     // 2. Fetch Subject Results
     const [subjectResults] = await sequelize.query(`
       SELECT 
-        sub.name AS subject, sub.code,
+        sub.id AS subject_id, sub.name AS subject, sub.code,
         er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
-        es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks
+        es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks,
+        es.combined_passing_marks AS passing_marks,
+        e.name AS exam_name, e.weightage AS exam_weightage
       FROM exam_results er
       JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
       JOIN subjects sub ON sub.id = er.subject_id
       JOIN exams e ON e.id = er.exam_id
       WHERE er.enrollment_id = :enrollment_id
         AND e.exam_type != 'compartment'
-      ORDER BY sub.order_number;
+      ORDER BY sub.order_number, e.start_date;
     `, { replacements: { enrollment_id } });
 
     // 4. Fetch Attendance
     const { getAttendancePercent } = require('../utils/attendanceCalculator');
     const attendance = await getAttendancePercent(enrollment_id);
+
+    // 4a. Fetch Grading Scale
+    const gradingScale = await examEngine.getActiveGradingScale(schoolId);
 
     // 5. Generate PDF
     const pdfBuffer = await generateReportCard({
@@ -499,7 +506,8 @@ exports.getReportCard = async (req, res, next) => {
       session: { name: data.session_name },
       results: subjectResults,
       attendance,
-      finalResult
+      finalResult,
+      gradingScale
     });
 
     res.set({
