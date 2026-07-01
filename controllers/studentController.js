@@ -248,27 +248,21 @@ exports.admit = async (req, res, next) => {
 
     const fatherName = profile?.father_name?.trim();
     const fatherPhone = profile?.father_phone?.trim();
-    const motherName = profile?.mother_name?.trim();
+    if (!fatherName) {
+      return res.fail("Father's name is required.", [], 422);
+    }
+    if (!fatherPhone || !/^[6-9]\d{9}$/.test(fatherPhone)) {
+      return res.fail("Father's phone is required and must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+
     const motherPhone = profile?.mother_phone?.trim();
-    const guardianName = profile?.guardian_name?.trim();
     const guardianPhone = profile?.guardian_phone?.trim();
 
-    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
-      return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
     if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
       return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
     if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
       return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
-
-    const hasFather = fatherName && fatherPhone;
-    const hasMother = motherName && motherPhone;
-    const hasGuardian = guardianName && guardianPhone;
-
-    if (!hasFather && !hasMother && !hasGuardian) {
-      return res.fail("At least one parent or guardian details (Name and Phone) must be fully provided.", [], 422);
     }
 
     const phoneFields = ['phone'];
@@ -661,24 +655,36 @@ exports.downloadAdmissionTemplate = async (req, res, next) => {
         { key: 'section',         label: 'Section *',         example: 'A' },
         { key: 'admission_date',  label: 'Admission Date *',  example: '2024-04-01' },
         { key: 'admission_no',    label: 'Admission No',      example: 'ADM-2024-0001' },
-        { key: 'father_name',     label: 'Father Name',       example: 'Vijay Sharma' },
+        { key: 'father_name',     label: 'Father Name *',     example: 'Vijay Sharma' },
+        { key: 'father_phone',    label: 'Father Phone *',    example: '9876543210' },
+        { key: 'parent_email',    label: 'Father Email (Parent Login) *', example: 'vijay@email.com' },
         { key: 'mother_name',     label: 'Mother Name',       example: 'Anjali Sharma' },
-        { key: 'guardian_phone',  label: 'Guardian Phone',    example: '9876543210' },
+        { key: 'mother_email',    label: 'Mother Email',      example: 'anjali@email.com' },
+        { key: 'guardian_phone',  label: 'Guardian Phone',    example: '9876543211' },
+        { key: 'guardian_email',  label: 'Guardian Email',    example: 'guardian@email.com' },
+        { key: 'phone',           label: 'Student Phone',     example: '9876543212' },
+        { key: 'email',           label: 'Student Email',     example: 'rahul@email.com' },
         { key: 'address',         label: 'Address',           example: '123 Main St, Jorhat' },
         { key: 'blood_group',     label: 'Blood Group',       example: 'O+' },
         { key: 'religion',        label: 'Religion',          example: 'Hinduism' },
         { key: 'caste',           label: 'Caste',             example: 'General' },
         { key: 'previous_school', label: 'Previous School',   example: 'Little Angels' },
+        { key: 'medium',          label: 'Medium',            example: 'English' },
+        { key: 'is_hostel',       label: 'Hostel Required (Yes/No)', example: 'No' },
+        { key: 'distance_km',     label: 'Distance from School (km)', example: '2.5' },
+        { key: 'prev_attendance_days', label: 'Prev. Year Attendance (Days)', example: '180' },
       ],
       valid_values: {
         gender: ['male', 'female', 'other'],
         blood_group: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'],
+        medium: ['English', 'Assamese'],
       },
       notes: [
         'Fields marked * are required.',
         'Admission No will be auto-generated if left blank (ADM-YEAR-XXXX).',
         'Admission Class and Section names must match exactly with existing records.',
         'Admission Date will be used as the student\'s joined date.',
+        'Father Email (Parent Login) will be used to create the parent login credentials.',
       ],
     });
   } catch (err) { next(err); }
@@ -741,11 +747,27 @@ exports.previewAdmission = async (req, res, next) => {
       if (!row.admission_date) errors.push('Admission date is required');
       else if (isNaN(Date.parse(row.admission_date))) errors.push('Invalid admission date format (YYYY-MM-DD)');
 
+      // Father Phone & Parent Login Email (Mandatory)
+      if (!row.father_name?.trim()) errors.push('Father name is required');
+      if (!row.father_phone?.trim()) errors.push('Father phone is required');
+      
+      if (!row.parent_email?.trim()) errors.push('Father email (Parent Login) is required');
+      else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(row.parent_email.trim())) {
+        errors.push('Invalid father email format');
+      }
+
       // Optional: Blood Group
       if (row.blood_group?.trim()) {
         const bg = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-', 'unknown'];
         if (!bg.includes(row.blood_group.trim())) {
           errors.push('Invalid blood group');
+        }
+      }
+
+      // Optional: Medium
+      if (row.medium?.trim()) {
+        if (!['English', 'Assamese'].includes(row.medium.trim())) {
+          errors.push('Invalid medium. Use English or Assamese');
         }
       }
 
@@ -883,14 +905,23 @@ exports.confirmAdmission = async (req, res, next) => {
           // 4. Create Profile (v1)
           const profileData = {
             father_name: row.father_name || null,
+            father_phone: row.father_phone || null,
             mother_name: row.mother_name || null,
-            phone: row.guardian_phone || null,
+            mother_email: row.mother_email || null,
+            phone: row.phone || null, // Student's own phone
+            email: row.email || null, // Student's own email
             address: row.address || null,
             blood_group: row.blood_group || null,
             religion: row.religion || null,
             caste: row.caste || null,
             previous_school: row.previous_school || null,
-            parent_email: (row.guardian_email || row.email || '').trim().toLowerCase() || null
+            parent_email: row.parent_email?.trim().toLowerCase() || null,
+            guardian_phone: row.guardian_phone || null,
+            guardian_email: row.guardian_email || null,
+            medium: row.medium || null,
+            is_hostel: row.is_hostel ? (['yes', 'true', '1'].includes(row.is_hostel.trim().toLowerCase())) : false,
+            distance_km: row.distance_km ? parseFloat(row.distance_km) : null,
+            prev_attendance_days: row.prev_attendance_days ? parseInt(row.prev_attendance_days) : null
           };
 
           await profileVersioning.create({
@@ -1069,7 +1100,7 @@ exports.getById = async (req, res, next) => {
              sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
              sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income, sp.mother_occupation,
              sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
-             sp.guardian_occupation, sp.guardian_aadhar,
+             sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_email AS guardian_email,
              sp.parent_email AS parent_email,
              sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
              sp.identification_marks, sp.pen_no, sp.apaar_id,
@@ -1318,27 +1349,21 @@ exports.updateProfile = async (req, res, next) => {
 
     const fatherName = mergedProfile.father_name?.trim();
     const fatherPhone = mergedProfile.father_phone?.trim();
-    const motherName = mergedProfile.mother_name?.trim();
+    if (!fatherName) {
+      return res.fail("Father's name is required.", [], 422);
+    }
+    if (!fatherPhone || !/^[6-9]\d{9}$/.test(fatherPhone)) {
+      return res.fail("Father's phone is required and must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+
     const motherPhone = mergedProfile.mother_phone?.trim();
-    const guardianName = mergedProfile.guardian_name?.trim();
     const guardianPhone = mergedProfile.guardian_phone?.trim();
 
-    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
-      return res.fail("Father's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
     if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
       return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
     if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
       return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
-
-    const hasFather = fatherName && fatherPhone;
-    const hasMother = motherName && motherPhone;
-    const hasGuardian = guardianName && guardianPhone;
-
-    if (!hasFather && !hasMother && !hasGuardian) {
-      return res.fail("At least one parent or guardian details (Name and Phone) must be fully provided.", [], 422);
     }
 
     const phoneFields = ['phone'];
@@ -1495,7 +1520,7 @@ exports.updateProfile = async (req, res, next) => {
                sp.father_qualification, sp.father_aadhar, sp.father_annual_income,
                sp.mother_qualification, sp.mother_aadhar, sp.mother_annual_income, sp.mother_occupation,
                sp.guardian_name, sp.guardian_relation, sp.guardian_phone, sp.guardian_qualification,
-               sp.guardian_occupation, sp.guardian_aadhar,
+               sp.guardian_occupation, sp.guardian_aadhar, sp.guardian_email AS guardian_email,
                sp.parent_email AS parent_email, 
                sp.nationality, sp.religion, sp.caste, sp.mother_tongue,
                sp.identification_marks, sp.pen_no, sp.apaar_id,

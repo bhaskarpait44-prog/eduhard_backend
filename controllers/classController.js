@@ -870,54 +870,57 @@ exports.simpleStudentsPdf = async (req, res, next) => {
 
     doc.pipe(res);
 
+    const BRAND = '#4F46E5';
+    const DARK = '#111827';
+    const MUTED = '#6B7280';
+    const BORDER = '#E5E7EB';
+    const LIGHT = '#F9FAFB';
+
     // Header
     doc
       .font('Helvetica-Bold')
-      .fontSize(16)
-      .fillColor('#1e293b')
-      .text(school?.name || 'School', { align: 'center' });
+      .fontSize(15)
+      .fillColor(BRAND)
+      .text((school?.name || 'School').toUpperCase(), { align: 'center' });
 
     doc
-      .fontSize(12)
-      .fillColor('#334155')
-      .text('Student List', { align: 'center' });
+      .fontSize(10)
+      .font('Helvetica-Bold')
+      .fillColor(DARK)
+      .text('STUDENT CLASS LIST', { align: 'center', characterSpacing: 1 });
 
-    doc.moveDown(0.5);
+    doc.moveDown(0.4);
     
     const subHeaderText = `Class: ${cls.name} | Session: ${session.name}${requestedSectionId && rows[0] ? ` | Section: ${rows[0].section_name}` : ''}`;
     doc
       .font('Helvetica')
-      .fontSize(10)
-      .fillColor('#64748b')
+      .fontSize(8.5)
+      .fillColor(MUTED)
       .text(subHeaderText, { align: 'center' });
 
-    doc.moveDown(1.5);
+    doc.moveDown(1.2);
 
     // Table Header
     const tableTop = doc.y;
     const colAdmission = 50;
-    const colRoll = 150;
-    const colName = 220;
+    const colRoll = 160;
+    const colName = 240;
     const colSection = 480;
+
+    // Draw header box
+    doc.rect(50, tableTop - 4, 495, 20).fillAndStroke('#eff6ff', BORDER);
 
     doc
       .font('Helvetica-Bold')
-      .fontSize(10)
-      .fillColor('#1e293b');
+      .fontSize(8.5)
+      .fillColor(BRAND);
 
-    doc.text('Admission No.', colAdmission, tableTop);
+    doc.text('Admission No.', colAdmission + 5, tableTop);
     doc.text('Roll No.', colRoll, tableTop);
     doc.text('Student Name', colName, tableTop);
     doc.text('Section', colSection, tableTop);
 
-    doc
-      .moveTo(50, tableTop + 15)
-      .lineTo(545, tableTop + 15)
-      .lineWidth(1)
-      .strokeColor('#cbd5e1')
-      .stroke();
-
-    let currentY = tableTop + 25;
+    let currentY = tableTop + 16;
 
     rows.forEach((row, index) => {
       // Page break check (A4 is 792 high, margin 10, so max Y is 782. 750 is safe)
@@ -925,42 +928,51 @@ exports.simpleStudentsPdf = async (req, res, next) => {
         doc.addPage();
         currentY = 50;
         
+        // Draw header box on next page
+        doc.rect(50, currentY - 4, 495, 20).fillAndStroke('#eff6ff', BORDER);
         doc
           .font('Helvetica-Bold')
-          .fontSize(10)
-          .fillColor('#1e293b');
-        doc.text('Admission No.', colAdmission, currentY);
+          .fontSize(8.5)
+          .fillColor(BRAND);
+        doc.text('Admission No.', colAdmission + 5, currentY);
         doc.text('Roll No.', colRoll, currentY);
         doc.text('Student Name', colName, currentY);
         doc.text('Section', colSection, currentY);
-        doc.moveTo(50, currentY + 15).lineTo(545, currentY + 15).stroke();
-        currentY += 25;
+        currentY += 16;
+      }
+
+      // Draw alternating row backgrounds
+      if (index % 2 === 0) {
+        doc.rect(50, currentY, 495, 18).fill(LIGHT);
+      } else {
+        doc.rect(50, currentY, 495, 18).fill('#ffffff');
       }
 
       doc
         .font('Helvetica')
-        .fontSize(10)
-        .fillColor('#334155');
+        .fontSize(8.5)
+        .fillColor(DARK);
 
       const fullName = `${row.first_name} ${row.last_name || ''}`.trim();
       
-      doc.text(row.admission_no || '--', colAdmission, currentY);
-      doc.text(row.roll_number || '--', colRoll, currentY);
-      doc.text(`${index + 1}. ${fullName}`, colName, currentY);
-      doc.text(row.section_name || '--', colSection, currentY);
+      doc.text(row.admission_no || '--', colAdmission + 5, currentY + 5);
+      doc.text(row.roll_number || '--', colRoll, currentY + 5);
+      doc.text(`${index + 1}. ${fullName}`, colName, currentY + 5);
+      doc.text(row.section_name || '--', colSection, currentY + 5);
 
+      // Draw thin bottom border
       doc
-        .moveTo(50, currentY + 15)
-        .lineTo(545, currentY + 15)
+        .moveTo(50, currentY + 18)
+        .lineTo(545, currentY + 18)
         .lineWidth(0.5)
-        .strokeColor('#f1f5f9')
+        .strokeColor(BORDER)
         .stroke();
 
-      currentY += 22;
+      currentY += 18;
     });
 
     if (!rows.length) {
-      doc.moveDown(2).text('No active enrollments found.', { align: 'center' });
+      doc.moveDown(2).fillColor(MUTED).font('Helvetica-Oblique').text('No active enrollments found.', { align: 'center' });
     }
 
     // Footer
@@ -969,10 +981,10 @@ exports.simpleStudentsPdf = async (req, res, next) => {
       doc.switchToPage(i);
       doc
         .font('Helvetica')
-        .fontSize(8)
-        .fillColor('#94a3b8')
+        .fontSize(7.5)
+        .fillColor(MUTED)
         .text(
-          `Generated on ${new Date().toLocaleDateString()} • Page ${i + 1} of ${range.count}`,
+          `Generated on ${new Date().toLocaleDateString('en-IN')} • Page ${i + 1} of ${range.count}`,
           50,
           doc.page.height - 25,
           { align: 'center', width: doc.page.width - 100, lineBreak: false }

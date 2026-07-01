@@ -156,6 +156,7 @@ const profileVersioning = {
         guardian_occupation: oldVersion.guardian_occupation,
         guardian_qualification: oldVersion.guardian_qualification,
         guardian_aadhar: oldVersion.guardian_aadhar,
+        guardian_email: oldVersion.guardian_email,
 
         // Carry forward permanent address fields
         is_permanent_same: oldVersion.is_permanent_same,
@@ -198,7 +199,7 @@ const profileVersioning = {
         'father_qualification', 'father_aadhar', 'father_annual_income',
         'mother_qualification', 'mother_aadhar', 'mother_annual_income',
         'guardian_name', 'guardian_relation', 'guardian_phone', 'guardian_occupation',
-        'guardian_qualification', 'guardian_aadhar',
+        'guardian_qualification', 'guardian_aadhar', 'guardian_email',
         'is_permanent_same', 'perm_address', 'perm_village', 'perm_police_station', 'perm_post_office', 'perm_district', 'perm_city', 'perm_state', 'perm_pincode'
       ];
 

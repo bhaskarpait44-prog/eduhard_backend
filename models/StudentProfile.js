@@ -53,6 +53,7 @@ const StudentProfile = sequelize.define('StudentProfile', {
   guardian_occupation     : { type: DataTypes.STRING(150), allowNull: true },
   guardian_qualification  : { type: DataTypes.STRING(150), allowNull: true },
   guardian_aadhar         : { type: DataTypes.STRING(20), allowNull: true },
+  guardian_email          : { type: DataTypes.STRING(150), allowNull: true },
 
   blood_group       : {
     type      : DataTypes.ENUM('A+','A-','B+','B-','AB+','AB-','O+','O-','unknown'),
