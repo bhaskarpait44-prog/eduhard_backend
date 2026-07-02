@@ -94,7 +94,7 @@ async function getWorkingDays(sessionId, fromDate, toDate, t = null) {
   `, { replacements: { sessionId }, transaction: t });
 
   if (!workingDaysRow) {
-    throw new Error(`No working_days config found for session_id=${sessionId}.`);
+    throw { name: 'AttendanceConfigError', message: `No working_days config found for session_id=${sessionId}.`, status: 422 };
   }
 
   // ── Fetch all holidays in this session within the date range ─────────────
@@ -183,111 +183,18 @@ async function getWorkingDays(sessionId, fromDate, toDate, t = null) {
  * }}
  */
 async function getAttendancePercent(enrollmentId, t = null) {
-  // ── Fetch enrollment + session info ─────────────────────────────────────
-  const [[enrollment]] = await sequelize.query(`
-    SELECT
-      e.id          AS enrollment_id,
-      e.student_id,
-      e.session_id,
-      e.joined_date,
-      s.start_date  AS session_start_date,
-      s.end_date    AS session_end_date,
-      s.status      AS session_status
-    FROM enrollments e
-    JOIN sessions    s ON s.id = e.session_id
-    WHERE e.id = :enrollmentId;
-  `, { replacements: { enrollmentId }, transaction: t });
-
-  if (!enrollment) {
+  const results = await getAttendanceStatsForEnrollments([enrollmentId], {}, t);
+  if (results.length === 0) {
     throw new Error(`Enrollment id=${enrollmentId} not found.`);
   }
-
-  // Calculate up to today or session end, whichever is earlier
-  const today       = new Date().toISOString().split('T')[0];
-  const sessionEnd  = enrollment.session_end_date;
-  const calcUpTo    = today < sessionEnd ? today : sessionEnd;
-  
-  // Use joined_date, but cap it at session_start_date
-  const fromDate    = enrollment.joined_date < enrollment.session_start_date
-    ? enrollment.session_start_date
-    : enrollment.joined_date;
-
-  // ── Get working days FROM joined_date ────────────────────────────────────
-  const { workingDays, workingDates } = await getWorkingDays(
-    enrollment.session_id,
-    fromDate,
-    calcUpTo,
-    t
-  );
-
-  if (workingDays === 0) {
-    return {
-      enrollmentId,
-      studentId       : enrollment.student_id,
-      sessionId       : enrollment.session_id,
-      joinedDate      : fromDate,
-      calculatedUpTo  : calcUpTo,
-      workingDays     : 0,
-      presentCount    : 0,
-      lateCount       : 0,
-      halfDayCount    : 0,
-      absentCount     : 0,
-      effectivePresent: 0,
-      percentage      : 0,
-      grade           : 'N/A',
-    };
-  }
-
-  // ── Fetch actual attendance records ──────────────────────────────────────
-  const [records] = await sequelize.query(`
-    SELECT status, COUNT(*) AS count
-    FROM attendance
-    WHERE enrollment_id = :enrollmentId
-      AND date >= :fromDate
-      AND date <= :calcUpTo
-      AND status != 'holiday'
-    GROUP BY status;
-  `, { replacements: { enrollmentId, fromDate, calcUpTo }, transaction: t });
-
-  // Build status count map
-  const counts = { present: 0, late: 0, half_day: 0, absent: 0 };
-  records.forEach(r => {
-    if (counts.hasOwnProperty(r.status)) {
-      counts[r.status] = parseInt(r.count, 10);
-    }
-  });
-
-  // ── Apply weighting formula ──────────────────────────────────────────────
+  const stats = results[0];
   const effectivePresent =
-    counts.present  * 1.0 +
-    counts.late     * 1.0 +    // Late = present for percentage purposes
-    counts.half_day * 0.5;     // Half day = 0.5
-
-  const percentage = parseFloat(
-    ((effectivePresent / workingDays) * 100).toFixed(2)
-  );
-
-  // ── Assign letter grade ──────────────────────────────────────────────────
-  const grade =
-    percentage >= 90 ? 'A' :
-    percentage >= 75 ? 'B' :
-    percentage >= 60 ? 'C' :
-    percentage >= 50 ? 'D' : 'F';
-
+    stats.presentCount  * 1.0 +
+    stats.lateCount     * 1.0 +
+    stats.halfDayCount * 0.5;
   return {
-    enrollmentId,
-    studentId       : enrollment.student_id,
-    sessionId       : enrollment.session_id,
-    joinedDate      : fromDate,
-    calculatedUpTo  : calcUpTo,
-    workingDays,
-    presentCount    : counts.present,
-    lateCount       : counts.late,
-    halfDayCount    : counts.half_day,
-    absentCount     : counts.absent,
-    effectivePresent,
-    percentage,
-    grade,
+    ...stats,
+    effectivePresent
   };
 }
 
@@ -527,6 +434,342 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
 
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FUNCTION 4: getAttendanceStatsForEnrollments
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Calculates attendance statistics for multiple enrollments in batch.
+ * Mandates the prefix-sum algorithm of working days to ensure O(1) count per student.
+ *
+ * @param {number[]} enrollmentIds
+ * @param {object} options
+ * @param {string} [options.fromDate] 'YYYY-MM-DD' (optional)
+ * @param {string} [options.toDate]   'YYYY-MM-DD' (optional)
+ * @param {object} [t] sequelize transaction
+ */
+async function getAttendanceStatsForEnrollments(enrollmentIds, options = {}, t = null) {
+  if (!enrollmentIds || enrollmentIds.length === 0) return [];
+
+  // 1. Fetch enrollments and session dates
+  const [enrollments] = await sequelize.query(`
+    SELECT
+      e.id AS enrollment_id,
+      e.student_id,
+      e.session_id,
+      e.joined_date,
+      s.start_date  AS session_start_date,
+      s.end_date    AS session_end_date
+    FROM enrollments e
+    JOIN sessions    s ON s.id = e.session_id
+    WHERE e.id IN (:enrollmentIds);
+  `, { replacements: { enrollmentIds }, transaction: t });
+
+  if (enrollments.length === 0) return [];
+
+  // Group by session_id to batch query configs
+  const sessionsMap = new Map();
+  enrollments.forEach(e => {
+    if (!sessionsMap.has(e.session_id)) {
+      sessionsMap.set(e.session_id, []);
+    }
+    sessionsMap.get(e.session_id).push(e);
+  });
+
+  const allResults = [];
+
+  for (const [sessionId, sessionEnrollments] of sessionsMap.entries()) {
+    const sessionEnrollmentIds = sessionEnrollments.map(e => e.enrollment_id);
+
+    // Fetch config and holidays
+    const [[workingDaysRow]] = await sequelize.query(`
+      SELECT monday, tuesday, wednesday, thursday, friday, saturday, sunday
+      FROM session_working_days WHERE session_id = :sessionId LIMIT 1;
+    `, { replacements: { sessionId }, transaction: t });
+
+    if (!workingDaysRow) {
+      throw { name: 'AttendanceConfigError', message: `No working_days config found for session_id=${sessionId}.`, status: 422 };
+    }
+
+    const [allHolidays] = await sequelize.query(`
+      SELECT holiday_date FROM session_holidays 
+      WHERE session_id = :sessionId;
+    `, { replacements: { sessionId }, transaction: t });
+    const holidaySet = new Set(allHolidays.map(h => String(h.holiday_date).slice(0, 10)));
+
+    const sessionStartStr = String(sessionEnrollments[0].session_start_date).slice(0, 10);
+    const sessionEndStr   = String(sessionEnrollments[0].session_end_date).slice(0, 10);
+
+    // Generate prefix sum of working days from session start to session end
+    const fullDateRange = getDateRange(sessionStartStr, sessionEndStr);
+    const prefixSum = new Array(fullDateRange.length).fill(0);
+    const dateToIndex = new Map();
+
+    let currentSum = 0;
+    fullDateRange.forEach((date, i) => {
+      dateToIndex.set(date, i);
+      const dayOfWeek = getDayOfWeek(date);
+      const colName   = DAY_COLUMN_MAP[dayOfWeek];
+
+      const isWorking = workingDaysRow[colName] && !holidaySet.has(date);
+      if (isWorking) currentSum++;
+      prefixSum[i] = currentSum;
+    });
+
+    const getWorkingDaysRange = (startD, endD) => {
+      if (startD > endD) return 0;
+
+      let startIndex = dateToIndex.get(startD);
+      if (startIndex === undefined) {
+        if (startD < sessionStartStr) {
+          startIndex = 0;
+        } else {
+          return 0;
+        }
+      }
+
+      let endIndex = dateToIndex.get(endD);
+      if (endIndex === undefined) {
+        if (endD > sessionEndStr) {
+          endIndex = fullDateRange.length - 1;
+        } else {
+          return 0;
+        }
+      }
+
+      if (startIndex > endIndex) return 0;
+
+      const totalAtEnd = prefixSum[endIndex];
+      const totalBeforeStart = startIndex > 0 ? prefixSum[startIndex - 1] : 0;
+      return totalAtEnd - totalBeforeStart;
+    };
+
+    // Query status counts (do not exclude holidays so we can return holiday count)
+    const today = new Date().toISOString().split('T')[0];
+    const queryFrom = options.fromDate || sessionStartStr;
+    const queryTo = options.toDate || sessionEndStr;
+
+    const [statusCounts] = await sequelize.query(`
+      SELECT a.enrollment_id, a.status, COUNT(*) AS count
+      FROM attendance a
+      JOIN enrollments e ON e.id = a.enrollment_id
+      WHERE a.enrollment_id IN (:sessionEnrollmentIds)
+        AND a.date >= e.joined_date
+        AND a.date >= :queryFrom
+        AND a.date <= :queryTo
+      GROUP BY a.enrollment_id, a.status;
+    `, { replacements: { sessionEnrollmentIds, queryFrom, queryTo }, transaction: t });
+
+    const countLookup = new Map();
+    statusCounts.forEach(r => {
+      if (!countLookup.has(r.enrollment_id)) {
+        countLookup.set(r.enrollment_id, { present: 0, late: 0, half_day: 0, absent: 0, holiday: 0 });
+      }
+      const counts = countLookup.get(r.enrollment_id);
+      if (counts.hasOwnProperty(r.status)) {
+        counts[r.status] = parseInt(r.count, 10);
+      }
+    });
+
+    sessionEnrollments.forEach(row => {
+      const studentStart = row.joined_date > queryFrom ? row.joined_date : queryFrom;
+      const calcUpTo = today < queryTo ? today : queryTo;
+      const studentEnd = calcUpTo < sessionEndStr ? calcUpTo : sessionEndStr;
+
+      const workingDays = getWorkingDaysRange(studentStart, studentEnd);
+      const counts = countLookup.get(row.enrollment_id) || { present: 0, late: 0, half_day: 0, absent: 0, holiday: 0 };
+
+      let percentage = 0;
+      let grade = 'N/A';
+
+      if (workingDays > 0) {
+        const effectivePresent =
+          counts.present  * 1.0 +
+          counts.late     * 1.0 +
+          counts.half_day * 0.5;
+
+        percentage = parseFloat(((effectivePresent / workingDays) * 100).toFixed(2));
+        grade =
+          percentage >= 90 ? 'A' :
+          percentage >= 75 ? 'B' :
+          percentage >= 60 ? 'C' :
+          percentage >= 50 ? 'D' : 'F';
+      }
+
+      allResults.push({
+        enrollmentId: row.enrollment_id,
+        studentId: row.student_id,
+        sessionId: row.session_id,
+        joinedDate: row.joined_date,
+        calculatedUpTo: calcUpTo,
+        workingDays,
+        presentCount: counts.present,
+        lateCount: counts.late,
+        halfDayCount: counts.half_day,
+        absentCount: counts.absent,
+        holidayCount: counts.holiday,
+        percentage,
+        grade
+      });
+    });
+  }
+
+  return allResults;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FUNCTION 5: saveBulkAttendance
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Shared service helper to handle bulk attendance marking.
+ * Includes future-date rejection, holiday/leave checking, and override reason checks.
+ */
+async function saveBulkAttendance({
+  sessionId,
+  classId,
+  sectionId,
+  date,
+  records,
+  reason,
+  markedBy,
+  isTeacher = false,
+  teacherLeaveCheck = null
+}) {
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  // 1. Future date protection
+  if (date > todayStr) {
+    throw { name: 'ValidationError', message: 'Cannot mark attendance for a future date.', status: 422 };
+  }
+
+  // 2. Teacher leave validation
+  if (teacherLeaveCheck) {
+    throw { name: 'ValidationError', message: 'Cannot mark attendance. You are on approved leave for this date.', status: 422 };
+  }
+
+  // 3. Holiday validation
+  const [[holiday]] = await sequelize.query(`
+    SELECT name FROM session_holidays
+    WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
+  `, { replacements: { sessionId, date } });
+
+  if (holiday) {
+    throw { name: 'ValidationError', message: `Cannot mark attendance. Selected date is a holiday: ${holiday.name}.`, status: 422 };
+  }
+
+  // 4. Working day validation
+  const dayOfWeek = getDayOfWeek(date);
+  const dayName = DAY_COLUMN_MAP[dayOfWeek];
+  const [[workingDayConfig]] = await sequelize.query(`
+    SELECT ${dayName} AS is_working FROM session_working_days
+    WHERE session_id = :sessionId LIMIT 1;
+  `, { replacements: { sessionId } });
+
+  const isWorking = workingDayConfig ? workingDayConfig.is_working : (dayOfWeek !== 0);
+  if (!isWorking) {
+    throw { name: 'ValidationError', message: `Cannot mark attendance. Selected date (${date}) is not a working day.`, status: 422 };
+  }
+
+  // 5. Fetch existing rows to evaluate if reason is required
+  const [existingRows] = await sequelize.query(`
+    SELECT a.id, a.enrollment_id, a.status
+    FROM attendance a
+    JOIN enrollments e ON e.id = a.enrollment_id
+    WHERE a.date = :date
+      AND e.session_id = :sessionId
+      AND e.class_id = :classId
+      AND e.section_id = :sectionId;
+  `, { replacements: { date, sessionId, classId, sectionId } });
+
+  const isPast = date < todayStr;
+  const resolvedReason = reason ? reason.trim() : null;
+
+  if (isPast || existingRows.length > 0) {
+    if (!resolvedReason || resolvedReason.length < 10) {
+      throw { name: 'ValidationError', message: 'Reason (minimum 10 characters) is required when editing existing or past attendance.', status: 422 };
+    }
+  }
+
+  const existingMap = new Map(existingRows.map(row => [Number(row.enrollment_id), row]));
+  const inserted = [];
+  const updated = [];
+  let skipped = 0;
+
+  await sequelize.transaction(async (transaction) => {
+    for (const record of records) {
+      const eid = Number(record.enrollment_id);
+      const existing = existingMap.get(eid);
+
+      if (existing) {
+        if (existing.status !== record.status) {
+          await sequelize.query(`
+            UPDATE attendance
+            SET status = :status,
+                method = 'manual',
+                previous_status = :previousStatus,
+                override_reason = :overrideReason,
+                marked_by = :markedBy,
+                marked_at = NOW(),
+                updated_at = NOW()
+            WHERE id = :id;
+          `, {
+            replacements: {
+              id: existing.id,
+              status: record.status,
+              previousStatus: existing.status,
+              overrideReason: resolvedReason,
+              markedBy,
+            },
+            transaction,
+          });
+          updated.push(eid);
+        } else {
+          skipped++;
+        }
+      } else {
+        // Verify enrollment belongs to class/section/session
+        const [[enrollment]] = await sequelize.query(`
+          SELECT id FROM enrollments
+          WHERE id = :eid AND class_id = :classId AND section_id = :sectionId AND session_id = :sessionId;
+        `, { 
+          replacements: { eid, classId, sectionId, sessionId },
+          transaction
+        });
+
+        if (!enrollment) {
+          skipped++;
+          continue;
+        }
+
+        await sequelize.query(`
+          INSERT INTO attendance (enrollment_id, date, status, method, marked_by, marked_at, override_reason, created_at, updated_at)
+          VALUES (:enrollmentId, :date, :status, 'manual', :markedBy, NOW(), :overrideReason, NOW(), NOW());
+        `, {
+          replacements: {
+            enrollmentId: eid,
+            date,
+            status: record.status,
+            markedBy,
+            overrideReason: isPast ? resolvedReason : null,
+          },
+          transaction,
+        });
+        inserted.push(eid);
+      }
+    }
+  });
+
+  return {
+    insertedCount: inserted.length,
+    updatedCount: updated.length,
+    skippedCount: skipped,
+    updatedEnrollmentIds: updated,
+    editedExisting: existingRows.length > 0,
+  };
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
 // EXPORTS
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -534,6 +777,8 @@ module.exports = {
   getWorkingDays,
   getAttendancePercent,
   retroactiveHoliday,
+  getAttendanceStatsForEnrollments,
+  saveBulkAttendance,
   // Export helper for use in other modules
   _internal: { getDateRange, getDayOfWeek, DAY_COLUMN_MAP },
 };

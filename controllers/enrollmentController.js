@@ -91,9 +91,11 @@ async function nextRollNumber(sectionId, sessionId, transaction) {
     transaction,
   });
 
-  return String(Number(row?.max_roll || 0) + 1);
+  const nextNum = Number(row?.max_roll || 0) + 1;
+  return nextNum < 10 ? '0' + nextNum : String(nextNum);
 }
 exports.nextRollNumber = nextRollNumber;
+
 
 
 function normalizePromotionOutcome(result) {

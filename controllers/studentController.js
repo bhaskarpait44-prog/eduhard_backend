@@ -8,6 +8,39 @@ const profileVersioning = require('../utils/profileVersioning');
 const { generateStudentPassword } = require('../utils/studentCredentials');
 const { invalidateCache } = require('../middlewares/cache');
 const { getAttendancePercent } = require('../utils/attendanceCalculator');
+const fs = require('fs');
+
+function cleanupUploadedFiles(req) {
+  if (req.file && req.file.path) {
+    fs.unlink(req.file.path, (e) => {
+      if (e) console.error('[Cleanup] Failed to delete orphaned file:', req.file.path, e.message);
+    });
+  }
+  if (req.files) {
+    if (Array.isArray(req.files)) {
+      for (const file of req.files) {
+        if (file.path) {
+          fs.unlink(file.path, (e) => {
+            if (e) console.error('[Cleanup] Failed to delete orphaned file:', file.path, e.message);
+          });
+        }
+      }
+    } else {
+      for (const fileArr of Object.values(req.files)) {
+        if (Array.isArray(fileArr)) {
+          for (const file of fileArr) {
+            if (file.path) {
+              fs.unlink(file.path, (e) => {
+                if (e) console.error('[Cleanup] Failed to delete orphaned file:', file.path, e.message);
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
 
 // ── GET /api/students ────────────────────────────────────────────────────────
 exports.list = async (req, res, next) => {
@@ -221,77 +254,122 @@ exports.admit = async (req, res, next) => {
       try { profile = JSON.parse(profile); } catch (e) { /* ignore */ }
     }
 
+    // Enforce required documents
+    const photoFile = req.files?.photo?.[0];
+    const birthCertFile = req.files?.birth_certificate?.[0];
+    if (!photoFile) {
+      cleanupUploadedFiles(req);
+      return res.fail('Passport Photo is required.', [], 422);
+    }
+    if (!birthCertFile) {
+      cleanupUploadedFiles(req);
+      return res.fail('Birth Certificate is required.', [], 422);
+    }
+
     // Server-side validation (mirrors frontend Zod rules)
-    if (!first_name?.trim() || first_name.trim().length < 2)
+    if (!first_name?.trim() || first_name.trim().length < 2) {
+      cleanupUploadedFiles(req);
       return res.fail('First name must be at least 2 characters.', [], 422);
-    if (!last_name?.trim())
+    }
+    if (!last_name?.trim()) {
+      cleanupUploadedFiles(req);
       return res.fail('Last name is required.', [], 422);
-    if (!date_of_birth || new Date(date_of_birth) >= new Date())
+    }
+    if (!date_of_birth || new Date(date_of_birth) >= new Date()) {
+      cleanupUploadedFiles(req);
       return res.fail('Date of birth must be in the past.', [], 422);
-    if (!['male', 'female', 'other'].includes(gender))
+    }
+    if (!['male', 'female', 'other'].includes(gender)) {
+      cleanupUploadedFiles(req);
       return res.fail('Gender must be male, female, or other.', [], 422);
-    if (!admission_no?.trim())
+    }
+    if (!admission_no?.trim()) {
+      cleanupUploadedFiles(req);
       return res.fail('Admission number is required.', [], 422);
-    if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
+    }
+    if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim())) {
+      cleanupUploadedFiles(req);
       return res.fail('Admission number contains invalid characters.', [], 422);
-    if (aadhar_no && !/^\d{12}$/.test(aadhar_no))
+    }
+    if (aadhar_no && !/^\d{12}$/.test(aadhar_no)) {
+      cleanupUploadedFiles(req);
       return res.fail('Aadhaar number must be exactly 12 digits.', [], 422);
+    }
 
     // Validate emergency contact, father's phone, and other phone numbers
     const emergencyContact = profile?.emergency_contact;
     if (!emergencyContact?.trim()) {
+      cleanupUploadedFiles(req);
       return res.fail('Emergency contact is required.', [], 422);
     }
     if (!/^[6-9]\d{9}$/.test(emergencyContact.trim())) {
+      cleanupUploadedFiles(req);
       return res.fail('Emergency contact is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.', [], 422);
     }
 
     const fatherName = profile?.father_name?.trim();
     const fatherPhone = profile?.father_phone?.trim();
-    if (!fatherName) {
-      return res.fail("Father's name is required.", [], 422);
+    const guardianName = profile?.guardian_name?.trim();
+    const guardianRelation = profile?.guardian_relation?.trim();
+    const guardianPhone = profile?.guardian_phone?.trim();
+    const guardianEmail = profile?.guardian_email?.trim();
+
+    const hasFather = fatherName && fatherPhone && /^[6-9]\d{9}$/.test(fatherPhone);
+    const hasGuardian = guardianName && guardianRelation && guardianPhone && /^[6-9]\d{9}$/.test(guardianPhone) && guardianEmail;
+
+    if (!hasFather && !hasGuardian) {
+      cleanupUploadedFiles(req);
+      return res.fail("Either Father's details (Name, Phone) or Guardian's details (Name, Relation, Phone, Email) must be fully provided and valid.", [], 422);
     }
-    if (!fatherPhone || !/^[6-9]\d{9}$/.test(fatherPhone)) {
-      return res.fail("Father's phone is required and must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+
+    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
+      cleanupUploadedFiles(req);
+      return res.fail("Father's phone must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    }
+    if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
+      cleanupUploadedFiles(req);
+      return res.fail("Guardian's phone must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
 
     const motherPhone = profile?.mother_phone?.trim();
-    const guardianPhone = profile?.guardian_phone?.trim();
-
     if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
+      cleanupUploadedFiles(req);
       return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
-    if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
-      return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
 
     const phoneFields = ['phone'];
     for (const field of phoneFields) {
       const val = profile?.[field];
       if (val && val.trim() !== '' && !/^[6-9]\d{9}$/.test(val.trim())) {
+        cleanupUploadedFiles(req);
         return res.fail(`${field.replace('_', ' ')} is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.`, [], 422);
       }
     }
 
     // Prevent student email and parent email being identical
     const studentEmail = profile?.email?.trim().toLowerCase();
-    const parentEmailCheck = (profile?.parent_email || profile?.father_email || profile?.mother_email || profile?.email)?.trim().toLowerCase();
-    if (studentEmail && parentEmailCheck && studentEmail === parentEmailCheck)
+    const parentEmailCheck = (profile?.parent_email || profile?.guardian_email || profile?.father_email || profile?.mother_email || profile?.email)?.trim().toLowerCase();
+    if (studentEmail && parentEmailCheck && studentEmail === parentEmailCheck) {
+      cleanupUploadedFiles(req);
       return res.fail('Student email and parent email cannot be the same address.', [], 422);
+    }
 
     const schoolId = req.user.school_id;
     const parentEmail = parentEmailCheck;
-    const parentName = profile?.father_name || profile?.mother_name || profile?.guardian_name || `${last_name} Family`;
-    const parentPhone = profile?.father_phone || profile?.mother_phone || profile?.guardian_phone || profile?.phone;
+    const parentName = profile?.father_name || profile?.guardian_name || profile?.mother_name || `${last_name} Family`;
+    const parentPhone = profile?.father_phone || profile?.guardian_phone || profile?.mother_phone || profile?.phone;
 
     if (!parentEmail) {
+      cleanupUploadedFiles(req);
       return res.fail('Parent email is required for account creation.', [], 422);
     }
 
     if (password && password.length < 8) {
+      cleanupUploadedFiles(req);
       return res.fail('Student password must be at least 8 characters long.', [], 422);
     }
     if (parent_password && parent_password.length < 8) {
+      cleanupUploadedFiles(req);
       return res.fail('Parent password must be at least 8 characters long.', [], 422);
     }
 
@@ -360,14 +438,17 @@ exports.admit = async (req, res, next) => {
         }
       }
 
-      // 2. Handle Parent User Account (Logic remains same)
+      // 2. Handle Parent User Account
       let parentUserId;
       let parentAccountCreated = false;
       const [[existingParentUser]] = await sequelize.query(`
-        SELECT id FROM users WHERE email = :email AND school_id = :schoolId LIMIT 1;
+        SELECT id, role FROM users WHERE email = :email AND school_id = :schoolId LIMIT 1;
       `, { replacements: { email: parentEmail, schoolId }, transaction: t });
 
       if (existingParentUser) {
+        if (existingParentUser.role !== 'parent') {
+          throw Object.assign(new Error('This email is already used by a staff account and cannot be used as a parent login.'), { status: 422 });
+        }
         parentUserId = existingParentUser.id;
       } else {
         const [[newParent]] = await sequelize.query(`
@@ -492,12 +573,15 @@ exports.admit = async (req, res, next) => {
         },
         parent: {
           email: result.parentEmail,
-          password: result.generatedParentPassword,
+          password: result.parentAccountCreated ? result.generatedParentPassword : null,
           is_new_account: result.parentAccountCreated
         }
       },
     }, 'Student admitted and parent account linked/created successfully.', 201);
-  } catch (err) { next(err); }
+  } catch (err) {
+    cleanupUploadedFiles(req);
+    next(err);
+  }
 };
 
 // ── GET /api/students/:id ─────────────────────────────────────────────────────
@@ -1349,21 +1433,23 @@ exports.updateProfile = async (req, res, next) => {
 
     const fatherName = mergedProfile.father_name?.trim();
     const fatherPhone = mergedProfile.father_phone?.trim();
-    if (!fatherName) {
-      return res.fail("Father's name is required.", [], 422);
-    }
-    if (!fatherPhone || !/^[6-9]\d{9}$/.test(fatherPhone)) {
-      return res.fail("Father's phone is required and must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
-    }
-
-    const motherPhone = mergedProfile.mother_phone?.trim();
+    const guardianName = mergedProfile.guardian_name?.trim();
+    const guardianRelation = mergedProfile.guardian_relation?.trim();
     const guardianPhone = mergedProfile.guardian_phone?.trim();
+    const guardianEmail = mergedProfile.guardian_email?.trim();
 
-    if (motherPhone && !/^[6-9]\d{9}$/.test(motherPhone)) {
-      return res.fail("Mother's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+    const hasFather = fatherName && fatherPhone && /^[6-9]\d{9}$/.test(fatherPhone);
+    const hasGuardian = guardianName && guardianRelation && guardianPhone && /^[6-9]\d{9}$/.test(guardianPhone) && guardianEmail;
+
+    if (!hasFather && !hasGuardian) {
+      return res.fail("Either Father's details (Name, Phone) or Guardian's details (Name, Relation, Phone, Email) must be fully provided and valid.", [], 422);
+    }
+
+    if (fatherPhone && !/^[6-9]\d{9}$/.test(fatherPhone)) {
+      return res.fail("Father's phone must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
     if (guardianPhone && !/^[6-9]\d{9}$/.test(guardianPhone)) {
-      return res.fail("Guardian's phone is invalid — enter a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
+      return res.fail("Guardian's phone must be a valid 10-digit mobile number starting with 6, 7, 8, or 9.", [], 422);
     }
 
     const phoneFields = ['phone'];

@@ -3,6 +3,9 @@
 const sequelize = require('../config/database');
 const redis = require('../config/redis');
 const { clearPermissionCache } = require('../middlewares/checkPermission');
+const profileVersioning = require('../utils/profileVersioning');
+const auditLogger = require('../utils/auditLogger');
+
 
 const DAY_NAMES = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const TEACHER_BASE_PERMISSION_NAMES = [
@@ -1687,19 +1690,25 @@ exports.reviewStudentCorrectionRequest = async (req, res, next) => {
       const isProfileField = ['phone', 'email', 'address', 'father_name', 'mother_name'].includes(request.field_name);
       
       if (isProfileField) {
-        await sequelize.query(`
-          UPDATE student_profiles
-          SET ${request.field_name} = :requestedValue,
-              updated_at = NOW()
-          WHERE student_id = :studentId AND is_current = true;
-        `, {
-          replacements: {
-            requestedValue: request.requested_value,
-            studentId: request.student_id,
-          },
-          transaction: tx,
+        // Use versioned profile updates to avoid trigger exception
+        await profileVersioning.update({
+          studentId: request.student_id,
+          newData: { [request.field_name]: request.requested_value },
+          changedBy: req.user.id,
+          changeReason: `Approved Correction Request: ${request.change_reason || 'N/A'}`,
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent'],
+          transaction: tx
         });
       } else {
+        // Set audit context so trigger attributes name/dob/gender change correctly
+        await auditLogger.setContext(sequelize, {
+          changedBy: req.user.id,
+          reason: `Approved Correction Request: ${request.change_reason || 'N/A'}`,
+          ipAddress: req.ip,
+          deviceInfo: req.headers['user-agent']
+        }, tx);
+
         await sequelize.query(`
           UPDATE students
           SET ${request.field_name} = :requestedValue,

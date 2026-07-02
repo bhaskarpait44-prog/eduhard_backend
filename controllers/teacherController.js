@@ -6,6 +6,7 @@ const fs = require('fs');
 const sequelize = require('../config/database');
 const redis = require('../config/redis');
 const { notifyClass, notifyAllStudents, sendNotification, notifySubject } = require('../utils/notification');
+const { saveBulkAttendance, getAttendanceStatsForEnrollments } = require('../utils/attendanceCalculator');
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -477,18 +478,39 @@ async function getTeacherContext(req) {
 }
 
 async function enrichAssignment(assignment, session) {
+  const [enrollments] = await sequelize.query(`
+    SELECT id AS enrollment_id FROM enrollments
+    WHERE session_id = :sessionId
+      AND status = 'active'
+      AND class_id = :classId
+      AND section_id = :sectionId;
+  `, {
+    replacements: {
+      sessionId: session?.id || 0,
+      classId: assignment.class_id,
+      sectionId: assignment.section_id,
+    },
+  });
+
+  const enrollmentIds = enrollments.map(e => e.enrollment_id);
+  let below75Count = 0;
+  let attendanceRate = 0;
+
+  if (enrollmentIds.length > 0) {
+    const statsList = await getAttendanceStatsForEnrollments(enrollmentIds);
+    const below75 = statsList.filter(s => s.percentage < 75);
+    below75Count = below75.length;
+    const totalPercentage = statsList.reduce((sum, s) => sum + s.percentage, 0);
+    attendanceRate = parseFloat((totalPercentage / statsList.length).toFixed(2));
+  }
+
   const [[stats]] = await sequelize.query(`
     SELECT
-      COUNT(*) AS student_count,
-      COUNT(a.id) FILTER (WHERE a.date = :today) AS attendance_rows_today,
-      ROUND(
-        AVG(CASE WHEN a.status IN ('present', 'late') THEN 100 WHEN a.status = 'half_day' THEN 50 ELSE 0 END),
-        2
-      ) AS attendance_rate
+      COUNT(a.id) FILTER (WHERE a.date = :today) AS attendance_rows_today
     FROM enrollments e
     LEFT JOIN attendance a
       ON a.enrollment_id = e.id
-     AND a.date BETWEEN :weekStart AND :today
+     AND a.date = :today
     WHERE e.session_id = :sessionId
       AND e.status = 'active'
       AND e.class_id = :classId
@@ -496,28 +518,6 @@ async function enrichAssignment(assignment, session) {
   `, {
     replacements: {
       today: TODAY(),
-      weekStart: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-      sessionId: session?.id || 0,
-      classId: assignment.class_id,
-      sectionId: assignment.section_id,
-    },
-  });
-
-  const [[below75]] = await sequelize.query(`
-    SELECT COUNT(*) AS cnt
-    FROM (
-      SELECT e.id, ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS pct
-      FROM enrollments e
-      LEFT JOIN attendance a ON a.enrollment_id = e.id
-      WHERE e.session_id = :sessionId
-        AND e.status = 'active'
-        AND e.class_id = :classId
-        AND e.section_id = :sectionId
-      GROUP BY e.id
-    ) x
-    WHERE x.pct < 75;
-  `, {
-    replacements: {
       sessionId: session?.id || 0,
       classId: assignment.class_id,
       sectionId: assignment.section_id,
@@ -558,10 +558,10 @@ async function enrichAssignment(assignment, session) {
 
   return {
     ...assignment,
-    student_count: Number(stats?.student_count || 0),
+    student_count: enrollmentIds.length,
     today_attendance_marked: Number(stats?.attendance_rows_today || 0) > 0,
-    attendance_rate: Number(stats?.attendance_rate || 0),
-    below_75_count: Number(below75?.cnt || 0),
+    attendance_rate: attendanceRate,
+    below_75_count: below75Count,
     fee_defaulters_count: Number(feeDefaulters?.cnt || 0),
     pending_remarks_count: Number(pendingRemarks?.cnt || 0),
   };
@@ -1194,6 +1194,7 @@ exports.attendanceStudents = async (req, res, next) => {
       is_non_working_day: isNonWorkingDay,
       is_on_leave: !!leave,
       already_marked: alreadyMarked,
+      is_submitted: alreadyMarked,
       requires_reason: date < TODAY() || alreadyMarked,
       students: students.map((student) => ({
         ...student,
@@ -1229,124 +1230,25 @@ exports.markAttendance = async (req, res, next) => {
       },
     });
 
-    if (leave) {
-      return res.fail('Cannot mark attendance. You are on approved leave for this date.', [], 422);
-    }
-
-    // Check if holiday
-    const [[holiday]] = await sequelize.query(`
-      SELECT name FROM session_holidays
-      WHERE session_id = :sessionId AND holiday_date = :date LIMIT 1;
-    `, { replacements: { sessionId: session.id, date } });
-
-    if (holiday) {
-      return res.fail(`Cannot mark attendance. Selected date is a holiday: ${holiday.name}.`, [], 422);
-    }
-
-    // Check if working day
-    const dayOfWeek = getWeekdayIndex(date);
-    const dayName = DAY_NAMES[dayOfWeek];
-    const [[workingDayConfig]] = await sequelize.query(`
-      SELECT ${dayName} AS is_working FROM session_working_days
-      WHERE session_id = :sessionId LIMIT 1;
-    `, { replacements: { sessionId: session.id } });
-
-    const isWorking = workingDayConfig ? workingDayConfig.is_working : (dayOfWeek !== 0);
-    if (!isWorking) {
-      return res.fail(`Cannot mark attendance. Selected date (${date}) is not a working day.`, [], 422);
-    }
     await assertAttendanceAccess(req.user.id, Number(class_id), Number(section_id), date, scope);
     const access = getAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
-    const isPast = date < TODAY();
 
-    const [existingRows] = await sequelize.query(`
-      SELECT a.id, a.enrollment_id, a.status
-      FROM attendance a
-      JOIN enrollments e ON e.id = a.enrollment_id
-      WHERE a.date = :date
-        AND e.session_id = :sessionId
-        AND e.class_id = :classId
-        AND e.section_id = :sectionId;
-    `, {
-      replacements: {
-        date,
-        sessionId: session?.id || 0,
-        classId: class_id,
-        sectionId: section_id,
-      },
-    });
-
-    if ((isPast || existingRows.length > 0) && !reason) {
-      return res.fail('Reason is required when editing existing or past attendance.', [], 422);
-    }
-
-    const existingMap = new Map(existingRows.map((row) => [Number(row.enrollment_id), row]));
-    const submittedRecords = records.length > 0 ? records : [];
-    const inserted = [];
-    const updated  = [];
-    let skipped = 0;
-
-    await sequelize.transaction(async (transaction) => {
-      for (const record of submittedRecords) {
-        const eid = Number(record.enrollment_id);
-        const existing = existingMap.get(eid);
-
-        if (existing) {
-          await sequelize.query(`
-            UPDATE attendance
-            SET status = :status,
-                override_reason = :overrideReason,
-                marked_by = :markedBy,
-                marked_at = NOW(),
-                updated_at = NOW()
-            WHERE id = :id;
-          `, {
-            replacements: {
-              id: existing.id,
-              status: record.status || 'present',
-              overrideReason: reason,
-              markedBy: req.user.id,
-            },
-            transaction,
-          });
-          updated.push(eid);
-        } else {
-          // Guard: Verify enrollment belongs to this section/session
-          const [[enrollment]] = await sequelize.query(`
-            SELECT id FROM enrollments
-            WHERE id = :eid AND class_id = :classId AND section_id = :sectionId AND session_id = :sessionId;
-          `, { 
-            replacements: { eid, classId: class_id, sectionId: section_id, sessionId: session.id },
-            transaction
-          });
-
-          if (!enrollment) {
-            skipped++;
-            continue;
-          }
-
-          await sequelize.query(`
-            INSERT INTO attendance (enrollment_id, date, status, method, marked_by, marked_at, override_reason, created_at, updated_at)
-            VALUES (:enrollmentId, :date, :status, 'manual', :markedBy, NOW(), :overrideReason, NOW(), NOW());
-          `, {
-            replacements: {
-              enrollmentId: eid,
-              date,
-              status: record.status || 'present',
-              markedBy: req.user.id,
-              overrideReason: isPast ? reason : null,
-            },
-            transaction,
-          });
-          inserted.push(eid);
-        }
-      }
+    const result = await saveBulkAttendance({
+      sessionId: session.id,
+      classId: Number(class_id),
+      sectionId: Number(section_id),
+      date,
+      records,
+      reason,
+      markedBy: req.user.id,
+      isTeacher: true,
+      teacherLeaveCheck: leave ? true : null
     });
 
     await audit('attendance', Number(class_id), {
       field: 'teacher_mark',
-      oldValue: existingRows.length ? 'existing' : null,
-      newValue: `${inserted.length + updated.length} records`,
+      oldValue: result.editedExisting ? 'existing' : null,
+      newValue: `${result.insertedCount + result.updatedCount} records`,
       reason: reason || `Attendance marked for ${date}${subject_id ? ` subject ${subject_id}` : ''}`,
     }, req);
 
@@ -1356,21 +1258,22 @@ exports.markAttendance = async (req, res, next) => {
       subject_id: subject_id ? Number(subject_id) : null,
       date,
       access,
-      marked: inserted.length,
-      updated: updated.length,
-      skipped,
-      updated_enrollment_ids: updated,
-      edited_existing: existingRows.length > 0,
-    }, `Attendance saved. ${inserted.length} marked, ${updated.length} updated, ${skipped} skipped.`);
-  } catch (err) { next(err); }
+      marked: result.insertedCount,
+      updated: result.updatedCount,
+      skipped: result.skippedCount,
+      updated_enrollment_ids: result.updatedEnrollmentIds,
+      edited_existing: result.editedExisting,
+    }, `Attendance saved. ${result.insertedCount} marked, ${result.updatedCount} updated, ${result.skippedCount} skipped.`);
+  } catch (err) {
+    if (err.name === 'ValidationError' || err.name === 'AttendanceConfigError') {
+      return res.fail(err.message, [], err.status || 422);
+    }
+    next(err);
+  }
 };
 
 exports.bulkMarkAttendance = async (req, res, next) => {
   return exports.markAttendance(req, res, next);
-};
-
-exports.updateAttendance = async (req, res, next) => {
-  return res.fail('Manual attendance override is disabled for teachers.', [], 403);
 };
 
 exports.attendanceRegister = async (req, res, next) => {
@@ -1412,8 +1315,7 @@ exports.attendanceRegister = async (req, res, next) => {
             ORDER BY a.date
           ) FILTER (WHERE a.id IS NOT NULL),
           '[]'::json
-        ) AS records,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_percentage
+        ) AS records
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       LEFT JOIN attendance a
@@ -1441,12 +1343,50 @@ exports.attendanceRegister = async (req, res, next) => {
         AND holiday_date BETWEEN :fromDate AND :toDate;
     `, { replacements: { sessionId: session?.id || 0, fromDate, toDate } });
 
+    const [[workingDaysRow]] = await sequelize.query(`
+      SELECT monday, tuesday, wednesday, thursday, friday, saturday, sunday
+      FROM session_working_days
+      WHERE session_id = :sessionId
+      LIMIT 1;
+    `, { replacements: { sessionId: session?.id || 0 } });
+
+    const nonWorkingDays = [];
+    if (workingDaysRow) {
+      const daysMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+      for (const [col, val] of Object.entries(workingDaysRow)) {
+        if (!val && daysMap.hasOwnProperty(col)) {
+          nonWorkingDays.push(daysMap[col]);
+        }
+      }
+    } else {
+      nonWorkingDays.push(0); // Default to Sunday
+    }
+
+    const enrollmentIds = rows.map(r => r.enrollment_id);
+    const statsList = await getAttendanceStatsForEnrollments(enrollmentIds, { fromDate, toDate });
+    const statsMap = new Map(statsList.map(s => [s.enrollmentId, s]));
+
+    const mappedStudents = rows.map((row) => {
+      const stats = statsMap.get(row.enrollment_id) || { percentage: 0, workingDays: 0, presentCount: 0, absentCount: 0, lateCount: 0, halfDayCount: 0 };
+      return {
+        ...row,
+        percentage: stats.percentage,
+        working_days: stats.workingDays,
+        present_count: stats.presentCount,
+        absent_count: stats.absentCount,
+        late_count: stats.lateCount,
+        half_day_count: stats.halfDayCount,
+        attendance_percentage: stats.percentage
+      };
+    });
+
     res.ok({
       session_id: session?.id || 0,
       month: monthNum,
       year: yearNum,
       holidays: holidays.map(h => String(h.holiday_date).slice(0, 10)),
-      students: rows,
+      non_working_days: nonWorkingDays,
+      students: mappedStudents,
     }, `${rows.length} student(s) found in attendance register.`);
   } catch (err) { next(err); }
 };
@@ -1465,33 +1405,42 @@ exports.attendanceSummaryReport = async (req, res, next) => {
         e.roll_number,
         s.id AS student_id,
         s.first_name,
-        s.last_name,
-        COUNT(a.id) AS total_days,
-        SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) AS present,
-        SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
-        SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) AS late,
-        SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) AS half_day,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS percentage
+        s.last_name
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
-      LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date BETWEEN :fromDate AND :toDate
       WHERE e.session_id = :sessionId
         AND e.class_id = :classId
         AND e.section_id = :sectionId
         AND e.status = 'active'
-      GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
-      ORDER BY percentage ASC NULLS LAST, e.roll_number;
+      ORDER BY e.roll_number;
     `, {
       replacements: {
-        fromDate: from,
-        toDate: to,
         sessionId: session?.id || 0,
         classId: class_id,
         sectionId: section_id,
       },
     });
 
-    res.ok({ students: rows, from, to }, `${rows.length} attendance summary row(s) found.`);
+    const enrollmentIds = rows.map(r => r.enrollment_id);
+    const statsList = await getAttendanceStatsForEnrollments(enrollmentIds, { fromDate: from, toDate: to });
+    const statsMap = new Map(statsList.map(s => [s.enrollmentId, s]));
+
+    const mappedStudents = rows.map((row) => {
+      const stats = statsMap.get(row.enrollment_id) || { percentage: 0, workingDays: 0, presentCount: 0, absentCount: 0, lateCount: 0, halfDayCount: 0 };
+      return {
+        ...row,
+        total_days: stats.workingDays,
+        present: stats.presentCount,
+        absent: stats.absentCount,
+        late: stats.lateCount,
+        half_day: stats.halfDayCount,
+        percentage: stats.percentage
+      };
+    });
+
+    mappedStudents.sort((a, b) => a.percentage - b.percentage);
+
+    res.ok({ students: mappedStudents, from, to }, `${mappedStudents.length} attendance summary row(s) found.`);
   } catch (err) { next(err); }
 };
 
@@ -1504,39 +1453,43 @@ exports.attendanceBelowThresholdReport = async (req, res, next) => {
     assertAccess(scope, Number(class_id), Number(section_id));
 
     const [rows] = await sequelize.query(`
-      SELECT *
-      FROM (
-        SELECT
-          e.id AS enrollment_id,
-          e.roll_number,
-          s.id AS student_id,
-          s.first_name,
-          s.last_name,
-          ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS percentage,
-          COUNT(a.id) AS total_days
-        FROM enrollments e
-        JOIN students s ON s.id = e.student_id
-        LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date BETWEEN :fromDate AND :toDate
-        WHERE e.session_id = :sessionId
-          AND e.class_id = :classId
-          AND e.section_id = :sectionId
-          AND e.status = 'active'
-        GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
-      ) x
-      WHERE x.percentage < :threshold
-      ORDER BY x.percentage ASC NULLS LAST, x.roll_number;
+      SELECT
+        e.id AS enrollment_id,
+        e.roll_number,
+        s.id AS student_id,
+        s.first_name,
+        s.last_name
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.session_id = :sessionId
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+        AND e.status = 'active'
+      ORDER BY e.roll_number;
     `, {
       replacements: {
-        fromDate: from,
-        toDate: to,
-        threshold: Number(threshold),
         sessionId: session?.id || 0,
         classId: class_id,
         sectionId: section_id,
       },
     });
 
-    res.ok({ students: rows, threshold: Number(threshold) }, `${rows.length} student(s) below threshold.`);
+    const enrollmentIds = rows.map(r => r.enrollment_id);
+    const statsList = await getAttendanceStatsForEnrollments(enrollmentIds, { fromDate: from, toDate: to });
+    const statsMap = new Map(statsList.map(s => [s.enrollmentId, s]));
+
+    const mappedStudents = rows.map((row) => {
+      const stats = statsMap.get(row.enrollment_id) || { percentage: 0, workingDays: 0 };
+      return {
+        ...row,
+        total_days: stats.workingDays,
+        percentage: stats.percentage
+      };
+    }).filter(s => s.percentage < Number(threshold));
+
+    mappedStudents.sort((a, b) => a.percentage - b.percentage);
+
+    res.ok({ students: mappedStudents, threshold: Number(threshold) }, `${mappedStudents.length} student(s) below threshold.`);
   } catch (err) { next(err); }
 };
 
@@ -2288,12 +2241,7 @@ exports.studentList = async (req, res, next) => {
         c.name AS class_name,
         sec.name AS section_name,
         sp.photo_path,
-        ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_percentage,
         latest_result.percentage AS last_result_percentage,
-        CASE
-          WHEN ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) < 75 THEN 'warning'
-          ELSE 'good'
-        END AS attendance_status,
         (
           SELECT STRING_AGG(ss.subject_id::text, ',')
           FROM student_subjects ss
@@ -2306,7 +2254,6 @@ exports.studentList = async (req, res, next) => {
       JOIN classes c ON c.id = e.class_id
       JOIN sections sec ON sec.id = e.section_id
       LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
-      LEFT JOIN attendance a ON a.enrollment_id = e.id
       LEFT JOIN LATERAL (
         SELECT sr.percentage
         FROM student_results sr
@@ -2327,7 +2274,6 @@ exports.studentList = async (req, res, next) => {
             AND ss2.subject_id = :subjectId
             AND ss2.is_active = true
         ))
-      GROUP BY s.id, s.admission_no, s.first_name, s.last_name, s.gender, e.id, e.roll_number, e.class_id, e.section_id, c.name, sec.name, sp.photo_path, latest_result.percentage
       ORDER BY c.name, sec.name, COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer;
     `, {
       replacements: {
@@ -2352,6 +2298,10 @@ exports.studentList = async (req, res, next) => {
       }
     });
 
+    const enrollmentIds = rows.map(r => r.enrollment_id);
+    const statsList = await getAttendanceStatsForEnrollments(enrollmentIds);
+    const statsMap = new Map(statsList.map(s => [s.enrollmentId, s]));
+
     const formattedStudents = await Promise.all(rows.map(async (row) => {
       let is_online = false;
       if (redis.status === 'ready') {
@@ -2359,8 +2309,11 @@ exports.studentList = async (req, res, next) => {
         const val = await redis.get(key);
         is_online = val === '1';
       }
+      const stats = statsMap.get(row.enrollment_id) || { percentage: 0 };
       return {
         ...row,
+        attendance_percentage: stats.percentage,
+        attendance_status: stats.percentage < 75 ? 'warning' : 'good',
         is_online,
       };
     }));

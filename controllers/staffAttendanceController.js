@@ -269,7 +269,10 @@ exports.getMonthlyRegister = async (req, res, next) => {
 exports.getStaffSummary = async (req, res, next) => {
   try {
     const schoolId = req.user.school_id;
-    const staffId = req.params.staff_id; 
+    const staffId = Number(req.params.staff_id);
+    if (!Number.isInteger(staffId) || staffId <= 0) {
+      return res.fail('Invalid staff_id. Must be a positive integer.', [], 400);
+    }
     const { from, to, type } = req.query; 
 
     if (!from || !to || !type) return res.fail('From date, to date, and staff type (user/teacher) are required.');

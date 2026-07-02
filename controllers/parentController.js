@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { getAttendancePercent } = require('../utils/attendanceCalculator');
 
 exports.getWards = async (req, res, next) => {
   try {
@@ -30,26 +31,35 @@ exports.getWardAttendance = async (req, res, next) => {
     const parentEmail = req.user.email;
     const schoolId = req.user.school_id;
 
-    // Verify ownership
+    // Verify ownership and get active enrollment ID
     const [[isValid]] = await sequelize.query(`
-      SELECT s.id 
+      SELECT s.id, e.id AS enrollment_id
       FROM students s 
       JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
-      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId
+      LEFT JOIN enrollments e ON e.student_id = s.id AND e.status = 'active'
+      WHERE s.id = :student_id AND LOWER(sp.parent_email) = LOWER(:parentEmail) AND s.school_id = :schoolId AND s.is_deleted = false
     `, { replacements: { student_id, parentEmail, schoolId } });
 
     if (!isValid) return res.fail('Unauthorized access to student record.', [], 403);
 
+    if (!isValid.enrollment_id) {
+      return res.ok({ records: [], summary: null }, 'No active enrollment found for this ward.');
+    }
+
     const [attendance] = await sequelize.query(`
-      SELECT a.date, a.status 
+      SELECT a.date, a.status, a.override_reason AS remarks
       FROM attendance a
-      JOIN enrollments e ON e.id = a.enrollment_id
-      WHERE e.student_id = :student_id
+      WHERE a.enrollment_id = :enrollmentId
       ORDER BY a.date DESC
       LIMIT 60;
-    `, { replacements: { student_id } });
+    `, { replacements: { enrollmentId: isValid.enrollment_id } });
 
-    res.ok(attendance);
+    const summary = await getAttendancePercent(isValid.enrollment_id);
+
+    res.ok({
+      records: attendance,
+      summary
+    });
   } catch (err) { next(err); }
 };
 

@@ -6,6 +6,7 @@ const redis = require('../config/redis');
 const logger = require('../utils/logger');
 const { recomputeStudentAchievements } = require('../utils/achievementEngine');
 const { sendNotification } = require('../utils/notification');
+const { getAttendancePercent, getAttendanceStatsForEnrollments } = require('../utils/attendanceCalculator');
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 const forbiddenTracker = new Map();
@@ -228,38 +229,18 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
 }
 
 async function getAttendanceSummary(enrollmentId) {
-  const [[summary]] = await sequelize.query(`
-    SELECT
-      SUM(CASE WHEN status <> 'holiday' THEN 1 ELSE 0 END) AS working_days,
-      SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_days,
-      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_days,
-      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_days,
-      SUM(CASE WHEN status = 'half_day' THEN 1 ELSE 0 END) AS half_days,
-      ROUND(
-        (
-          SUM(CASE WHEN status IN ('present', 'late') THEN 1 ELSE 0 END)
-          + SUM(CASE WHEN status = 'half_day' THEN 1 ELSE 0 END) * 0.5
-        ) / NULLIF(SUM(CASE WHEN status <> 'holiday' THEN 1 ELSE 0 END), 0) * 100,
-        2
-      ) AS percentage
-    FROM attendance
-    WHERE enrollment_id = :enrollmentId;
-  `, { replacements: { enrollmentId } });
-
-  const percentage = Number(summary?.percentage || 0);
-  const workingDays = Number(summary?.working_days || 0);
-  const presentDays = Number(summary?.present_days || 0);
-  const minimumTargetDays = Math.ceil(workingDays * 0.75);
+  const stats = await getAttendancePercent(enrollmentId);
+  const minimumTargetDays = Math.ceil(stats.workingDays * 0.75);
 
   return {
-    working_days: workingDays,
-    present_days: presentDays,
-    absent_days: Number(summary?.absent_days || 0),
-    late_days: Number(summary?.late_days || 0),
-    half_days: Number(summary?.half_days || 0),
-    percentage,
-    band: attendanceBand(percentage),
-    days_needed_for_minimum: Math.max(minimumTargetDays - presentDays, 0),
+    working_days: stats.workingDays,
+    present_days: stats.presentCount,
+    absent_days: stats.absentCount,
+    late_days: stats.lateCount,
+    half_days: stats.halfDayCount,
+    percentage: stats.percentage,
+    band: attendanceBand(stats.percentage),
+    days_needed_for_minimum: Math.max(minimumTargetDays - stats.presentCount, 0),
   };
 }
 
@@ -922,42 +903,19 @@ exports.attendance = async (req, res, next) => {
       },
     });
 
-    const [[monthly]] = await sequelize.query(`
-      SELECT
-        COUNT(*) FILTER (WHERE status <> 'holiday') AS working_days,
-        COUNT(*) FILTER (WHERE status = 'present') AS present_days,
-        COUNT(*) FILTER (WHERE status = 'absent') AS absent_days,
-        COUNT(*) FILTER (WHERE status = 'late') AS late_days,
-        COUNT(*) FILTER (WHERE status = 'half_day') AS half_days,
-        ROUND(
-          (
-            COUNT(*) FILTER (WHERE status IN ('present', 'late'))
-            + COUNT(*) FILTER (WHERE status = 'half_day') * 0.5
-          ) / NULLIF(COUNT(*) FILTER (WHERE status <> 'holiday'), 0) * 100,
-          2
-        ) AS percentage
-      FROM attendance
-      WHERE enrollment_id = :enrollmentId
-        AND date BETWEEN :monthStart AND :monthEnd;
-    `, {
-      replacements: {
-        enrollmentId: context.enrollmentId,
-        monthStart,
-        monthEnd,
-      },
-    });
+    const [monthlyStats] = await getAttendanceStatsForEnrollments([context.enrollmentId], { fromDate: monthStart, toDate: monthEnd });
 
     res.ok({
       summary,
       selected_month: { month, year },
       records,
       monthly_summary: {
-        working_days: Number(monthly?.working_days || 0),
-        present_days: Number(monthly?.present_days || 0),
-        absent_days: Number(monthly?.absent_days || 0),
-        late_days: Number(monthly?.late_days || 0),
-        half_days: Number(monthly?.half_days || 0),
-        percentage: Number(monthly?.percentage || 0),
+        working_days: monthlyStats?.workingDays || 0,
+        present_days: monthlyStats?.presentCount || 0,
+        absent_days: monthlyStats?.absentCount || 0,
+        late_days: monthlyStats?.lateCount || 0,
+        half_days: monthlyStats?.halfDayCount || 0,
+        percentage: monthlyStats?.percentage || 0,
       },
     }, 'Attendance loaded.');
   } catch (err) { next(err); }
@@ -974,32 +932,32 @@ exports.attendanceSummary = async (req, res, next) => {
 exports.attendanceTrend = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
-    const [rows] = await sequelize.query(`
-      WITH months AS (
-        SELECT generate_series(
-          date_trunc('month', CURRENT_DATE) - interval '5 months',
-          date_trunc('month', CURRENT_DATE),
-          interval '1 month'
-        )::date AS month_start
-      )
+    const [months] = await sequelize.query(`
       SELECT
-        to_char(m.month_start, 'Mon YYYY') AS month_label,
-        ROUND(
-          (
-            COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))
-            + COUNT(a.id) FILTER (WHERE a.status = 'half_day') * 0.5
-          ) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100,
-          2
-        ) AS percentage
-      FROM months m
-      LEFT JOIN attendance a
-        ON a.enrollment_id = :enrollmentId
-       AND date_trunc('month', a.date) = date_trunc('month', m.month_start)
-      GROUP BY m.month_start
-      ORDER BY m.month_start ASC;
-    `, { replacements: { enrollmentId: context.enrollmentId } });
+        date_trunc('month', d)::date AS month_start,
+        (date_trunc('month', d) + interval '1 month' - interval '1 day')::date AS month_end,
+        to_char(d, 'Mon YYYY') AS month_label
+      FROM generate_series(
+        date_trunc('month', CURRENT_DATE) - interval '5 months',
+        date_trunc('month', CURRENT_DATE),
+        interval '1 month'
+      ) d;
+    `);
 
-    res.ok({ trend: rows.map((row) => ({ ...row, band: attendanceBand(row.percentage) })) }, 'Attendance trend loaded.');
+    const trend = [];
+    for (const m of months) {
+      const startStr = String(m.month_start).slice(0, 10);
+      const endStr   = String(m.month_end).slice(0, 10);
+      const [stats]  = await getAttendanceStatsForEnrollments([context.enrollmentId], { fromDate: startStr, toDate: endStr });
+      const percentage = stats?.percentage || 0;
+      trend.push({
+        month_label: m.month_label,
+        percentage,
+        band: attendanceBand(percentage)
+      });
+    }
+
+    res.ok({ trend }, 'Attendance trend loaded.');
   } catch (err) { next(err); }
 };
 

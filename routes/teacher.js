@@ -63,6 +63,20 @@ const upload = multer({
   }
 });
 
+const { body } = require('express-validator');
+const validate = require('../middlewares/validate');
+
+const markAttendanceValidators = [
+  body('class_id').isInt({ min: 1 }).withMessage('class_id must be a positive integer'),
+  body('section_id').isInt({ min: 1 }).withMessage('section_id must be a positive integer'),
+  body('date').optional().isISO8601().withMessage('date must be in YYYY-MM-DD format'),
+  body('records').isArray({ min: 1 }).withMessage('records must be a non-empty array'),
+  body('records.*.enrollment_id').isInt({ min: 1 }).withMessage('records.*.enrollment_id must be a positive integer'),
+  body('records.*.status').isIn(['present', 'absent', 'late', 'half_day']).withMessage('records.*.status must be one of: present, absent, late, half_day'),
+  body('reason').optional({ nullable: true }).isString().withMessage('reason must be a string'),
+  validate
+];
+
 router.use(requireRole('teacher'));
 
 router.get('/dashboard', ctrl.dashboard);
@@ -75,9 +89,8 @@ router.get('/my-classes/:id/overview', ctrl.myClassOverview);
 
 router.get('/attendance/status', ctrl.attendanceStatus);
 router.get('/attendance/students', ctrl.attendanceStudents);
-router.post('/attendance/mark', ctrl.markAttendance);
-router.post('/attendance/bulk-mark', ctrl.bulkMarkAttendance);
-router.patch('/attendance/:id', ctrl.updateAttendance);
+router.post('/attendance/mark', markAttendanceValidators, ctrl.markAttendance);
+router.post('/attendance/bulk-mark', markAttendanceValidators, ctrl.bulkMarkAttendance);
 router.get('/attendance/register', ctrl.attendanceRegister);
 router.get('/attendance/reports/summary', ctrl.attendanceSummaryReport);
 router.get('/attendance/reports/below-threshold', ctrl.attendanceBelowThresholdReport);

@@ -21,7 +21,7 @@ module.exports = (err, req, res, next) => {
     } else if (constraint.includes('idx_profiles_email_unique')) {
       message = 'Student email already exists.';
     } else if (constraint.includes('idx_profiles_parent_email_unique')) {
-      message = 'Father email already exists.';
+      message = 'Parent login email already exists.';
     } else if (constraint.includes('idx_profiles_father_phone_unique')) {
       message = 'Father Phone Number already exists.';
     } else if (constraint.includes('idx_profiles_mother_phone_unique')) {
