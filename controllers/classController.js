@@ -7,6 +7,7 @@ const { invalidateCache } = require('../middlewares/cache');
 
 // ── Audit context helper ──────────────────────────────────────────────────
 const auditCtx = (req) => ({
+  schoolId  : req.user?.school_id || null,
   changedBy : req.user?.id   || null,
   ipAddress : req.ip         || null,
   deviceInfo: req.headers['user-agent'] || null,
@@ -118,50 +119,20 @@ exports.list = async (req, res, next) => {
     const { is_active } = req.query;
     const schoolId      = req.user.school_id;
 
-    const where = { school_id: schoolId };
-    if (is_active !== undefined) where.is_active = is_active === 'true';
-
-    // Check for optional columns in classes table
-    const [columns] = await sequelize.query(`
-      SELECT column_name
-      FROM information_schema.columns
-      WHERE table_name = 'classes'
-        AND table_schema = CURRENT_SCHEMA()
-    `);
-    const columnNames = columns.map(c => c.column_name);
-    const hasDisplayName = columnNames.includes('display_name');
-    const hasDescription = columnNames.includes('description');
-    const hasMinAge = columnNames.includes('min_age');
-    const hasMaxAge = columnNames.includes('max_age');
-    const hasIsDeleted = columnNames.includes('is_deleted');
-
-    // Check for is_deleted in related tables
-    const [sectionColRows] = await sequelize.query(`
-      SELECT column_name FROM information_schema.columns 
-      WHERE table_name = 'sections' AND table_schema = CURRENT_SCHEMA()
-    `);
-    const sectionHasIsDeleted = sectionColRows.map(c => c.column_name).includes('is_deleted');
-
-    const [subjectColRows] = await sequelize.query(`
-      SELECT column_name FROM information_schema.columns 
-      WHERE table_name = 'subjects' AND table_schema = CURRENT_SCHEMA()
-    `);
-    const subjectHasIsDeleted = subjectColRows.map(c => c.column_name).includes('is_deleted');
-
     const [classes] = await sequelize.query(`
       SELECT
         c.id, c.name,
-        ${hasDisplayName ? 'c.display_name' : 'NULL as display_name'},
+        c.display_name,
         c.order_number,
-        ${columnNames.includes('stream') ? 'c.stream' : 'NULL as stream'},
-        ${hasMinAge ? 'c.min_age' : 'NULL as min_age'},
-        ${hasMaxAge ? 'c.max_age' : 'NULL as max_age'},
-        ${hasDescription ? 'c.description' : 'NULL as description'},
-        ${columnNames.includes('is_active') ? 'c.is_active' : 'true as is_active'},
+        c.stream,
+        c.min_age,
+        c.max_age,
+        c.description,
+        c.is_active,
         c.created_at, c.updated_at,
-        COUNT(DISTINCT s.id)  FILTER (WHERE ${sectionHasIsDeleted ? 's.is_deleted = false' : '1=1'}) AS section_count,
-        SUM(s.capacity)       FILTER (WHERE ${sectionHasIsDeleted ? 's.is_deleted = false' : '1=1'}) AS total_capacity,
-        COUNT(DISTINCT sub.id) FILTER (WHERE ${subjectHasIsDeleted ? 'sub.is_deleted = false' : '1=1'}) AS subject_count,
+        COUNT(DISTINCT s.id)  FILTER (WHERE s.is_deleted = false) AS section_count,
+        SUM(s.capacity)       FILTER (WHERE s.is_deleted = false) AS total_capacity,
+        COUNT(DISTINCT sub.id) FILTER (WHERE sub.is_deleted = false) AS subject_count,
         COUNT(DISTINCT e.id)   FILTER (WHERE e.status = 'active') AS student_count,
         (
           SELECT COALESCE(
@@ -178,15 +149,15 @@ exports.list = async (req, res, next) => {
           )
           FROM sections ss
           WHERE ss.class_id = c.id
-            ${sectionHasIsDeleted ? 'AND ss.is_deleted = false' : ''}
+            AND ss.is_deleted = false
         ) AS sections
       FROM classes c
       LEFT JOIN sections    s   ON s.class_id   = c.id
       LEFT JOIN subjects    sub ON sub.class_id  = c.id
       LEFT JOIN enrollments e   ON e.class_id    = c.id
       WHERE c.school_id   = :schoolId
-        ${hasIsDeleted ? 'AND c.is_deleted = false' : ''}
-        ${is_active !== undefined && columnNames.includes('is_active') ? `AND c.is_active = :isActive` : ''}
+        AND c.is_deleted = false
+        ${is_active !== undefined ? 'AND c.is_active = :isActive' : ''}
       GROUP BY c.id
       ORDER BY c.order_number ASC;
     `, {
@@ -204,10 +175,10 @@ exports.list = async (req, res, next) => {
         COUNT(DISTINCT sub.id) AS total_subjects,
         COUNT(DISTINCT e.id)   AS total_students
       FROM classes c
-      LEFT JOIN sections    s   ON s.class_id  = c.id  AND ${sectionHasIsDeleted ? 's.is_deleted = false' : '1=1'}
-      LEFT JOIN subjects    sub ON sub.class_id = c.id  AND ${subjectHasIsDeleted ? 'sub.is_deleted = false' : '1=1'}
+      LEFT JOIN sections    s   ON s.class_id  = c.id  AND s.is_deleted = false
+      LEFT JOIN subjects    sub ON sub.class_id = c.id  AND sub.is_deleted = false
       LEFT JOIN enrollments e   ON e.class_id   = c.id  AND e.status      = 'active'
-      WHERE c.school_id = :schoolId ${hasIsDeleted ? 'AND c.is_deleted = false' : ''};
+      WHERE c.school_id = :schoolId AND c.is_deleted = false;
     `, { replacements: { schoolId } });
 
     return res.ok({ classes, stats: stats[0] });
@@ -366,6 +337,23 @@ exports.update = async (req, res, next) => {
     const cls = await Class.findOne({ where: { id, school_id: schoolId } });
     if (!cls) return res.fail('Class not found.', [], 404);
 
+    // Normalize display_name
+    if (Object.prototype.hasOwnProperty.call(updateData, 'display_name')) {
+      updateData.display_name = updateData.display_name || null;
+    }
+
+    // Validate effective min/max age range to prevent chk_classes_age_range violation
+    const nextMinAge = Object.prototype.hasOwnProperty.call(updateData, 'min_age')
+      ? (updateData.min_age === '' || updateData.min_age === null ? null : parseInt(updateData.min_age, 10))
+      : cls.min_age;
+    const nextMaxAge = Object.prototype.hasOwnProperty.call(updateData, 'max_age')
+      ? (updateData.max_age === '' || updateData.max_age === null ? null : parseInt(updateData.max_age, 10))
+      : cls.max_age;
+
+    if (nextMinAge !== null && nextMaxAge !== null && nextMaxAge <= nextMinAge) {
+      return res.fail('Max age must be greater than min age', [], 400);
+    }
+
     // Check order_number conflict if changing
     const nextOrderNumber = updateData.order_number ?? cls.order_number;
     const nextStream = normalizeStream(
@@ -426,7 +414,7 @@ exports.remove = async (req, res, next) => {
     if (parseInt(cnt) > 0) {
       if (!force) {
         return res.fail(
-          `Cannot delete class — ${cnt} student(s) are currently enrolled. Delete anyway to close those enrollments first.`,
+          `Cannot delete class — ${cnt} student(s) are currently enrolled. Resend with force=true to close these enrollments and delete the class.`,
           [{ code: 'ACTIVE_ENROLLMENTS', count: parseInt(cnt, 10) }],
           400
         );

@@ -1,7 +1,9 @@
 'use strict';
 
 const { Certificate, Student, Teacher, User, School, Enrollment, Class, Family } = require('../models');
-const { Op } = require('sequelize');
+const { Op, literal } = require('sequelize');
+const sequelize = require('../config/database');
+const { writeAuditLog } = require('../utils/writeAuditLog');
 
 /**
  * Helper to format date as "DD Month YYYY"
@@ -45,13 +47,12 @@ const certificateController = {
       if (recipient_type) andConditions.push({ recipient_type });
 
       if (search) {
-        // Bug 9 Fix: Search matching student/teacher IDs first to avoid findAndCountAll count issues with associations
         const matchingStudents = await Student.findAll({
           where: {
             school_id,
             [Op.or]: [
               { first_name: { [Op.iLike]: `%${search}%` } },
-              { last_name: { [Op.iLike]: `%${search}%` } },
+              { last_name:  { [Op.iLike]: `%${search}%` } },
               { admission_no: { [Op.iLike]: `%${search}%` } },
             ]
           },
@@ -63,8 +64,8 @@ const certificateController = {
           where: {
             school_id,
             [Op.or]: [
-              { first_name: { [Op.iLike]: `%${search}%` } },
-              { last_name: { [Op.iLike]: `%${search}%` } },
+              { first_name:  { [Op.iLike]: `%${search}%` } },
+              { last_name:   { [Op.iLike]: `%${search}%` } },
               { employee_id: { [Op.iLike]: `%${search}%` } },
             ]
           },
@@ -72,13 +73,12 @@ const certificateController = {
         });
         const teacherIds = matchingTeachers.map(t => t.id);
 
-        andConditions.push({
-          [Op.or]: [
-            { certificate_no: { [Op.iLike]: `%${search}%` } },
-            { student_id: { [Op.in]: studentIds } },
-            { teacher_id: { [Op.in]: teacherIds } },
-          ]
-        });
+        // Bug #10 fix: only include non-empty IN() clauses — empty arrays produce
+        // `column IN ()` which is valid but wasteful (and some DB engines warn about it)
+        const orConditions = [{ certificate_no: { [Op.iLike]: `%${search}%` } }];
+        if (studentIds.length) orConditions.push({ student_id: { [Op.in]: studentIds } });
+        if (teacherIds.length)  orConditions.push({ teacher_id: { [Op.in]: teacherIds } });
+        andConditions.push({ [Op.or]: orConditions });
       }
 
       const where = { [Op.and]: andConditions };
@@ -147,7 +147,8 @@ const certificateController = {
         certificates: transformedRows,
         total: count,
         page: parseInt(page),
-        pages: Math.ceil(count / limit),
+        // Bug #2 fix: use parsed integer pLimit, not raw query-string `limit`
+        pages: Math.ceil(count / pLimit),
       });
     } catch (error) {
       console.error('[CertificateController.getCertificates]', error);
@@ -161,11 +162,29 @@ const certificateController = {
       const { type, recipient_type, student_id, teacher_id, extra_data } = req.body;
 
       if (!type || !recipient_type) {
-        return res.fail('Type and recipient type are required.');
+        return res.fail('Type and recipient type are required.', [], 422);
+      }
+
+      // Bug #4 fix: validate presence of recipient ID before doing any DB work
+      if (recipient_type === 'student' && !student_id) {
+        return res.fail('student_id is required for student certificates.', [], 422);
+      }
+      if (recipient_type === 'staff' && !teacher_id) {
+        return res.fail('teacher_id is required for staff certificates.', [], 422);
       }
 
       const school = await School.findByPk(school_id);
       if (!school) return res.fail('School not found.', [], 404);
+
+      // Bug #3 fix: IDOR guard — verify the recipient belongs to this school
+      if (recipient_type === 'student') {
+        const studentExists = await Student.findOne({ where: { id: student_id, school_id, is_deleted: false } });
+        if (!studentExists) return res.fail('Student not found or unauthorized.', [], 404);
+      }
+      if (recipient_type === 'staff') {
+        const teacherExists = await Teacher.findOne({ where: { id: teacher_id, school_id, is_deleted: false } });
+        if (!teacherExists) return res.fail('Teacher not found or unauthorized.', [], 404);
+      }
 
       // Generate certificate number
       const prefixMap = {
@@ -198,33 +217,39 @@ const certificateController = {
         return res.fail('A Transfer Certificate has already been issued for this student.', [], 400);
       }
       
-      const lastCert = await Certificate.findOne({
-        where: {
-          certificate_no: { [Op.like]: `${prefix}-${year}-%` },
-          school_id
-        },
-        order: [['created_at', 'DESC']],
-      });
+      // Bug #5 fix: use a transaction + SELECT FOR UPDATE to eliminate the race condition
+      // where two concurrent requests read the same lastCert and generate duplicate cert numbers
+      const certificate = await sequelize.transaction(async (tx) => {
+        const lastCert = await Certificate.findOne({
+          where: {
+            certificate_no: { [Op.like]: `${prefix}-${year}-%` },
+            school_id
+          },
+          order: [['created_at', 'DESC']],
+          lock: tx.LOCK.UPDATE,
+          transaction: tx,
+        });
 
-      let sequence = 1;
-      if (lastCert) {
-        const parts = lastCert.certificate_no.split('-');
-        const lastNo = parts[parts.length - 1];
-        sequence = parseInt(lastNo) + 1;
-      }
-      const certificate_no = `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
+        let sequence = 1;
+        if (lastCert) {
+          const parts = lastCert.certificate_no.split('-');
+          const lastNo = parts[parts.length - 1];
+          sequence = parseInt(lastNo) + 1;
+        }
+        const certificate_no = `${prefix}-${year}-${sequence.toString().padStart(4, '0')}`;
 
-      const certificate = await Certificate.create({
-        certificate_no,
-        school_id,
-        type,
-        recipient_type,
-        student_id: recipient_type === 'student' ? student_id : null,
-        teacher_id: recipient_type === 'staff' ? teacher_id : null,
-        issued_by: user_id,
-        issued_date: new Date(),
-        extra_data: extra_data || {},
-        status: 'active',
+        return Certificate.create({
+          certificate_no,
+          school_id,
+          type,
+          recipient_type,
+          student_id: recipient_type === 'student' ? student_id : null,
+          teacher_id: recipient_type === 'staff'   ? teacher_id : null,
+          issued_by: user_id,
+          issued_date: new Date(),
+          extra_data: extra_data || {},
+          status: 'active',
+        }, { transaction: tx });
       });
 
       // Fetch recipient data for immediate frontend use
@@ -350,6 +375,18 @@ const certificateController = {
       if (!certificate) {
         return res.fail('Certificate not found.', [], 404);
       }
+
+      // Bug #8 fix: write audit trail before mutating — revoking is permanent
+      await writeAuditLog(sequelize, {
+        tableName : 'certificates',
+        recordId  : certificate.id,
+        schoolId  : req.user.school_id,
+        changes   : [{ field: 'status', oldValue: certificate.status, newValue: 'revoked' }],
+        changedBy : req.user.id,
+        reason    : 'Admin revoked certificate — permanent action',
+        ipAddress : req.ip,
+        deviceInfo: req.headers['user-agent'],
+      });
 
       certificate.status = 'revoked';
       await certificate.save();

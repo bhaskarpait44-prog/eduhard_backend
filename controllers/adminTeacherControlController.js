@@ -908,11 +908,14 @@ exports.updateTimetableSlot = async (req, res, next) => {
     }
 
     const setClause = updates.map((field) => `${field} = :${field}`).join(', ');
+    // Bug #8 fix: build explicit replacements from allowed fields only — never spread raw req.body into SQL
+    const safeReplacements = { id };
+    updates.forEach((field) => { safeReplacements[field] = req.body[field]; });
     await sequelize.query(`
       UPDATE timetable_slots
       SET ${setClause}
       WHERE id = :id;
-    `, { replacements: { ...req.body, id } });
+    `, { replacements: safeReplacements });
 
     await audit('timetable_slots', Number(id), {
       field: 'updated',
@@ -1425,7 +1428,7 @@ exports.reviewLeave = async (req, res, next) => {
     });
 
     if (status === 'approved' && leave.leave_type !== 'without_pay') {
-      const session = await getCurrentSession(req.user.school_id);
+      // Bug #2 fix: reuse already-fetched session from top of function — no second DB call needed
       await ensureTeacherLeaveBalances(leave.teacher_id, session?.id || 0, tx);
 
       await sequelize.query(`
@@ -1434,18 +1437,12 @@ exports.reviewLeave = async (req, res, next) => {
             remaining = remaining - :daysCount,
             updated_at = NOW()
         WHERE teacher_id = :teacherId
-          AND session_id = (
-            SELECT id
-            FROM sessions
-            WHERE school_id = :schoolId
-            ORDER BY CASE WHEN is_current = true THEN 0 ELSE 1 END, start_date DESC
-            LIMIT 1
-          )
+          AND session_id = :sessionId
           AND leave_type = :leaveType;
       `, {
         replacements: {
           teacherId: leave.teacher_id,
-          schoolId: req.user.school_id,
+          sessionId: session?.id || 0,
           leaveType: leave.leave_type,
           daysCount: leave.days_count,
         },

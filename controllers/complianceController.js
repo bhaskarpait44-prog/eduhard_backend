@@ -1,6 +1,7 @@
 'use strict';
 
 const sequelize = require('../config/database');
+const { getAttendanceStatsForEnrollments } = require('../utils/attendanceCalculator');
 
 exports.getReport = async (req, res, next) => {
   try {
@@ -92,48 +93,71 @@ exports.getReport = async (req, res, next) => {
 
       // 2. ATTENDANCE COMPLIANCE
       (async () => {
-        const [[overall]] = await sequelize.query(`
-          SELECT 
-            (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late')) + COUNT(a.id) FILTER (WHERE a.status = 'half_day') * 0.5)::float / 
-            NULLIF(COUNT(a.id) FILTER (WHERE a.status IN ('present', 'absent', 'late', 'half_day')), 0) * 100 AS rate
-          FROM attendance a
-          JOIN enrollments e ON e.id = a.enrollment_id
-          JOIN students s ON s.id = e.student_id
-          WHERE e.session_id = :sessionId AND s.school_id = :schoolId;
-        `, { replacements: { sessionId, schoolId } });
-
-        const classWise = await sequelize.query(`
-          SELECT 
-            c.name as class_name,
-            (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late')) + COUNT(a.id) FILTER (WHERE a.status = 'half_day') * 0.5)::float / 
-            NULLIF(COUNT(a.id) FILTER (WHERE a.status IN ('present', 'absent', 'late', 'half_day')), 0) * 100 AS rate
+        const [enrollments] = await sequelize.query(`
+          SELECT e.id AS enrollment_id, c.name AS class_name
           FROM enrollments e
-          JOIN classes c ON c.id = e.class_id
           JOIN students s ON s.id = e.student_id
-          LEFT JOIN attendance a ON a.enrollment_id = e.id
-          WHERE e.session_id = :sessionId AND s.school_id = :schoolId
-          GROUP BY c.id, c.name;
-        `, { replacements: { sessionId, schoolId }, type: sequelize.QueryTypes.SELECT });
-
-        const [[atRisk]] = await sequelize.query(`
-          WITH student_att AS (
-            SELECT 
-              e.student_id,
-              (COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late')) + COUNT(a.id) FILTER (WHERE a.status = 'half_day') * 0.5)::float / 
-              NULLIF(COUNT(a.id) FILTER (WHERE a.status IN ('present', 'absent', 'late', 'half_day')), 0) AS rate
-            FROM enrollments e
-            JOIN students s ON s.id = e.student_id
-            LEFT JOIN attendance a ON a.enrollment_id = e.id
-            WHERE e.session_id = :sessionId AND s.school_id = :schoolId
-            GROUP BY e.student_id
-          )
-          SELECT COUNT(*)::int AS count FROM student_att WHERE rate < 0.75;
+          JOIN classes c ON c.id = e.class_id
+          WHERE e.session_id = :sessionId AND s.school_id = :schoolId AND e.status = 'active' AND s.is_deleted = false;
         `, { replacements: { sessionId, schoolId } });
+
+        const enrollmentIds = enrollments.map(e => e.enrollment_id);
+        if (enrollmentIds.length === 0) {
+          return {
+            overall_rate: 0,
+            class_wise: [],
+            at_risk_count: 0
+          };
+        }
+
+        const statsList = await getAttendanceStatsForEnrollments(enrollmentIds);
+
+        const classMap = new Map();
+        let totalEffectivePresent = 0;
+        let totalWorkingDays = 0;
+        let atRiskCount = 0;
+
+        // Initialize classes
+        const classes = [...new Set(enrollments.map(e => e.class_name))];
+        classes.forEach(cName => {
+          classMap.set(cName, { effectivePresent: 0, workingDays: 0 });
+        });
+
+        const enrollMap = new Map(enrollments.map(e => [e.enrollment_id, e]));
+
+        statsList.forEach(s => {
+          const enroll = enrollMap.get(s.enrollmentId);
+          if (!enroll) return;
+
+          const effectivePresent = s.presentCount * 1.0 + s.lateCount * 1.0 + s.halfDayCount * 0.5;
+          totalEffectivePresent += effectivePresent;
+          totalWorkingDays += s.workingDays;
+
+          const classStats = classMap.get(enroll.class_name);
+          if (classStats) {
+            classStats.effectivePresent += effectivePresent;
+            classStats.workingDays += s.workingDays;
+          }
+
+          if (s.percentage < 75) {
+            atRiskCount++;
+          }
+        });
+
+        const overallRate = totalWorkingDays > 0 ? (totalEffectivePresent / totalWorkingDays) * 100 : 0;
+
+        const classWise = [];
+        classMap.forEach((v, k) => {
+          classWise.push({
+            class_name: k,
+            rate: v.workingDays > 0 ? (v.effectivePresent / v.workingDays) * 100 : 0
+          });
+        });
 
         return {
-          overall_rate: overall?.rate || 0,
-          class_wise: classWise,
-          at_risk_count: atRisk?.count || 0
+          overall_rate: Number(overallRate.toFixed(2)),
+          class_wise: classWise.map(c => ({ class_name: c.class_name, rate: Number(c.rate.toFixed(2)) })),
+          at_risk_count: atRiskCount
         };
       })(),
 

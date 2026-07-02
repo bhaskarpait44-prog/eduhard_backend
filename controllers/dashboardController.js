@@ -43,8 +43,9 @@ exports.getAdminStats = async (req, res, next) => {
     `, { replacements: { today, sessionId, schoolId } });
 
     const totalStudents = studentCount.total || 0;
+    const totalMarked = Number(attendance.total_marked || 0);
     const presentCount = Number(attendance.present || 0) + Number(attendance.half_day || 0) * 0.5;
-    const attendancePercentage = totalStudents > 0 ? (presentCount / totalStudents) * 100 : 0;
+    const attendancePercentage = totalMarked > 0 ? (presentCount / totalMarked) * 100 : 0;
 
     // 4. Fee Collection (Monthly Collection Ratio)
     const [[fees]] = await sequelize.query(`
@@ -95,6 +96,8 @@ exports.getAdminStats = async (req, res, next) => {
         percentage: attendancePercentage,
         present: presentCount,
         absent: attendance.absent || 0,
+        total_marked: totalMarked,
+        total_students: totalStudents,
         forecast: predictedAttendance ? Number(predictedAttendance.toFixed(1)) : null
       },
       feeCollection: {

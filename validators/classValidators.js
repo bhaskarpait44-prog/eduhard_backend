@@ -122,10 +122,16 @@ const deleteClassRules = [
     .isLength({ min: 10 }).withMessage('Audit reason must be at least 10 characters'),
 ];
 
+const deleteSectionRules = [
+  param('id').isInt().withMessage('Invalid class ID'),
+  param('sectionId').isInt().withMessage('Invalid section ID'),
+];
+
 module.exports = {
   createClassRules,
   updateClassRules,
   createSectionRules,
   updateSectionRules,
   deleteClassRules,
+  deleteSectionRules,
 };

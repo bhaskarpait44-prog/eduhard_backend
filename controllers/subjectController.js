@@ -7,6 +7,7 @@ const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
 const { invalidateCache } = require('../middlewares/cache');
 
 const auditCtx = (req) => ({
+  schoolId: req.user?.school_id || null,
   changedBy: req.user?.id || null,
   ipAddress: req.ip || null,
   deviceInfo: req.headers['user-agent'] || null,
@@ -134,8 +135,9 @@ exports.list = async (req, res, next) => {
     const cls = await ensureClass(req, classId);
     if (!cls) return res.fail('Class not found.', [], 404);
 
+    // FIX #7: Filter by class_id AND school_id (via the verified class) for explicit isolation
     const subjects = await Subject.findAll({
-      where: { class_id: classId, is_deleted: false },
+      where: { class_id: cls.id, is_deleted: false },
       order: [['order_number', 'ASC'], ['id', 'ASC']],
     });
 
@@ -152,8 +154,9 @@ exports.getById = async (req, res, next) => {
     const cls = await ensureClass(req, classId);
     if (!cls) return res.fail('Class not found.', [], 404);
 
+    // FIX #7: Use cls.id (the verified class) to bind school_id implicitly
     const subject = await Subject.findOne({
-      where: { id, class_id: classId, is_deleted: false },
+      where: { id, class_id: cls.id, is_deleted: false },
     });
     if (!subject) return res.fail('Subject not found.', [], 404);
 
@@ -216,7 +219,7 @@ exports.create = async (req, res, next) => {
       ...auditCtx(req),
     });
 
-    invalidateCache(req.user.school_id, '/api/subjects*');
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok(subject, 'Subject created successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -280,7 +283,7 @@ exports.update = async (req, res, next) => {
       });
     }
 
-    invalidateCache(req.user.school_id, '/api/subjects*');
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok(subject, 'Subject updated successfully.');
   } catch (err) { next(err); }
 };
@@ -321,7 +324,7 @@ exports.remove = async (req, res, next) => {
       ...auditCtx(req),
     });
 
-    invalidateCache(req.user.school_id, '/api/subjects*');
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok({}, 'Subject deleted successfully.');
   } catch (err) { next(err); }
 };
@@ -363,7 +366,7 @@ exports.reorder = async (req, res, next) => {
       order: [['order_number', 'ASC'], ['id', 'ASC']],
     });
 
-    invalidateCache(req.user.school_id, '/api/subjects*');
+    invalidateCache(req.user.school_id, '/api/classes*');
     return res.ok(reordered, 'Subjects reordered successfully.');
   } catch (err) { next(err); }
 };

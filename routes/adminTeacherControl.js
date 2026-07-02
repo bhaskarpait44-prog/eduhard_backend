@@ -74,9 +74,9 @@ router.get('/notices', ctrl.notices);
 router.post('/notices', upload.single('attachment'), ctrl.createNotice);
 router.patch('/notices/:id', upload.single('attachment'), ctrl.updateNotice);
 
-// Leaves
-router.patch('/leave/:id/revoke', ctrl.revokeLeave);
+// Leaves — specific routes MUST come before wildcard /:id routes (Bug #1 fix)
 router.get('/leave/balances', ctrl.getLeaveBalances);
 router.patch('/leave/balances/:teacher_id', ctrl.updateLeaveBalance);
+router.patch('/leave/:id/revoke', ctrl.revokeLeave);
 
 module.exports = router;

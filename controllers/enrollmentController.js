@@ -249,13 +249,18 @@ exports.promote = async (req, res, next) => {
       return res.fail('Target section not found for the selected class.', [], 404);
     }
 
+    // FIX #9: Added school_id guard via students JOIN to prevent cross-school data access
     const [eligible] = await sequelize.query(`
       SELECT e.id, e.student_id, sr.result
       FROM enrollments e
+      JOIN students stu ON stu.id = e.student_id
       JOIN student_results sr ON sr.enrollment_id = e.id
-      WHERE e.session_id = :session_id AND e.class_id = :class_id
-        AND e.status = 'active' AND sr.is_promoted = true;
-    `, { replacements: { session_id, class_id } });
+      WHERE e.session_id = :session_id
+        AND e.class_id = :class_id
+        AND e.status = 'active'
+        AND sr.is_promoted = true
+        AND stu.school_id = :schoolId;
+    `, { replacements: { session_id, class_id, schoolId: req.user.school_id } });
 
     if (eligible.length === 0) {
       return res.fail('No students eligible for promotion in this class.');
@@ -332,10 +337,11 @@ exports.promote = async (req, res, next) => {
       }
     });
 
-    res.ok({ promoted_count: promoted.length, students: promoted }, `${promoted.length} student(s) promoted.`);
+    // FIX #2: Invalidate cache BEFORE sending response to avoid dead-code after res.ok()
     invalidateCache(req.user.school_id, '/api/enrollments*');
     invalidateCache(req.user.school_id, '/api/students*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
+    res.ok({ promoted_count: promoted.length, students: promoted }, `${promoted.length} student(s) promoted.`);
   } catch (err) { next(err); }
 };
 
@@ -649,6 +655,10 @@ exports.processPromotions = async (req, res, next) => {
       }
     });
 
+    // FIX #2: Cache invalidation was dead code after return — moved before res.ok()
+    invalidateCache(req.user.school_id, '/api/enrollments*');
+    invalidateCache(req.user.school_id, '/api/students*');
+    invalidateCache(req.user.school_id, '/api/dashboard*');
     return res.ok({
       processed_count: processed.length,
       promoted_count: processed.filter((row) => row.action === 'promoted').length,
@@ -657,9 +667,6 @@ exports.processPromotions = async (req, res, next) => {
       skipped_count: processed.filter((row) => row.action === 'skipped_existing_target').length,
       items: processed,
     }, `${processed.length} student promotion record(s) processed.`);
-    invalidateCache(req.user.school_id, '/api/enrollments*');
-    invalidateCache(req.user.school_id, '/api/students*');
-    invalidateCache(req.user.school_id, '/api/dashboard*');
   } catch (err) { next(err); }
 };
 
@@ -669,13 +676,17 @@ exports.transfer = async (req, res, next) => {
     const { enrollment_id, new_section_id, reason } = req.body;
     const today = new Date().toISOString().split('T')[0];
 
+    // FIX #3: Added school_id guard via students JOIN to prevent IDOR (cross-school transfer)
     const [[current]] = await sequelize.query(`
       SELECT e.id, e.student_id, e.session_id, e.class_id, e.stream,
              s.status AS session_status, s.is_locked AS session_locked
       FROM enrollments e
       JOIN sessions s ON s.id = e.session_id
-      WHERE e.id = :enrollment_id AND e.status = 'active';
-    `, { replacements: { enrollment_id } });
+      JOIN students stu ON stu.id = e.student_id
+      WHERE e.id = :enrollment_id
+        AND e.status = 'active'
+        AND stu.school_id = :schoolId;
+    `, { replacements: { enrollment_id, schoolId: req.user.school_id } });
 
     if (!current) return res.fail('Active enrollment not found.', [], 404);
 
@@ -712,10 +723,11 @@ exports.transfer = async (req, res, next) => {
       });
     });
 
-    res.ok({ enrollment_id, new_section_id }, 'Student transferred to new section.');
+    // FIX #2: Invalidate cache BEFORE sending response
     invalidateCache(req.user.school_id, '/api/enrollments*');
     invalidateCache(req.user.school_id, '/api/students*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
+    res.ok({ enrollment_id, new_section_id }, 'Student transferred to new section.');
   } catch (err) { next(err); }
 };
 
@@ -752,7 +764,8 @@ exports.downloadPromotionSummary = async (req, res, next) => {
     `, { replacements: { sessionId: session_id, schoolId } });
 
     const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    // FIX #11: bufferPages: true is required for doc.bufferedPageRange() to work correctly
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="Promotion_Summary_${session?.name || 'Report'}.pdf"`);

@@ -16,11 +16,12 @@ router.post('/',          requireAdmin, [
   body('joined_date').isDate(),
 ], validate, ctrl.enroll);
 
-router.get('/promotion/candidates', requireAdmin, ctrl.promotionCandidates);
-router.get('/promotion/summary/download', requireAdmin, ctrl.downloadPromotionSummary);
-router.post('/promotion/process', requireAdmin, ctrl.processPromotions);
-router.get('/:id',                     [param('id').isInt()], validate, ctrl.getById);
-router.post('/promote', requireAdmin,  ctrl.promote);
-router.post('/transfer', requireAdmin, ctrl.transfer);
+router.get('/promotion/candidates',      requireAdmin, ctrl.promotionCandidates);
+router.get('/promotion/summary/download',requireAdmin, ctrl.downloadPromotionSummary);
+router.post('/promotion/process',        requireAdmin, ctrl.processPromotions);
+// FIX #1: Specific named routes must come BEFORE the /:id wildcard to avoid shadowing
+router.post('/promote',                  requireAdmin, ctrl.promote);
+router.post('/transfer',                 requireAdmin, ctrl.transfer);
+router.get('/:id',                       [param('id').isInt()], validate, ctrl.getById);
 
 module.exports = router;
