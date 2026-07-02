@@ -944,18 +944,17 @@ exports.attendanceTrend = async (req, res, next) => {
       ) d;
     `);
 
-    const trend = [];
-    for (const m of months) {
+    const trend = await Promise.all(months.map(async (m) => {
       const startStr = String(m.month_start).slice(0, 10);
       const endStr   = String(m.month_end).slice(0, 10);
       const [stats]  = await getAttendanceStatsForEnrollments([context.enrollmentId], { fromDate: startStr, toDate: endStr });
       const percentage = stats?.percentage || 0;
-      trend.push({
+      return {
         month_label: m.month_label,
         percentage,
         band: attendanceBand(percentage)
-      });
-    }
+      };
+    }));
 
     res.ok({ trend }, 'Attendance trend loaded.');
   } catch (err) { next(err); }
@@ -2096,30 +2095,31 @@ exports.academicHistory = async (req, res, next) => {
         sr.result,
         sr.percentage,
         sr.grade,
-        sr.is_promoted,
-        ROUND(
-          (
-            COUNT(a.id) FILTER (WHERE a.status IN ('present', 'late'))
-            + COUNT(a.id) FILTER (WHERE a.status = 'half_day') * 0.5
-          ) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100,
-          2
-        ) AS attendance_percentage
+        sr.is_promoted
       FROM enrollments e
       JOIN sessions sess ON sess.id = e.session_id
       JOIN classes cls ON cls.id = e.class_id
       JOIN sections sec ON sec.id = e.section_id
       LEFT JOIN student_results sr ON sr.enrollment_id = e.id
-      LEFT JOIN attendance a ON a.enrollment_id = e.id
       WHERE e.student_id = :studentId
-      GROUP BY
-        e.id, sess.name, cls.name, sec.name, e.roll_number, e.status, e.joined_date, e.left_date,
-        sr.result, sr.percentage, sr.grade, sr.is_promoted, sess.start_date
       ORDER BY sess.start_date ASC, e.id ASC;
     `, { replacements: { studentId: context.studentId } });
 
+    const enrollmentIds = rows.map(r => r.enrollment_id);
+    const statsList = enrollmentIds.length > 0 ? await getAttendanceStatsForEnrollments(enrollmentIds) : [];
+    const statsMap = new Map(statsList.map(s => [s.enrollmentId, s]));
+
+    const historyRows = rows.map(row => {
+      const stats = statsMap.get(row.enrollment_id);
+      return {
+        ...row,
+        attendance_percentage: stats ? stats.percentage : 0
+      };
+    });
+
     res.ok({
-      history: rows,
-      timeline: rows.map((row) => ({
+      history: historyRows,
+      timeline: historyRows.map((row) => ({
         session_name: row.session_name,
         class_name: row.class_name,
         section_name: row.section_name,
@@ -2127,7 +2127,7 @@ exports.academicHistory = async (req, res, next) => {
         attendance_percentage: Number(row.attendance_percentage || 0),
         promoted: row.is_promoted,
       })),
-      performance_trend: rows.map((row) => ({
+      performance_trend: historyRows.map((row) => ({
         session_name: row.session_name,
         percentage: Number(row.percentage || 0),
       })),

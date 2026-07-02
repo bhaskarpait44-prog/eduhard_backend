@@ -935,34 +935,29 @@ exports.pendingTasks = async (req, res, next) => {
       });
     }
 
-    const [belowThreshold] = scope.sectionIds.length > 0
-      ? await sequelize.query(`
-          SELECT COUNT(*) AS cnt
-          FROM (
-            SELECT
-              e.id,
-              ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id) FILTER (WHERE a.status <> 'holiday'), 0) * 100, 2) AS attendance_pct
-            FROM enrollments e
-            LEFT JOIN attendance a ON a.enrollment_id = e.id
-            WHERE e.session_id = :sessionId
-              AND e.status = 'active'
-              AND e.section_id IN (:sectionIds)
-            GROUP BY e.id
-          ) t
-          WHERE t.attendance_pct < 75;
-        `, {
-          replacements: {
-            sessionId: session?.id || 0,
-            sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
-          },
-        })
-      : [[{ cnt: 0 }]];
+    let below75Count = 0;
+    if (scope.sectionIds.length > 0) {
+      const [enrollmentRows] = await sequelize.query(`
+        SELECT id FROM enrollments
+        WHERE session_id = :sessionId AND status = 'active' AND section_id IN (:sectionIds);
+      `, {
+        replacements: {
+          sessionId,
+          sectionIds: scope.sectionIds,
+        },
+      });
 
-    if (Number(belowThreshold?.cnt || 0) > 0) {
+      if (enrollmentRows.length > 0) {
+        const statsList = await getAttendanceStatsForEnrollments(enrollmentRows.map(r => r.id));
+        below75Count = statsList.filter(s => s.percentage < 75).length;
+      }
+    }
+
+    if (below75Count > 0) {
       tasks.push({
         type: 'attendance_threshold',
-        count: Number(belowThreshold.cnt),
-        message: `${belowThreshold.cnt} student(s) are below 75% attendance.`,
+        count: below75Count,
+        message: `${below75Count} student(s) are below 75% attendance.`,
       });
     }
 

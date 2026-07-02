@@ -457,6 +457,7 @@ async function getAttendanceStatsForEnrollments(enrollmentIds, options = {}, t =
       e.student_id,
       e.session_id,
       e.joined_date,
+      e.left_date,
       s.start_date  AS session_start_date,
       s.end_date    AS session_end_date
     FROM enrollments e
@@ -572,8 +573,10 @@ async function getAttendanceStatsForEnrollments(enrollmentIds, options = {}, t =
 
     sessionEnrollments.forEach(row => {
       const studentStart = row.joined_date > queryFrom ? row.joined_date : queryFrom;
+      const leftDateStr = row.left_date ? String(row.left_date).slice(0, 10) : sessionEndStr;
       const calcUpTo = today < queryTo ? today : queryTo;
-      const studentEnd = calcUpTo < sessionEndStr ? calcUpTo : sessionEndStr;
+      const limitEnd = calcUpTo < sessionEndStr ? calcUpTo : sessionEndStr;
+      const studentEnd = leftDateStr < limitEnd ? leftDateStr : limitEnd;
 
       const workingDays = getWorkingDaysRange(studentStart, studentEnd);
       const counts = countLookup.get(row.enrollment_id) || { present: 0, late: 0, half_day: 0, absent: 0, holiday: 0 };
@@ -672,7 +675,7 @@ async function saveBulkAttendance({
 
   // 5. Fetch existing rows to evaluate if reason is required
   const [existingRows] = await sequelize.query(`
-    SELECT a.id, a.enrollment_id, a.status
+    SELECT a.id, a.enrollment_id, a.status, a.previous_status
     FROM attendance a
     JOIN enrollments e ON e.id = a.enrollment_id
     WHERE a.date = :date
@@ -716,7 +719,7 @@ async function saveBulkAttendance({
             replacements: {
               id: existing.id,
               status: record.status,
-              previousStatus: existing.status,
+              previousStatus: (existing.status === 'holiday' && existing.previous_status) ? existing.previous_status : existing.status,
               overrideReason: resolvedReason,
               markedBy,
             },
