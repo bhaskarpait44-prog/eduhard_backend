@@ -31,6 +31,29 @@ function drawSchoolHeader(doc, school = {}, title, subTitle) {
 }
 
 /**
+ * Safe date formatter for YYYY-MM-DD strings to DD/MM/YYYY
+ * Bypasses local/UTC timezone conversions to prevent day shifting.
+ */
+function formatLocalDateString(dStr) {
+  if (!dStr) return '';
+  try {
+    const parts = dStr.split('-');
+    if (parts.length === 3) {
+      const year = parseInt(parts[0], 10);
+      const month = parseInt(parts[1], 10);
+      const day = parseInt(parts[2], 10);
+      if (!isNaN(year) && !isNaN(month) && !isNaN(day)) {
+        return `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`;
+      }
+    }
+    const d = new Date(dStr);
+    return isNaN(d.getTime()) ? dStr : d.toLocaleDateString('en-IN');
+  } catch (e) {
+    return dStr;
+  }
+}
+
+/**
  * Generates a PDF report card using PDFKit.
  */
 async function generateReportCard(data) {
@@ -291,15 +314,7 @@ async function generateAcademicCalendarPdf(data) {
             doc.font('Helvetica');
           }
 
-          const formatDateStr = (dStr) => {
-            if (!dStr) return '';
-            try {
-              const d = new Date(dStr);
-              return isNaN(d.getTime()) ? dStr : d.toLocaleDateString('en-IN');
-            } catch (e) {
-              return dStr;
-            }
-          };
+          const formatDateStr = formatLocalDateString;
 
           const dateStr = event.start_date === event.end_date 
             ? formatDateStr(event.start_date)
@@ -442,7 +457,7 @@ async function generateAdmissionForm(data) {
       const infoFields = [
         { label: 'Full Name', value: `${student.first_name || ''} ${student.last_name || ''}`.toUpperCase().trim() },
         { label: 'Admission No', value: student.admission_no },
-        { label: 'Date of Birth', value: student.date_of_birth ? new Date(student.date_of_birth).toLocaleDateString('en-IN') : 'N/A' },
+        { label: 'Date of Birth', value: student.date_of_birth ? formatLocalDateString(student.date_of_birth) : 'N/A' },
         { label: 'Gender', value: (student.gender || 'N/A').toUpperCase() },
         { label: 'Aadhaar Card No', value: student.aadhar_no || 'N/A' },
         { label: 'Nationality', value: profile.nationality || 'Indian' },

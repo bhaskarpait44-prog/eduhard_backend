@@ -559,7 +559,7 @@ async function getUpcomingEvents(context) {
       AND session_id = :sessionId
       AND is_published = true
       AND start_date >= CURRENT_DATE
-      AND (audience IN ('everyone', 'students') OR target_class_id IS NULL OR target_class_id = :classId)
+      AND (audience = 'everyone' OR (audience = 'students' AND (target_class_id IS NULL OR target_class_id = :classId)))
     ORDER BY start_date ASC
     LIMIT 5;
   `, {
@@ -826,9 +826,8 @@ exports.getCalendar = async (req, res, next) => {
         AND ae.session_id = :sessionId
         AND ae.is_published = true
         AND (
-          ae.audience IN ('everyone', 'students')
-          OR (ae.audience = 'parents')
-          OR (ae.target_class_id IS NULL OR ae.target_class_id = :classId)
+          ae.audience = 'everyone'
+          OR (ae.audience = 'students' AND (ae.target_class_id IS NULL OR ae.target_class_id = :classId))
         )
     `;
     const replacements = { 
@@ -838,9 +837,15 @@ exports.getCalendar = async (req, res, next) => {
     };
 
     if (month && year) {
-      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
-      replacements.month = month;
-      replacements.year = year;
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
+      const lastDayNum = new Date(y, m, 0).getDate();
+      const lastDay = `${y}-${String(m).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
+
+      query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
+      replacements.firstDay = firstDay;
+      replacements.lastDay = lastDay;
     }
 
     // Include session holidays
@@ -855,7 +860,7 @@ exports.getCalendar = async (req, res, next) => {
       WHERE session_id = :sessionId
     `;
     if (month && year) {
-      holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+      holidaysQuery += ` AND holiday_date >= :firstDay AND holiday_date <= :lastDay`;
     }
 
     query = `(${query}) UNION ALL (${holidaysQuery})`;
@@ -883,7 +888,8 @@ exports.attendance = async (req, res, next) => {
     const month = Number(req.query.month || now.getMonth() + 1);
     const year = Number(req.query.year || now.getFullYear());
     const monthStart = `${year}-${String(month).padStart(2, '0')}-01`;
-    const monthEnd = new Date(year, month, 0).toISOString().slice(0, 10);
+    const lastDayNum = new Date(year, month, 0).getDate();
+    const monthEnd = `${year}-${String(month).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
     const summary = await getAttendanceSummary(context.enrollmentId);
 
     const [records] = await sequelize.query(`

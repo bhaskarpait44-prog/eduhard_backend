@@ -196,9 +196,15 @@ exports.getWardCalendar = async (req, res, next) => {
     };
 
     if (month && year) {
-      query += ` AND EXTRACT(MONTH FROM ae.start_date) = :month AND EXTRACT(YEAR FROM ae.start_date) = :year`;
-      replacements.month = month;
-      replacements.year = year;
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
+      const lastDayNum = new Date(y, m, 0).getDate();
+      const lastDay = `${y}-${String(m).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
+
+      query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
+      replacements.firstDay = firstDay;
+      replacements.lastDay = lastDay;
     }
 
     // Include session holidays
@@ -213,7 +219,7 @@ exports.getWardCalendar = async (req, res, next) => {
       WHERE session_id = :sessionId
     `;
     if (month && year) {
-      holidaysQuery += ` AND EXTRACT(MONTH FROM holiday_date) = :month AND EXTRACT(YEAR FROM holiday_date) = :year`;
+      holidaysQuery += ` AND holiday_date >= :firstDay AND holiday_date <= :lastDay`;
     }
 
     query = `(${query}) UNION ALL (${holidaysQuery})`;

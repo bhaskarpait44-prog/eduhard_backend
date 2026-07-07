@@ -254,17 +254,9 @@ exports.admit = async (req, res, next) => {
       try { profile = JSON.parse(profile); } catch (e) { /* ignore */ }
     }
 
-    // Enforce required documents
+    // Required documents are now optional as requested
     const photoFile = req.files?.photo?.[0];
     const birthCertFile = req.files?.birth_certificate?.[0];
-    if (!photoFile) {
-      cleanupUploadedFiles(req);
-      return res.fail('Passport Photo is required.', [], 422);
-    }
-    if (!birthCertFile) {
-      cleanupUploadedFiles(req);
-      return res.fail('Birth Certificate is required.', [], 422);
-    }
 
     // Server-side validation (mirrors frontend Zod rules)
     if (!first_name?.trim() || first_name.trim().length < 2) {
@@ -2279,7 +2271,7 @@ exports.getStudentSummary = async (req, res, next) => {
       WHERE school_id = :schoolId 
         AND is_published = true 
         AND start_date >= CURRENT_DATE
-        AND (audience = 'everyone' OR (audience = 'class' AND target_class_id = :classId))
+        AND (audience = 'everyone' OR (audience = 'students' AND (target_class_id IS NULL OR target_class_id = :classId)))
       ORDER BY start_date ASC, start_time ASC LIMIT 1;
     `, { replacements: { schoolId, classId: student.class_id } });
 

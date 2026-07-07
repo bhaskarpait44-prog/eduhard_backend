@@ -4,6 +4,14 @@ const sequelize = require('../config/database');
 const { sendPushToStudents, sendPushToUsers } = require('../utils/pushNotifier');
 const { invalidateCache } = require('../middlewares/cache');
 const { generateAcademicCalendarPdf } = require('../utils/pdfGenerator');
+const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
+
+const auditCtx = (req) => ({
+  schoolId   : req.user?.school_id || null,
+  changedBy  : req.user?.id || null,
+  ipAddress  : req.ip || null,
+  deviceInfo : req.headers['user-agent'] || null,
+});
 
 /**
  * Download Academic Calendar as PDF
@@ -62,7 +70,8 @@ exports.downloadPdf = async (req, res, next) => {
       const m = parseInt(month, 10);
       const y = parseInt(year, 10);
       const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
-      const lastDay = new Date(y, m, 0).toISOString().split('T')[0];
+      const lastDayNum = new Date(y, m, 0).getDate();
+      const lastDay = `${y}-${String(m).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
       query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
       replacements.firstDay = firstDay;
       replacements.lastDay = lastDay;
@@ -155,7 +164,8 @@ exports.list = async (req, res, next) => {
       const m = parseInt(month, 10);
       const y = parseInt(year, 10);
       const firstDay = `${y}-${String(m).padStart(2, '0')}-01`;
-      const lastDay = new Date(y, m, 0).toISOString().split('T')[0];
+      const lastDayNum = new Date(y, m, 0).getDate();
+      const lastDay = `${y}-${String(m).padStart(2, '0')}-${String(lastDayNum).padStart(2, '0')}`;
       query += ` AND ae.start_date <= :lastDay AND ae.end_date >= :firstDay`;
       replacements.firstDay = firstDay;
       replacements.lastDay = lastDay;
@@ -225,11 +235,12 @@ exports.create = async (req, res, next) => {
     );
     if (!session) return res.fail('Invalid session ID or access denied');
 
-    // Validate Class if provided
-    if (target_class_id) {
+    // Validate Class if provided (only if audience is students)
+    const finalTargetClassId = (audience === 'students') ? (target_class_id || null) : null;
+    if (finalTargetClassId) {
       const [[cls]] = await sequelize.query(
         `SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId`,
-        { replacements: { classId: target_class_id, schoolId } }
+        { replacements: { classId: finalTargetClassId, schoolId } }
       );
       if (!cls) return res.fail('Invalid class ID or access denied');
     }
@@ -255,7 +266,7 @@ exports.create = async (req, res, next) => {
         schoolId, sessionId: session_id, title, description, eventType: event_type,
         startDate: start_date, endDate: end_date, startTime: start_time || null,
         endTime: end_time || null, isAllDay: is_all_day !== undefined ? is_all_day : true,
-        audience: audience || 'everyone', targetClassId: target_class_id || null,
+        audience: audience || 'everyone', targetClassId: finalTargetClassId,
         color: color || null, isPublished: is_published || false,
         notifyOnPublish: notify_on_publish || false, createdBy: userId, updatedBy: userId
       }
@@ -267,6 +278,22 @@ exports.create = async (req, res, next) => {
       LEFT JOIN classes c ON c.id = ae.target_class_id
       WHERE ae.id = :id AND ae.school_id = :schoolId
     `, { replacements: { id: eventId[0].id, schoolId } });
+
+    await writeAuditLog(sequelize, {
+      tableName : 'academic_events',
+      recordId  : event.id,
+      changes   : [
+        { field: 'title', oldValue: null, newValue: event.title },
+        { field: 'event_type', oldValue: null, newValue: event.event_type },
+        { field: 'start_date', oldValue: null, newValue: event.start_date },
+        { field: 'end_date', oldValue: null, newValue: event.end_date },
+        { field: 'audience', oldValue: null, newValue: event.audience },
+        { field: 'target_class_id', oldValue: null, newValue: event.target_class_id },
+        { field: 'is_published', oldValue: null, newValue: event.is_published },
+      ],
+      reason    : `Academic event created: "${event.title}"`,
+      ...auditCtx(req),
+    });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 
@@ -293,7 +320,7 @@ exports.update = async (req, res, next) => {
 
     // Check ownership and get existing state
     const [[existing]] = await sequelize.query(
-      `SELECT id, start_date, end_date, is_published FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      `SELECT * FROM academic_events WHERE id = :id AND school_id = :schoolId`,
       { replacements: { id, schoolId } }
     );
 
@@ -301,7 +328,13 @@ exports.update = async (req, res, next) => {
       return res.fail('Event not found or access denied', [], 404);
     }
 
-    // If target_class_id is updated, validate it
+    // Sanitize target_class_id if audience is not students
+    const finalAudience = updates.audience !== undefined ? updates.audience : existing.audience;
+    if (finalAudience !== 'students') {
+      updates.target_class_id = null;
+    }
+
+    // If target_class_id is updated and is not null, validate it
     if (updates.target_class_id) {
       const [[cls]] = await sequelize.query(
         `SELECT id FROM classes WHERE id = :classId AND school_id = :schoolId`,
@@ -343,6 +376,17 @@ exports.update = async (req, res, next) => {
       WHERE id = :id AND school_id = :schoolId
     `, { replacements });
 
+    const changes = diffFields(existing, updates, allowedFields);
+    if (changes.length > 0) {
+      await writeAuditLog(sequelize, {
+        tableName : 'academic_events',
+        recordId  : id,
+        changes,
+        reason    : req.body.reason || `Academic event updated: "${existing.title}"`,
+        ...auditCtx(req),
+      });
+    }
+
     const [[event]] = await sequelize.query(`
       SELECT ae.*, c.name as target_class_name
       FROM academic_events ae
@@ -372,14 +416,27 @@ exports.destroy = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
-    const [result] = await sequelize.query(
-      `DELETE FROM academic_events WHERE id = :id AND school_id = :schoolId RETURNING id`,
+    const [[eventToDelete]] = await sequelize.query(
+      `SELECT title FROM academic_events WHERE id = :id AND school_id = :schoolId`,
       { replacements: { id, schoolId } }
     );
 
-    if (result.length === 0) {
+    if (!eventToDelete) {
       return res.fail('Event not found or access denied', [], 404);
     }
+
+    await sequelize.query(
+      `DELETE FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      { replacements: { id, schoolId } }
+    );
+
+    await writeAuditLog(sequelize, {
+      tableName : 'academic_events',
+      recordId  : id,
+      changes   : [{ field: 'is_deleted', oldValue: false, newValue: true }],
+      reason    : req.body.reason || `Academic event deleted: "${eventToDelete.title}"`,
+      ...auditCtx(req),
+    });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
     res.ok(null, 'Event deleted successfully');
@@ -399,7 +456,7 @@ exports.togglePublish = async (req, res, next) => {
     const userId = req.user.id;
 
     const [[existing]] = await sequelize.query(
-      `SELECT is_published, notify_on_publish FROM academic_events WHERE id = :id AND school_id = :schoolId`,
+      `SELECT title, is_published, notify_on_publish FROM academic_events WHERE id = :id AND school_id = :schoolId`,
       { replacements: { id, schoolId } }
     );
 
@@ -420,6 +477,14 @@ exports.togglePublish = async (req, res, next) => {
       LEFT JOIN classes c ON c.id = ae.target_class_id
       WHERE ae.id = :id AND ae.school_id = :schoolId
     `, { replacements: { id, schoolId } });
+
+    await writeAuditLog(sequelize, {
+      tableName : 'academic_events',
+      recordId  : id,
+      changes   : [{ field: 'is_published', oldValue: existing.is_published, newValue: newPublished }],
+      reason    : `Event "${existing.title}" ${newPublished ? 'published' : 'unpublished'}`,
+      ...auditCtx(req),
+    });
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 

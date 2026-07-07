@@ -178,9 +178,26 @@ module.exports = {
     await queryInterface.sequelize.query(`
       CREATE UNIQUE INDEX idx_users_email ON users (email) WHERE is_deleted = false;
     `);
+
+    await queryInterface.addConstraint('sessions', {
+      fields: ['created_by'],
+      type: 'foreign key',
+      name: 'sessions_created_by_users_fk',
+      references: {
+        table: 'users',
+        field: 'id'
+      },
+      onDelete: 'SET NULL',
+      onUpdate: 'CASCADE'
+    });
   },
 
   async down(queryInterface) {
+    try {
+      await queryInterface.removeConstraint('sessions', 'sessions_created_by_users_fk');
+    } catch (e) {
+      // Ignore if constraint doesn't exist
+    }
     await queryInterface.dropTable('users');
   },
 };

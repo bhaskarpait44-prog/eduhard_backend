@@ -19,6 +19,18 @@ module.exports = {
       }
     };
 
+    const safeAddIndex = async (table, fields, options) => {
+      try {
+        await queryInterface.addIndex(table, fields, options);
+      } catch (e) {
+        if (!e.message.includes('already exists') && !e.message.includes('duplicate')) {
+          throw e;
+        } else {
+          console.log(`Skipping: Index ${options.name} on ${table} already exists.`);
+        }
+      }
+    };
+
     // 1. Remove old unique constraint that caused collisions
     await safeRemoveIndex('staff_attendance', 'idx_staff_attendance_user_date_unique');
     await safeDropConstraint('staff_attendance', 'idx_staff_attendance_user_date_unique');
@@ -40,13 +52,13 @@ module.exports = {
     // 3. Create new non-colliding unique indexes
     const dialect = queryInterface.sequelize.getDialect();
     if (dialect === 'postgres') {
-      await queryInterface.addIndex('staff_attendance', ['user_id', 'date'], {
+      await safeAddIndex('staff_attendance', ['user_id', 'date'], {
         unique: true,
         name: 'idx_staff_attendance_user_date_unique',
         where: { user_id: { [Sequelize.Op.ne]: null } }
       });
 
-      await queryInterface.addIndex('staff_attendance', ['teacher_id', 'date'], {
+      await safeAddIndex('staff_attendance', ['teacher_id', 'date'], {
         unique: true,
         name: 'idx_staff_attendance_teacher_date_unique',
         where: { teacher_id: { [Sequelize.Op.ne]: null } }
@@ -55,15 +67,15 @@ module.exports = {
       // For non-postgres dialects, we add regular indexes. 
       // Note: This won't prevent collisions if both user_id and teacher_id are null,
       // but those fields are usually populated in this application's logic.
-      await queryInterface.addIndex('staff_attendance', ['user_id', 'date'], {
+      await safeAddIndex('staff_attendance', ['user_id', 'date'], {
         unique: true,
         name: 'idx_staff_attendance_user_date_unique'
-      }).catch(e => console.log('Standard unique index on user_id might fail if multiple nulls exist in this dialect'));
+      });
 
-      await queryInterface.addIndex('staff_attendance', ['teacher_id', 'date'], {
+      await safeAddIndex('staff_attendance', ['teacher_id', 'date'], {
         unique: true,
         name: 'idx_staff_attendance_teacher_date_unique'
-      }).catch(e => console.log('Standard unique index on teacher_id might fail if multiple nulls exist in this dialect'));
+      });
     }
   },
 
