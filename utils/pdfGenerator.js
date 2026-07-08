@@ -77,12 +77,13 @@ async function generateReportCard(data) {
       doc.text(`Student Name: ${student.first_name} ${student.last_name}`, 50, startY);
       doc.text(`Admission No: ${student.admission_no}`, 50, startY + 20);
       doc.text(`Roll Number: ${enrollment.roll_number || 'N/A'}`, 50, startY + 40);
+      doc.text(`Date of Birth: ${student.date_of_birth ? formatLocalDateString(student.date_of_birth) : 'N/A'}`, 50, startY + 60);
 
       doc.text(`Class: ${enrollment.class_name}`, 350, startY);
       doc.text(`Section: ${enrollment.section_name || 'N/A'}`, 350, startY + 20);
       doc.text(`Father's Name: ${student.father_name || 'N/A'}`, 350, startY + 40);
       
-      doc.moveDown(4);
+      doc.y = startY + 85;
 
       // --- Group Results by Subject ---
       const subjectsMap = {};
@@ -190,8 +191,28 @@ async function generateReportCard(data) {
           doc.font('Helvetica').fontSize(9);
           doc.text(exam.exam_name || 'Exam', 65, y);
           doc.text(`${parseFloat(exam.exam_weightage || 100)}%`, col2, y);
-          doc.text(exam.theory_marks_obtained !== null ? `${exam.theory_marks_obtained}/${exam.theory_total}` : '-', col3, y);
-          doc.text(exam.practical_marks_obtained !== null ? `${exam.practical_marks_obtained}/${exam.practical_total}` : '-', col4, y);
+
+          const tTotal = exam.theory_total ? parseFloat(exam.theory_total) : 0;
+          const pTotal = exam.practical_total ? parseFloat(exam.practical_total) : 0;
+          
+          // Theory Column display
+          let tText = '-';
+          if (tTotal > 0) {
+            if (exam.is_absent) tText = 'ABS';
+            else if (tTotal > 0 && pTotal > 0) tText = exam.theory_marks_obtained !== null ? `${exam.theory_marks_obtained}/${exam.theory_total}` : '-';
+            else tText = exam.marks_obtained !== null ? `${exam.marks_obtained}/${exam.theory_total}` : '-';
+          }
+          doc.text(tText, col3, y);
+
+          // Practical Column display
+          let pText = '-';
+          if (pTotal > 0) {
+            if (exam.is_absent) pText = 'ABS';
+            else if (tTotal > 0 && pTotal > 0) pText = exam.practical_marks_obtained !== null ? `${exam.practical_marks_obtained}/${exam.practical_total}` : '-';
+            else pText = exam.marks_obtained !== null ? `${exam.marks_obtained}/${exam.practical_total}` : '-';
+          }
+          doc.text(pText, col4, y);
+
           doc.text(String(exam.total_marks), col5, y);
           doc.text(exam.is_absent ? 'ABSENT' : String(exam.marks_obtained), col6, y);
           doc.text(exam.grade || '-', col7, y);
@@ -209,14 +230,19 @@ async function generateReportCard(data) {
         let weightedPracMax = 0, weightedPracObt = 0, hasPrac = false;
         sub.exams.forEach(e => {
           const w = parseFloat(e.exam_weightage || 100) / 100;
-          if (e.theory_total !== null) {
-            weightedTheoryMax += parseFloat(e.theory_total) * w;
-            weightedTheoryObt += (e.is_absent ? 0 : parseFloat(e.theory_marks_obtained || 0)) * w;
+          const tTotal = e.theory_total ? parseFloat(e.theory_total) : 0;
+          const pTotal = e.practical_total ? parseFloat(e.practical_total) : 0;
+          
+          if (tTotal > 0) {
+            weightedTheoryMax += tTotal * w;
+            const obt = (tTotal > 0 && pTotal > 0) ? (e.theory_marks_obtained || 0) : (e.marks_obtained || 0);
+            weightedTheoryObt += (e.is_absent ? 0 : parseFloat(obt)) * w;
             hasTheory = true;
           }
-          if (e.practical_total !== null) {
-            weightedPracMax += parseFloat(e.practical_total) * w;
-            weightedPracObt += (e.is_absent ? 0 : parseFloat(e.practical_marks_obtained || 0)) * w;
+          if (pTotal > 0) {
+            weightedPracMax += pTotal * w;
+            const obt = (tTotal > 0 && pTotal > 0) ? (e.practical_marks_obtained || 0) : (e.marks_obtained || 0);
+            weightedPracObt += (e.is_absent ? 0 : parseFloat(obt)) * w;
             hasPrac = true;
           }
         });
@@ -245,21 +271,12 @@ async function generateReportCard(data) {
       doc.text(`Overall Grade: ${finalResult.grade}`, 50, summaryY + 50);
       doc.text(`Final Result: ${finalResult.result.toUpperCase()}`, 50, summaryY + 65);
 
-      doc.text(`Attendance: ${attendance ? attendance.percentage : 'N/A'}%`, 350, summaryY + 20);
-      doc.text(`Days Present: ${attendance ? attendance.effectivePresent + ' / ' + attendance.workingDays : 'N/A'}`, 350, summaryY + 35);
+      doc.moveDown(2);
 
-      doc.moveDown(5);
-
-      // --- Signatures ---
-      const sigY = doc.y;
-      doc.moveTo(50, sigY).lineTo(150, sigY).stroke().strokeColor('#333');
-      doc.text('Class Teacher', 50, sigY + 5, { width: 100, align: 'center' });
-
-      doc.moveTo(250, sigY).lineTo(350, sigY).stroke();
-      doc.text('Principal', 250, sigY + 5, { width: 100, align: 'center' });
-
-      doc.moveTo(450, sigY).lineTo(550, sigY).stroke();
-      doc.text("Parent's Signature", 450, sigY + 5, { width: 100, align: 'center' });
+      // --- Remarks ---
+      doc.font('Helvetica-Bold').fontSize(10).text("Class Teacher's Remarks:", 50, doc.y);
+      doc.font('Helvetica').fontSize(9).text(data.remarks || 'No remarks provided.', 50, doc.y + 15, { width: 495 });
+      doc.moveDown(4);
 
       doc.end();
     } catch (err) { reject(err); }

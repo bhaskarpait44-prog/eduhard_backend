@@ -762,7 +762,7 @@ async function saveBulkAttendance({
             date,
             status: record.status,
             markedBy,
-            overrideReason: isPast ? resolvedReason : null,
+            overrideReason: (isPast || existingRows.length > 0) ? resolvedReason : null,
           },
           transaction,
         });

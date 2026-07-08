@@ -1020,15 +1020,16 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     const perfectAtt = rows.filter(r => parseFloat(r.percentage) >= 100).length;
     const below75 = rows.filter(r => parseFloat(r.percentage) < 75).length;
 
-    doc.fillColor('#dbeafe').rect(40, doc.y, 515, 44).fill();
+    const statsY = doc.y;
+    doc.fillColor('#dbeafe').rect(40, statsY, 515, 44).fill();
     doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(14);
     
     const statBoxWidth = 515 / 4;
     let curX = 40;
     
     const drawStat = (val, label, x) => {
-      doc.text(val, x, doc.y + 8, { width: statBoxWidth, align: 'center' });
-      doc.font('Helvetica').fontSize(8).text(label, x, doc.y + 24, { width: statBoxWidth, align: 'center' });
+      doc.text(val, x, statsY + 8, { width: statBoxWidth, align: 'center' });
+      doc.font('Helvetica').fontSize(8).text(label, x, statsY + 24, { width: statBoxWidth, align: 'center' });
       doc.font('Helvetica-Bold').fontSize(14);
     };
 
@@ -1037,6 +1038,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     drawStat(perfectAtt, 'Perfect Attendance', curX); curX += statBoxWidth;
     drawStat(below75, 'Below 75%', curX);
 
+    doc.y = statsY + 44;
     doc.y += 60;
 
     // Table
@@ -1044,15 +1046,16 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     const headers = ['Roll', 'Student Name', 'P', 'A', 'L', 'HD', 'Days', '%'];
 
     const drawTableHeaders = () => {
-      doc.fillColor('#dbeafe').rect(40, doc.y, 515, 22).fill();
+      const headerY = doc.y;
+      doc.fillColor('#dbeafe').rect(40, headerY, 515, 22).fill();
       doc.fillColor('#1e3a8a').font('Helvetica-Bold').fontSize(9);
       let tx = 40;
       headers.forEach((h, i) => {
         const align = i > 1 ? 'right' : 'left';
-        doc.text(h, tx + 5, doc.y + 7, { width: colWidths[i] - 10, align });
+        doc.text(h, tx + 5, headerY + 7, { width: colWidths[i] - 10, align });
         tx += colWidths[i];
       });
-      doc.y += 22;
+      doc.y = headerY + 22;
     };
 
     drawTableHeaders();

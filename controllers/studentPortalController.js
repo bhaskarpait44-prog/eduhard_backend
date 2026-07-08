@@ -1167,6 +1167,13 @@ exports.reportCard = async (req, res, next) => {
     const context = await getStudentContext(req);
     await ensureAchievementsFresh(context);
 
+    const [[school]] = await sequelize.query(`
+      SELECT name, address, phone, email, logo_url, principal_name
+      FROM schools
+      WHERE id = :schoolId
+      LIMIT 1;
+    `, { replacements: { schoolId: context.student.school_id } });
+
     const examId = Number(req.params.examId);
     const [[exam]] = await sequelize.query(`
       SELECT id, session_id, class_id, start_date, status, publish_controls
@@ -1258,7 +1265,14 @@ exports.reportCard = async (req, res, next) => {
     const percentage = totalMax > 0 ? roundNumber((totalObtained / totalMax) * 100) : 0;
 
     res.ok({
-      school: { name: 'EduCore School', address: 'Main Campus' },
+      school: {
+        name: school?.name || 'EduCore School',
+        address: school?.address || 'Main Campus',
+        phone: school?.phone || '',
+        email: school?.email || '',
+        logo_url: school?.logo_url || '',
+        principal_name: school?.principal_name || ''
+      },
       session_name: studentEnrollment.session_name,
       student: {
         name: getStudentName(context.student),

@@ -629,7 +629,7 @@ exports.dashboard = async (req, res, next) => {
     const [attendanceRows] = await sequelize.query(`
       WITH teacher_scopes AS (
         SELECT class_id, section_id FROM teacher_assignments
-        WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true
+        WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true AND is_class_teacher = true
         UNION
         SELECT ex.class_id, sec.id AS section_id
         FROM exam_subjects es
@@ -758,7 +758,7 @@ exports.pendingTasks = async (req, res, next) => {
     // Combined section list for attendance check: assigned + invigilator today
     const [sectionRows] = await sequelize.query(`
       SELECT class_id, section_id FROM teacher_assignments
-      WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true
+      WHERE teacher_id = :teacherId AND session_id = :sessionId AND is_active = true AND is_class_teacher = true
       UNION
       SELECT ex.class_id, sec.id AS section_id
       FROM exam_subjects es
@@ -921,6 +921,7 @@ exports.attendanceStatus = async (req, res, next) => {
         WHERE teacher_id = :teacherId
           AND session_id = :sessionId
           AND is_active = true
+          AND is_class_teacher = true
         
         UNION
         
@@ -1053,6 +1054,8 @@ exports.attendanceStudents = async (req, res, next) => {
     const isNonWorkingDay = workingDayConfig ? !workingDayConfig.is_working : (dayOfWeek === 0);
 
     const alreadyMarked = students.some((student) => student.attendance_id);
+    const isSubmitted = students.length > 0 && students.every((student) => student.attendance_id);
+    const isPartiallySubmitted = alreadyMarked && !isSubmitted;
 
     res.ok({
       access,
@@ -1065,7 +1068,8 @@ exports.attendanceStudents = async (req, res, next) => {
       is_non_working_day: isNonWorkingDay,
       is_on_leave: !!leave,
       already_marked: alreadyMarked,
-      is_submitted: alreadyMarked,
+      is_submitted: isSubmitted,
+      is_partially_submitted: isPartiallySubmitted,
       requires_reason: date < TODAY() || alreadyMarked,
       students: students.map((student) => ({
         ...student,

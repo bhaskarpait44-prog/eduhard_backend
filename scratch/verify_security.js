@@ -151,6 +151,7 @@ async function runTests() {
     }
 
     // 3b. Insert temporary teacher assignment
+    await db.query(`DELETE FROM teacher_assignments WHERE session_id = 1 AND class_id = 1 AND section_id = 1 AND is_class_teacher = true`);
     await db.query(`
       INSERT INTO teacher_assignments (id, teacher_id, session_id, class_id, section_id, is_class_teacher, is_active, created_at, updated_at)
       VALUES (${tempAssignmentId}, 1, 1, 1, 1, true, true, NOW(), NOW())
@@ -178,7 +179,7 @@ async function runTests() {
     }
 
   } catch (err) {
-    console.log('❌ TEST 3 FAILED with error:', err.message);
+    console.log('❌ TEST 3 FAILED with error:', err);
     testsFailed++;
   } finally {
     // Clean up temporary assignment

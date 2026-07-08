@@ -284,7 +284,7 @@ exports.getReportCardData = async (req, res, next) => {
     const [[data]] = await sequelize.query(`
       SELECT 
         e.id AS enrollment_id, e.roll_number, e.joined_date,
-        s.id AS student_id, s.first_name, s.last_name, s.admission_no, 
+        s.id AS student_id, s.first_name, s.last_name, s.admission_no, s.date_of_birth,
         sp.father_name, sp.photo_path AS photo_url,
         c.name AS class_name,
         sec.name AS section_name,
@@ -405,7 +405,8 @@ exports.getReportCardData = async (req, res, next) => {
         last_name: data.last_name,
         admission_no: data.admission_no,
         father_name: data.father_name,
-        photo_url: data.photo_url
+        photo_url: data.photo_url,
+        dob: data.date_of_birth
       },
       enrollment: {
         roll_number: data.roll_number,
@@ -457,7 +458,7 @@ exports.getReportCard = async (req, res, next) => {
     const [[data]] = await sequelize.query(`
       SELECT 
         e.id AS enrollment_id, e.roll_number, e.joined_date,
-        s.id AS student_id, s.first_name, s.last_name, s.admission_no, s.father_name,
+        s.id AS student_id, s.first_name, s.last_name, s.admission_no, s.father_name, s.date_of_birth,
         c.name AS class_name,
         sec.name AS section_name,
         sess.id AS session_id, sess.name AS session_name,
@@ -501,7 +502,7 @@ exports.getReportCard = async (req, res, next) => {
     // 5. Generate PDF
     const pdfBuffer = await generateReportCard({
       school: { name: data.school_name, address: data.school_address, phone: data.school_phone },
-      student: { first_name: data.first_name, last_name: data.last_name, admission_no: data.admission_no, father_name: data.father_name },
+      student: { first_name: data.first_name, last_name: data.last_name, admission_no: data.admission_no, father_name: data.father_name, date_of_birth: data.date_of_birth },
       enrollment: { roll_number: data.roll_number, class_name: data.class_name, section_name: data.section_name },
       session: { name: data.session_name },
       results: subjectResults,
