@@ -523,8 +523,19 @@ exports.getReportCard = async (req, res, next) => {
 exports.getExamMarks = async (req, res, next) => {
   try {
     const { exam_id, class_id, section_id } = req.query;
+    const schoolId = req.user.school_id;
     if (!exam_id || !class_id || !section_id) {
       return res.fail('exam_id, class_id, and section_id are required.');
+    }
+
+    // Verify exam belongs to school
+    const [[examCheck]] = await sequelize.query(`
+      SELECT e.id FROM exams e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :examId AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { examId: Number(exam_id), schoolId } });
+    if (!examCheck) {
+      return res.fail('Exam not found or access denied.', [], 404);
     }
 
     const [rows] = await sequelize.query(`

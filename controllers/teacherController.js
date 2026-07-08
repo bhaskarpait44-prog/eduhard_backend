@@ -523,12 +523,16 @@ async function ensureHomeworkPendingRows(homeworkId, homework) {
 
 function eachDate(fromDate, toDate) {
   const dates = [];
-  let current = new Date(`${fromDate}T00:00:00`);
-  const end = new Date(`${toDate}T00:00:00`);
+  let current = new Date(fromDate);
+  const end = new Date(toDate);
+
+  // Normalize to midnight UTC to prevent DST shifts
+  current.setUTCHours(0, 0, 0, 0);
+  end.setUTCHours(0, 0, 0, 0);
 
   while (current <= end) {
-    dates.push(current.toISOString().slice(0, 10));
-    current = new Date(current.setDate(current.getDate() + 1));
+    dates.push(current.toISOString().split('T')[0]);
+    current = new Date(current.setUTCDate(current.getUTCDate() + 1));
   }
 
   return dates;

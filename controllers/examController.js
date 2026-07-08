@@ -176,9 +176,9 @@ exports.getSubjects = async (req, res, next) => {
              c.name AS class_name, c.stream AS class_stream
       FROM exams e
       JOIN classes c ON c.id = e.class_id
-      WHERE e.id = :examId
+      WHERE e.id = :examId AND c.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { examId: Number(examId) } });
+    `, { replacements: { examId: Number(examId), schoolId: req.user.school_id } });
 
     if (!exam) return res.fail('Exam not found', [], 404);
 
@@ -1020,9 +1020,9 @@ exports.getTemplate = async (req, res, next) => {
       SELECT e.id, e.class_id, e.session_id, e.name AS exam_name, c.name AS class_name
       FROM exams e
       JOIN classes c ON c.id = e.class_id
-      WHERE e.id = :id
+      WHERE e.id = :id AND c.school_id = :schoolId
       LIMIT 1;
-    `, { replacements: { id } });
+    `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!exam) return res.fail('Exam not found.', [], 404);
 

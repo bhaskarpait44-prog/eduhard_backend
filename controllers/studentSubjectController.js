@@ -7,9 +7,18 @@ const { Student, Subject, Enrollment } = require('../models');
 exports.assignSubjects = async (req, res, next) => {
   try {
     const { student_id, session_id, subject_ids, is_core_filter } = req.body;
+    const schoolId = req.user.school_id;
 
     if (!student_id || !session_id || !Array.isArray(subject_ids)) {
       return res.fail('student_id, session_id, and subject_ids array are required.', [], 422);
+    }
+
+    // Verify student belongs to this school
+    const [[studentCheck]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { studentId: student_id, schoolId } });
+    if (!studentCheck) {
+      return res.fail('Student not found or access denied.', [], 404);
     }
 
     // Get student's current enrollment to find class
@@ -80,6 +89,15 @@ exports.assignSubjects = async (req, res, next) => {
 exports.getStudentSubjects = async (req, res, next) => {
   try {
     const { student_id, session_id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[studentCheck]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { studentId: student_id, schoolId } });
+    if (!studentCheck) {
+      return res.fail('Student not found or access denied.', [], 404);
+    }
 
     const subjects = await sequelize.query(
       `SELECT ss.id, ss.subject_id, s.name AS subject_name, s.code, s.subject_type,
@@ -102,6 +120,15 @@ exports.getStudentSubjects = async (req, res, next) => {
 exports.removeSubject = async (req, res, next) => {
   try {
     const { student_id, session_id, subject_id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[studentCheck]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { studentId: student_id, schoolId } });
+    if (!studentCheck) {
+      return res.fail('Student not found or access denied.', [], 404);
+    }
 
     const [[result]] = await sequelize.query(
       `UPDATE student_subjects SET is_active = false, updated_at = NOW(), updated_by = :userId
@@ -124,9 +151,18 @@ exports.removeSubject = async (req, res, next) => {
 exports.autoAssignCoreSubjects = async (req, res, next) => {
   try {
     const { student_id, session_id } = req.body;
+    const schoolId = req.user.school_id;
 
     if (!student_id || !session_id) {
       return res.fail('student_id and session_id are required.', [], 422);
+    }
+
+    // Verify student belongs to this school
+    const [[studentCheck]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { studentId: student_id, schoolId } });
+    if (!studentCheck) {
+      return res.fail('Student not found or access denied.', [], 404);
     }
 
     const [[enrollment]] = await sequelize.query(`

@@ -612,6 +612,14 @@ exports.deleteStructure = async (req, res, next) => {
 
 exports.generate = async (req, res, next) => {
   try {
+    const schoolId = req.user.school_id;
+    const [[sessionCheck]] = await sequelize.query(`
+      SELECT id FROM sessions WHERE id = :sessionId AND school_id = :schoolId LIMIT 1;
+    `, { replacements: { sessionId: req.body.session_id, schoolId } });
+    if (!sessionCheck) {
+      return res.fail('Session not found or access denied.', [], 404);
+    }
+
     const result = await feeManager.generateInvoices(req.body.session_id);
 
     await writeAuditLog(sequelize, {
@@ -633,6 +641,18 @@ exports.generate = async (req, res, next) => {
 exports.getStudentFees = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify enrollment belongs to school
+    const [[enrollmentCheck]] = await sequelize.query(`
+      SELECT e.id FROM enrollments e
+      JOIN sessions s ON s.id = e.session_id
+      WHERE e.id = :enrollmentId AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { enrollmentId: enrollment_id, schoolId } });
+
+    if (!enrollmentCheck) {
+      return res.fail('Enrollment not found or access denied.', [], 404);
+    }
 
     const [invoices] = await sequelize.query(`
       SELECT fi.id, fs.name AS fee_name, fs.frequency AS fee_frequency, fi.amount_due, fi.amount_paid,
@@ -661,6 +681,19 @@ exports.getStudentFees = async (req, res, next) => {
 exports.recordPayment = async (req, res, next) => {
   try {
     const { invoice_id, amount, payment_date, payment_mode, transaction_ref } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify invoice belongs to school
+    const [[invoiceCheck]] = await sequelize.query(`
+      SELECT fi.id FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN sessions s ON s.id = e.session_id
+      WHERE fi.id = :invoiceId AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { invoiceId: invoice_id, schoolId } });
+
+    if (!invoiceCheck) {
+      return res.fail('Invoice not found or access denied.', [], 404);
+    }
 
     const result = await feeManager.applyPayment(invoice_id, {
       amount,
@@ -689,6 +722,16 @@ exports.recordPayment = async (req, res, next) => {
 exports.carryForward = async (req, res, next) => {
   try {
     const { student_id, from_session_id, to_session_id } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to school
+    const [[studentCheck]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { studentId: student_id, schoolId } });
+    if (!studentCheck) {
+      return res.fail('Student not found or access denied.', [], 404);
+    }
+
     const result = await feeManager.carryForwardFees(student_id, from_session_id, to_session_id);
 
     await writeAuditLog(sequelize, {

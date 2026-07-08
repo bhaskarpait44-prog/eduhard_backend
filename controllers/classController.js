@@ -501,22 +501,35 @@ exports.getSections = async (req, res, next) => {
     const { id } = req.params;
     const schoolId = req.user.school_id;
 
-    // Verify class belongs to school
-    const cls = await Class.findOne({ where: { id, school_id: schoolId } });
-    if (!cls) return res.fail('Class not found.', [], 404);
-
-    const [sections] = await sequelize.query(`
+    let queryStr = `
       SELECT
         s.id, s.name, s.capacity, s.is_active, s.class_teacher_id,
+        c.name AS class_name,
         CONCAT(u.first_name, ' ', u.last_name) AS class_teacher_name,
         COUNT(e.id) FILTER (WHERE e.status = 'active') AS enrolled_count
       FROM sections s
+      JOIN classes c ON c.id = s.class_id
       LEFT JOIN enrollments e ON e.section_id = s.id
       LEFT JOIN teachers u ON u.id = s.class_teacher_id
-      WHERE s.class_id = :classId AND s.is_deleted = false
-      GROUP BY s.id, u.first_name, u.last_name
-      ORDER BY s.name ASC;
-    `, { replacements: { classId: id } });
+      WHERE c.school_id = :schoolId AND s.is_deleted = false
+    `;
+    const replacements = { schoolId };
+
+    if (id !== undefined) {
+      // Verify class belongs to school
+      const cls = await Class.findOne({ where: { id, school_id: schoolId } });
+      if (!cls) return res.fail('Class not found.', [], 404);
+
+      queryStr += ` AND s.class_id = :classId`;
+      replacements.classId = id;
+    }
+
+    queryStr += `
+      GROUP BY s.id, c.name, u.first_name, u.last_name
+      ORDER BY c.name ASC, s.name ASC;
+    `;
+
+    const [sections] = await sequelize.query(queryStr, { replacements });
 
     return res.ok(sections);
   } catch (err) { next(err); }
@@ -996,6 +1009,15 @@ exports.createSection = async (req, res, next) => {
     const cls = await Class.findOne({ where: { id, school_id: schoolId } });
     if (!cls) return res.fail('Class not found.', [], 404);
 
+    if (class_teacher_id) {
+      const [[teacherCheck]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false AND is_active = true LIMIT 1;
+      `, { replacements: { teacherId: class_teacher_id, schoolId } });
+      if (!teacherCheck) {
+        return res.fail('Class teacher not found or does not belong to this school.', [], 422);
+      }
+    }
+
     const existing = await Section.findOne({ where: { class_id: id, name } });
     if (existing) return res.fail(`Section "${name}" already exists in this class.`, [], 409);
 
@@ -1025,6 +1047,15 @@ exports.updateSection = async (req, res, next) => {
 
     const section = await Section.findOne({ where: { id: sectionId, class_id: id } });
     if (!section) return res.fail('Section not found.', [], 404);
+
+    if (class_teacher_id) {
+      const [[teacherCheck]] = await sequelize.query(`
+        SELECT id FROM teachers WHERE id = :teacherId AND school_id = :schoolId AND is_deleted = false AND is_active = true LIMIT 1;
+      `, { replacements: { teacherId: class_teacher_id, schoolId } });
+      if (!teacherCheck) {
+        return res.fail('Class teacher not found or does not belong to this school.', [], 422);
+      }
+    }
 
     const updates = { name, capacity, is_active };
     if (Object.prototype.hasOwnProperty.call(req.body, 'class_teacher_id')) {
