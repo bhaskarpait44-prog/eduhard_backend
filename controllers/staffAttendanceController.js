@@ -5,7 +5,10 @@ const sequelize = require('../config/database');
 const { StaffAttendance, User, Teacher } = require('../models');
 const { writeAuditLog } = require('../utils/writeAuditLog');
 
-const TODAY = () => new Date().toISOString().slice(0, 10);
+const TODAY = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
 
 // ── GET /api/staff-attendance/daily ─────────────────────────────────────────
 exports.getDailyAttendance = async (req, res, next) => {

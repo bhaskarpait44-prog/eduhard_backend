@@ -14,6 +14,11 @@ const sequelize    = require('../config/database');
 const Attendance   = require('../models/Attendance');
 const Enrollment   = require('../models/Enrollment');
 
+const getLocalDateString = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,7 +307,7 @@ async function retroactiveHoliday(sessionId, holidayDate, holidayName, declaredB
       SELECT start_date, end_date FROM sessions WHERE id = :sessionId LIMIT 1;
     `, { replacements: { sessionId }, transaction });
     
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDateString();
     // FIX: normalize to plain YYYY-MM-DD strings (Sequelize may return Date objects)
     const sessionEndStr   = String(sessionInfo.end_date).slice(0, 10);
     const sessionStartStr = String(sessionInfo.start_date).slice(0, 10);
@@ -545,7 +550,7 @@ async function getAttendanceStatsForEnrollments(enrollmentIds, options = {}, t =
     };
 
     // Query status counts (do not exclude holidays so we can return holiday count)
-    const today = new Date().toISOString().split('T')[0];
+    const today = getLocalDateString();
     const queryFrom = options.fromDate || sessionStartStr;
     const queryTo = options.toDate || sessionEndStr;
 
@@ -638,7 +643,7 @@ async function saveBulkAttendance({
   isTeacher = false,
   teacherLeaveCheck = null
 }) {
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getLocalDateString();
 
   // 1. Future date protection
   if (date > todayStr) {
@@ -744,9 +749,13 @@ async function saveBulkAttendance({
           continue;
         }
 
+        // ON CONFLICT DO NOTHING: Concurrently marked records (e.g. double submits)
+        // are silently ignored to prevent unique constraint violations, while edits
+        // are correctly forced to go through the explicit UPDATE path.
         await sequelize.query(`
           INSERT INTO attendance (enrollment_id, date, status, method, marked_by, marked_at, override_reason, created_at, updated_at)
-          VALUES (:enrollmentId, :date, :status, 'manual', :markedBy, NOW(), :overrideReason, NOW(), NOW());
+          VALUES (:enrollmentId, :date, :status, 'manual', :markedBy, NOW(), :overrideReason, NOW(), NOW())
+          ON CONFLICT (enrollment_id, date) DO NOTHING;
         `, {
           replacements: {
             enrollmentId: eid,

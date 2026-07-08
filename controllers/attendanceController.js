@@ -29,7 +29,26 @@ function parseOptionalInteger(value) {
   return Number(normalized);
 }
 
-const TODAY = () => new Date().toISOString().slice(0, 10);
+const TODAY = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+};
+
+function formatLocalDateString(dateStr) {
+  if (!dateStr || typeof dateStr !== 'string') return '';
+  const parts = dateStr.split('-');
+  if (parts.length !== 3) return dateStr;
+  const year = parts[0];
+  const monthIdx = parseInt(parts[1], 10) - 1;
+  const day = parts[2].padStart(2, '0');
+  const shortMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  if (monthIdx >= 0 && monthIdx < 12) {
+    return `${day} ${shortMonths[monthIdx]} ${year}`;
+  }
+  return dateStr;
+}
+
+const { getTeacherAssignments, buildScope, assertAccess, assertAttendanceAccess } = require('../utils/teacherAccessControl');
 
 async function getCurrentSessionForSchool(schoolId) {
   const [[session]] = await sequelize.query(`
@@ -88,7 +107,7 @@ exports.markSingle = async (req, res, next) => {
   try {
     const { enrollment_id, date, status, method, session_id } = req.body;
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = TODAY();
     if (date > todayStr) {
       return res.fail('Cannot mark attendance for a future date.', [], 422);
     }
@@ -126,7 +145,7 @@ exports.markSingle = async (req, res, next) => {
     }
 
     const [[enrollment]] = await sequelize.query(`
-      SELECT e.id FROM enrollments e
+      SELECT e.id, e.class_id, e.section_id FROM enrollments e
       JOIN students s ON s.id = e.student_id
       WHERE e.id = :enrollment_id
         AND e.session_id = :sessionId
@@ -136,6 +155,12 @@ exports.markSingle = async (req, res, next) => {
 
     if (!enrollment) {
       return res.fail('Enrollment not found in this session or access denied.', [], 404);
+    }
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      await assertAttendanceAccess(req.user.id, enrollment.class_id, enrollment.section_id, date, scope);
     }
 
     const [[existing]] = await sequelize.query(`
@@ -189,6 +214,12 @@ exports.markBulk = async (req, res, next) => {
 
     if (!section) {
       return res.fail('Section not found.', [], 404);
+    }
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      await assertAttendanceAccess(req.user.id, section.class_id, Number(section_id), date, scope);
     }
 
     const result = await saveBulkAttendance({
@@ -254,6 +285,12 @@ exports.getClassAttendance = async (req, res, next) => {
 
     if (sessionId == null) {
       return res.fail('No active session found for this school.', [], 422);
+    }
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      await assertAttendanceAccess(req.user.id, parsedClassId, parsedSectionId, date, scope);
     }
 
     const [students] = await sequelize.query(`
@@ -358,6 +395,12 @@ exports.getClassRegister = async (req, res, next) => {
 
     if (sessionId == null) {
       return res.fail('No active session found for this school.', [], 422);
+    }
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      assertAccess(scope, parsedClassId, parsedSectionId);
     }
 
     const fromDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-01`;
@@ -490,6 +533,12 @@ exports.downloadRegisterPdf = async (req, res, next) => {
       allowLocked: true,
     });
     if (sessionId == null) return res.fail('Session not found or access denied.', [], 404);
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      assertAccess(scope, classId, sectionId);
+    }
 
     const fromDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-01`;
     const lastDay = new Date(yearNum, monthNum, 0).getDate();
@@ -649,13 +698,19 @@ exports.getByEnrollment = async (req, res, next) => {
 
     // 1. Verify ownership first
     const [[enrollmentCheck]] = await sequelize.query(`
-      SELECT e.id FROM enrollments e
+      SELECT e.id, e.session_id, e.class_id, e.section_id FROM enrollments e
       JOIN students s ON s.id = e.student_id
       WHERE e.id = :eid AND s.school_id = :schoolId
     `, { replacements: { eid: enrollment_id, schoolId } });
 
     if (!enrollmentCheck) {
       return res.fail('Enrollment not found or access denied.', [], 404);
+    }
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, enrollmentCheck.session_id);
+      const scope = buildScope(assignments);
+      assertAccess(scope, enrollmentCheck.class_id, enrollmentCheck.section_id);
     }
 
     // 2. Build filter and fetch records
@@ -704,6 +759,15 @@ exports.sessionReport = async (req, res, next) => {
 
     if (!sessionCheck) {
       return res.fail('Session not found or access denied.', [], 404);
+    }
+
+    if (req.user.role === 'teacher') {
+      if (parsedClassId == null || parsedSectionId == null) {
+        return res.fail('Class and section are required for teachers.', [], 403);
+      }
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, parsedSessionId);
+      const scope = buildScope(assignments);
+      assertAccess(scope, parsedClassId, parsedSectionId);
     }
 
     const [rows] = await sequelize.query(`
@@ -852,13 +916,26 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
     const [[school]] = await sequelize.query(`SELECT name, address, phone FROM schools WHERE id = :schoolId LIMIT 1`, { replacements: { schoolId } });
     if (!school) return res.fail('School record not found.');
 
+    const sessionId = await resolveSessionId({
+      requestedSessionId: parseInt(session_id, 10),
+      schoolId,
+      allowLocked: true
+    });
+    if (sessionId == null) return res.fail('Session not found or access denied.', [], 404);
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, sessionId);
+      const scope = buildScope(assignments);
+      assertAccess(scope, class_id, section_id);
+    }
+
     const [[meta]] = await sequelize.query(`
       SELECT c.name AS class_name, sec.name AS section_name, sess.name AS session_name
       FROM classes c
       JOIN sections sec ON sec.id = :sectionId AND sec.class_id = c.id
       JOIN sessions sess ON sess.id = :sessionId
-      WHERE c.id = :classId LIMIT 1;
-    `, { replacements: { classId: class_id, sectionId: section_id, sessionId: session_id } });
+      WHERE c.id = :classId AND sess.school_id = :schoolId AND c.school_id = :schoolId LIMIT 1;
+    `, { replacements: { classId: class_id, sectionId: section_id, sessionId, schoolId } });
 
     if (!meta) return res.fail('Class, section, or session metadata not found.');
 
@@ -880,8 +957,9 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
         AND e.class_id = :classId
         AND e.section_id = :sectionId
         AND e.status IN ('active', 'inactive')
+        AND s.school_id = :schoolId
       ORDER BY COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D','','g'),''),'999999')::int, s.first_name
-    `, { replacements: { sessionId: session_id, classId: class_id, sectionId: section_id } });
+    `, { replacements: { sessionId, classId: class_id, sectionId: section_id, schoolId } });
 
     if (!dbRows || dbRows.length === 0) {
       return res.fail('No active enrollments found for the selected criteria.');
@@ -927,7 +1005,7 @@ exports.downloadSummaryReportPdf = async (req, res, next) => {
       doc.font('Helvetica').fontSize(8).text(`${school.address || ''} | Phone: ${school.phone || ''}`, margin + 15, 54);
       doc.font('Helvetica-Bold').fontSize(12).text('ATTENDANCE SUMMARY REPORT', margin + 15, 72);
       
-      doc.font('Helvetica').fontSize(9).text(`From: ${new Date(from_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}  To: ${new Date(to_date).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })}`, margin + 15, 87);
+      doc.font('Helvetica').fontSize(9).text(`From: ${formatLocalDateString(from_date)}  To: ${formatLocalDateString(to_date)}`, margin + 15, 87);
       doc.text(`Class: ${meta.class_name} | Section: ${meta.section_name}`, margin + 250, 87);
       
       doc.fontSize(7).text(`Generated on: ${new Date().toLocaleString()}`, margin, 35, { align: 'right', width: contentWidth - 15 });
@@ -1045,7 +1123,9 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
         s.first_name, s.last_name, s.admission_no, 
         c.name AS class_name, sec.name AS section_name,
         sp.photo_path,
-        e.session_id
+        e.session_id,
+        e.class_id,
+        e.section_id
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       JOIN classes c ON c.id = e.class_id
@@ -1055,6 +1135,12 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     `, { replacements: { enrollmentId: enrollment_id, schoolId } });
 
     if (!student) return res.fail('Student enrollment record not found or access denied.', [], 404);
+
+    if (req.user.role === 'teacher') {
+      const assignments = await getTeacherAssignments(req.user.id, req.user.school_id, student.session_id);
+      const scope = buildScope(assignments);
+      assertAccess(scope, student.class_id, student.section_id);
+    }
 
     const [records] = await sequelize.query(`
       SELECT date, status FROM attendance 
@@ -1090,12 +1176,18 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     doc.text(`Period: ${from_date} to ${to_date}`, 60, 175);
 
     // Calculate Stats for Period
+    const MONTH_NAMES = [
+      'January', 'February', 'March', 'April', 'May', 'June',
+      'July', 'August', 'September', 'October', 'November', 'December'
+    ];
     const months = {};
     let totalWorking = 0;
     let totalEffective = 0;
 
     records.forEach(r => {
-      const m = new Date(r.date).toLocaleString('default', { month: 'long', year: 'numeric' });
+      const [yearStr, monthStr] = r.date.split('-');
+      const monthIdx = parseInt(monthStr, 10) - 1;
+      const m = `${MONTH_NAMES[monthIdx]} ${yearStr}`;
       if (!months[m]) months[m] = { present: 0, absent: 0, late: 0, half_day: 0, working: 0 };
       if (r.status !== 'holiday') {
         months[m].working++;
@@ -1165,13 +1257,13 @@ exports.downloadStudentCardPdf = async (req, res, next) => {
     doc.fillColor('#1e40af').font('Helvetica-Bold').fontSize(12).text('Attendance Calendar', 40, calendarSectionY);
     doc.moveDown(0.5);
 
-    const monthList = [...new Set(records.map(r => new Date(r.date).toISOString().slice(0, 7)))];
+    const monthList = [...new Set(records.map(r => r.date.slice(0, 7)))];
     
     for (const mStr of monthList) {
       if (doc.y > 600) { doc.addPage(); drawHeader(); doc.y = 120; }
       
       const [y, m] = mStr.split('-').map(Number);
-      const mName = new Date(y, m - 1).toLocaleString('default', { month: 'long', year: 'numeric' });
+      const mName = `${MONTH_NAMES[m - 1]} ${y}`;
       const currentMonthY = doc.y;
 
       doc.fillColor('#475569').font('Helvetica-Bold').fontSize(10).text(mName, 40, currentMonthY);
