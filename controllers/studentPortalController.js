@@ -2533,7 +2533,7 @@ exports.resultsExport = async (req, res, next) => {
       FROM schools 
       WHERE id = :schoolId 
       LIMIT 1
-    `, { replacements: { schoolId: req.user.school_id } });
+    `, { replacements: { schoolId: context.student.school_id } });
 
     const [rows] = await sequelize.query(`
       SELECT

@@ -325,9 +325,11 @@ exports.getReportCardData = async (req, res, next) => {
     } else {
       subjectResultsQuery = `
         SELECT 
-          sub.name AS subject, sub.code,
+          sub.id AS subject_id, sub.name AS subject, sub.code,
           er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
-          es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks
+          es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks,
+          es.combined_passing_marks AS passing_marks,
+          e.name AS exam_name, e.weightage AS exam_weightage
         FROM exam_results er
         JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
         JOIN subjects sub ON sub.id = er.subject_id
