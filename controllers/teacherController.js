@@ -3397,6 +3397,17 @@ exports.changePassword = async (req, res, next) => {
       WHERE id = :teacherId;
     `, { replacements: { hash, teacherId: req.user.id } });
 
+    // Sync with users table if teacher has a user record
+    const teacherEmail = req.user.email;
+    if (teacherEmail) {
+      await sequelize.query(`
+        UPDATE users
+        SET password_hash = :hash,
+            updated_at = NOW()
+        WHERE LOWER(email) = :email AND is_deleted = false;
+      `, { replacements: { hash, email: teacherEmail.toLowerCase() } });
+    }
+
     await audit('teacher_profile', req.user.id, {
       field: 'password_change',
       oldValue: null,

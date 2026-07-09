@@ -4,6 +4,7 @@ const bcrypt = require('bcryptjs');
 const sequelize = require('../config/database');
 const redis = require('../config/redis');
 const logger = require('../utils/logger');
+const examEngine = require('../utils/examEngine');
 const { recomputeStudentAchievements } = require('../utils/achievementEngine');
 const { sendNotification } = require('../utils/notification');
 const { getAttendancePercent, getAttendanceStatsForEnrollments } = require('../utils/attendanceCalculator');
@@ -390,12 +391,9 @@ async function getLatestExamResult(context) {
   if (!row) return null;
 
   const percentage = Number(row.percentage || 0);
-  let grade = 'F';
-  if (percentage >= 90) grade = 'A+';
-  else if (percentage >= 80) grade = 'A';
-  else if (percentage >= 70) grade = 'B';
-  else if (percentage >= 60) grade = 'C';
-  else if (percentage >= 50) grade = 'D';
+  // Use the shared grade helper — respects the school's custom grading scale
+  const gradingScale = await examEngine.getActiveGradingScale(context.student.school_id);
+  const grade = examEngine.percentageToGrade(percentage, gradingScale);
 
   let result_status = 'fail';
   if (Number(row.all_passed) === 1) result_status = 'pass';
@@ -1089,6 +1087,7 @@ exports.resultByExam = async (req, res, next) => {
         sub.name AS subject_name,
         sub.code AS subject_code,
         sub.subject_type,
+        sub.is_core,
         es.combined_total_marks AS total_marks,
         es.combined_passing_marks AS passing_marks,
         es.theory_total_marks,
@@ -1141,16 +1140,15 @@ exports.resultByExam = async (req, res, next) => {
     const overall = totalMax > 0 ? roundNumber((totalObtained / totalMax) * 100) : 0;
     const strengths = subjects.filter((row) => ['A', 'A+'].includes(row.grade)).map((row) => row.subject_name);
     const needsImprovement = subjects.filter((row) => ['D', 'F'].includes(row.grade) || row.status === 'fail').map((row) => row.subject_name);
+    // Compartment rule: core subjects only (is_core=true), matching the canonical examEngine rule
+    const failedCoreSubjects = subjects.filter((row) => row.is_core && row.status === 'fail').map((row) => row.subject_name);
     const failedSubjects = subjects.filter((row) => row.status === 'fail').map((row) => row.subject_name);
 
-    let overallGrade = 'F';
-    if (overall >= 90) overallGrade = 'A+';
-    else if (overall >= 80) overallGrade = 'A';
-    else if (overall >= 70) overallGrade = 'B';
-    else if (overall >= 60) overallGrade = 'C';
-    else if (overall >= 50) overallGrade = 'D';
+    // Use the shared grade helper — respects the school's custom grading scale
+    const examGradingScale = await examEngine.getActiveGradingScale(context.student.school_id);
+    const overallGrade = examEngine.percentageToGrade(overall, examGradingScale);
 
-    const result_status = failedSubjects.length === 0 ? 'pass' : failedSubjects.length <= 2 ? 'compartment' : 'fail';
+    const result_status = failedCoreSubjects.length === 0 ? 'pass' : failedCoreSubjects.length <= 2 ? 'compartment' : 'fail';
 
     res.ok({
       exam,
@@ -1260,9 +1258,21 @@ exports.reportCard = async (req, res, next) => {
       },
     });
 
-    const totalObtained = rows.reduce((sum, row) => sum + Number(row.marks_obtained || row.theory_marks_obtained || 0) + Number(row.practical_marks_obtained || 0), 0);
+    const totalObtained = rows.reduce((sum, row) => {
+      // marks_obtained is already stored as theory + practical for 'both' subjects.
+      // Do NOT add practical_marks_obtained again or it will be double-counted.
+      if (row.subject_type === 'both') {
+        return sum + Number(row.marks_obtained || 0);
+      }
+      return sum + Number(row.marks_obtained || row.theory_marks_obtained || 0)
+               + Number(row.practical_marks_obtained || 0);
+    }, 0);
     const totalMax = rows.reduce((sum, row) => sum + Number(row.combined_total_marks || row.total_marks || 0), 0);
     const percentage = totalMax > 0 ? roundNumber((totalObtained / totalMax) * 100) : 0;
+
+    // Use canonical pass threshold (30%) and shared grade helper, not an ad-hoc 50% rule
+    const reportCardScale = await examEngine.getActiveGradingScale(context.student.school_id);
+    const reportCardResult = percentage >= 30 ? 'pass' : 'fail';
 
     res.ok({
       school: {
@@ -1286,7 +1296,7 @@ exports.reportCard = async (req, res, next) => {
       attendance,
       marks: rows,
       totals: { obtained: totalObtained, maximum: totalMax, percentage },
-      result: percentage >= 50 ? 'pass' : 'fail',
+      result: reportCardResult,
       remarks: {
         teacher: latestSharedRemark?.remark_text || null,
         teacher_name: latestSharedRemark?.teacher_name || null,

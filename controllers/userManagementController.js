@@ -739,6 +739,23 @@ exports.resetPassword = async (req, res, next) => {
       WHERE id = :id;
     `, { replacements: { hash, force: force_change, id } });
 
+    // Sync password to the other table if same email exists
+    if (isTeacher) {
+      await sequelize.query(`
+        UPDATE users SET password_hash = :hash, force_password_change = :force,
+          last_password_change = NOW(), updated_at = NOW(),
+          failed_login_attempts = 0, locked_until = NULL
+        WHERE LOWER(email) = :email AND is_deleted = false;
+      `, { replacements: { hash, force: force_change, email: user.email.toLowerCase() } });
+    } else if (user.role === 'teacher') {
+      await sequelize.query(`
+        UPDATE teachers SET password_hash = :hash, force_password_change = :force,
+          last_password_change = NOW(), updated_at = NOW(),
+          failed_login_attempts = 0, locked_until = NULL
+        WHERE LOWER(email) = :email AND is_deleted = false;
+      `, { replacements: { hash, force: force_change, email: user.email.toLowerCase() } });
+    }
+
     await audit(tableName, id, [{ field: 'password_reset', oldValue: null, newValue: 'reset by admin' }], req);
 
     return res.ok(

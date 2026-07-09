@@ -111,14 +111,40 @@ exports.enterMarks = async (req, res, next) => {
       `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id, s.status AS session_status, s.is_locked AS session_locked
        FROM exams e 
        JOIN sessions s ON s.id = e.session_id
-       WHERE e.id = :exam_id;`,
-      { replacements: { exam_id } }
+       WHERE e.id = :exam_id AND s.school_id = :schoolId;`,
+      { replacements: { exam_id, schoolId: req.user.school_id } }
     );
 
     if (!exam) return res.fail('Exam not found.', [], 404);
 
     if (req.user.role === 'teacher' && exam.status === 'draft') {
       return res.fail('Teachers cannot enter marks for draft exams.', [], 403);
+    }
+
+    // Security: teachers may only enter marks for subjects they are assigned to
+    if (req.user.role === 'teacher') {
+      const subjectIds = (results || []).map(r => r.subject_id).filter(Boolean);
+      if (subjectIds.length > 0) {
+        const [[assignment]] = await sequelize.query(`
+          SELECT id FROM teacher_assignments
+          WHERE teacher_id = :teacherId
+            AND session_id = :sessionId
+            AND class_id   = :classId
+            AND subject_id IN (:subjectIds)
+            AND is_active  = true
+          LIMIT 1;
+        `, {
+          replacements: {
+            teacherId : req.user.id,
+            sessionId : exam.session_id,
+            classId   : exam.class_id,
+            subjectIds,
+          }
+        });
+        if (!assignment) {
+          return res.fail('You are not assigned to enter marks for any of these subjects in this class.', [], 403);
+        }
+      }
     }
 
     if (['closed', 'archived', 'locked'].includes(exam.session_status) || exam.session_locked) {
@@ -310,7 +336,7 @@ exports.getReportCardData = async (req, res, next) => {
     if (exam_id) {
       subjectResultsQuery = `
         SELECT 
-          sub.name AS subject, sub.code,
+          sub.name AS subject, sub.code, sub.is_core,
           er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
           es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks,
           es.combined_passing_marks AS passing_marks
@@ -325,7 +351,7 @@ exports.getReportCardData = async (req, res, next) => {
     } else {
       subjectResultsQuery = `
         SELECT 
-          sub.id AS subject_id, sub.name AS subject, sub.code,
+          sub.id AS subject_id, sub.name AS subject, sub.code, sub.is_core,
           er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
           es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks,
           es.combined_passing_marks AS passing_marks,
@@ -342,24 +368,26 @@ exports.getReportCardData = async (req, res, next) => {
 
     const [subjectResults] = await sequelize.query(subjectResultsQuery, { replacements });
 
+    // Fetch school's active grading scale once for use below
+    const gradingScale = await examEngine.getActiveGradingScale(schoolId);
+
     // Calculate dynamic Final Result object if exam_id query param is supplied
     let finalResultData;
     if (exam_id) {
       const totalObtained = subjectResults.reduce((sum, row) => sum + (row.is_absent ? 0 : Number(row.marks_obtained || 0)), 0);
       const totalMax = subjectResults.reduce((sum, row) => sum + Number(row.total_marks || 0), 0);
       const percentage = totalMax > 0 ? Number(((totalObtained / totalMax) * 100).toFixed(2)) : 0;
-      
-      let grade = 'F';
-      if (percentage >= 90) grade = 'A+';
-      else if (percentage >= 80) grade = 'A';
-      else if (percentage >= 70) grade = 'B';
-      else if (percentage >= 60) grade = 'C';
-      else if (percentage >= 50) grade = 'D';
 
-      const failedCount = subjectResults.filter(
-        (er) => er.is_absent || Number(er.marks_obtained || 0) < Number(er.passing_marks || 0)
+      // Use the shared grade helper — respects the school's custom grading scale
+      const grade = examEngine.percentageToGrade(percentage, gradingScale);
+
+      // Compartment rule: use core subjects only (is_core=true), matching the canonical engine
+      const failedCoreCount = subjectResults.filter(
+        (er) => er.is_core && (er.is_absent || Number(er.marks_obtained || 0) < Number(er.passing_marks || 0))
       ).length;
-      const result = failedCount === 0 ? 'pass' : failedCount <= 2 ? 'compartment' : 'fail';
+      const result = failedCoreCount === 0 ? 'pass'
+        : failedCoreCount <= 2 ? 'compartment'
+        : 'fail';
 
       finalResultData = {
         release_result: examInfo?.publish_controls?.results_published === true,
@@ -599,6 +627,9 @@ exports.getClassResults = async (req, res, next) => {
         return res.fail('Exam not found for the selected session and class.', [], 404);
       }
 
+      // Fetch school's active grading scale once for use in grade calculations
+      const gradingScale = await examEngine.getActiveGradingScale(schoolId);
+
       let endOfExamMonth = '9999-12-31';
       if (examCheck.start_date) {
         const date = new Date(examCheck.start_date);
@@ -638,8 +669,14 @@ exports.getClassResults = async (req, res, next) => {
             SUM(er.marks_obtained) AS marks_obtained,
             SUM(es.combined_total_marks) AS total_marks,
             COUNT(er.marks_obtained) AS entered_count,
-            COUNT(CASE WHEN (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE) OR er.marks_obtained < es.combined_passing_marks OR er.is_absent = true THEN 1 END) AS failed_count
+            -- Count failures for CORE subjects only, matching the canonical examEngine rule
+            COUNT(CASE WHEN sub_core.is_core = true AND (
+              (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE)
+              OR er.marks_obtained < es.combined_passing_marks
+              OR er.is_absent = true
+            ) THEN 1 END) AS failed_count
           FROM exam_subjects es
+          JOIN subjects sub_core ON sub_core.id = es.subject_id
           LEFT JOIN exam_results er 
             ON er.subject_id = es.subject_id 
            AND er.enrollment_id = e.id 
@@ -669,14 +706,11 @@ exports.getClassResults = async (req, res, next) => {
 
         if (entered_count > 0) {
           percentage = total_marks > 0 ? Number(((marks_obtained / total_marks) * 100).toFixed(2)) : 0;
-          
-          if (percentage >= 90) grade = 'A+';
-          else if (percentage >= 80) grade = 'A';
-          else if (percentage >= 70) grade = 'B';
-          else if (percentage >= 60) grade = 'C';
-          else if (percentage >= 50) grade = 'D';
-          else grade = 'F';
 
+          // Use shared grade helper — respects the school's custom grading scale
+          grade = examEngine.percentageToGrade(percentage, gradingScale);
+
+          // failed_count now tracks core subjects only (see lateral subquery above)
           result = failed_count === 0 ? 'pass' : failed_count <= 2 ? 'compartment' : 'fail';
         }
 
@@ -833,6 +867,9 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       }
       exam = examRow;
 
+      // Fetch school's active grading scale once for use in grade calculations
+      const gradingScale = await examEngine.getActiveGradingScale(schoolId);
+
       const [subjectRows] = await sequelize.query(`
         SELECT DISTINCT sub.id, sub.name, sub.code
         FROM subjects sub
@@ -859,8 +896,14 @@ exports.downloadClassResultSheet = async (req, res, next) => {
             SUM(er.marks_obtained) AS marks_obtained,
             SUM(es.combined_total_marks) AS total_marks,
             COUNT(er.marks_obtained) AS entered_count,
-            COUNT(CASE WHEN (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE) OR er.marks_obtained < es.combined_passing_marks OR er.is_absent = true THEN 1 END) AS failed_count
+            -- Count failures for CORE subjects only, matching the canonical examEngine rule
+            COUNT(CASE WHEN sub_core.is_core = true AND (
+              (er.marks_obtained IS NULL AND er.is_absent IS NOT TRUE)
+              OR er.marks_obtained < es.combined_passing_marks
+              OR er.is_absent = true
+            ) THEN 1 END) AS failed_count
           FROM exam_subjects es
+          JOIN subjects sub_core ON sub_core.id = es.subject_id
           LEFT JOIN exam_results er 
             ON er.subject_id = es.subject_id 
            AND er.enrollment_id = e.id 
@@ -883,14 +926,11 @@ exports.downloadClassResultSheet = async (req, res, next) => {
 
         if (entered_count > 0) {
           percentage = total_max > 0 ? Number(((total_obtained / total_max) * 100).toFixed(2)) : 0;
-          
-          if (percentage >= 90) grade = 'A+';
-          else if (percentage >= 80) grade = 'A';
-          else if (percentage >= 70) grade = 'B';
-          else if (percentage >= 60) grade = 'C';
-          else if (percentage >= 50) grade = 'D';
-          else grade = 'F';
 
+          // Use shared grade helper — respects the school's custom grading scale
+          grade = examEngine.percentageToGrade(percentage, gradingScale);
+
+          // failed_count now tracks core subjects only (see lateral subquery above)
           result = failed_count === 0 ? 'pass' : failed_count <= 2 ? 'compartment' : 'fail';
         }
 
@@ -1142,7 +1182,8 @@ exports.calculate = async (req, res, next) => {
 
 exports.bulkCalculate = async (req, res, next) => {
   try {
-    const { session_id, class_id, calculate = true, release = true } = req.body;
+    // Default: calculate=true computes results; release=false (safe default — never accidentally publish)
+    const { session_id, class_id, calculate = true, release = false } = req.body;
     const schoolId = req.user.school_id;
 
     if (!session_id || !class_id) {
@@ -1428,78 +1469,89 @@ exports.overrideMark = async (req, res, next) => {
       gradingScale
     );
 
-    // Fetch old result for history
+    // Fetch old result for history (before the transaction so we capture previous state)
     const [[oldResult]] = await sequelize.query(
       `SELECT marks_obtained, theory_marks_obtained, practical_marks_obtained, is_absent 
        FROM exam_results 
        WHERE exam_id = :exam_id AND enrollment_id = :enrollment_id AND subject_id = :subject_id 
        LIMIT 1;`,
-      { replacements: { exam_id, enrollment_id, subject_id }, transaction: null }
+      { replacements: { exam_id, enrollment_id, subject_id } }
     );
 
-    const [updatedRows] = await sequelize.query(`
-      UPDATE exam_results
-      SET marks_obtained = :marks,
-          theory_marks_obtained = :theoryMarks,
-          practical_marks_obtained = :practicalMarks,
-          is_absent = :isAbsent,
-          grade = :grade,
-          is_pass = :isPass,
-          override_by = :userId,
-          override_reason = :reason,
-          updated_at = NOW()
-      WHERE exam_id = :examId
-        AND enrollment_id = :enrollmentId
-        AND subject_id = :subjectId
-      RETURNING exam_id, enrollment_id, subject_id, marks_obtained, theory_marks_obtained,
-        practical_marks_obtained, is_absent, grade, is_pass, override_reason, override_by, updated_at;
-    `, {
-      replacements: {
-        examId: exam_id,
-        enrollmentId: enrollment_id,
-        subjectId: subject_id,
-        marks: finalMarks,
-        theoryMarks,
-        practicalMarks,
-        isAbsent: !!is_absent,
-        grade,
-        isPass,
-        userId: req.user.id,
-        reason,
-      },
-    });
+    // Wrap the UPDATE, audit log, MarkHistory, and recalculation in a single transaction.
+    // If calculateResult throws (e.g. result is locked), the whole operation rolls back,
+    // preventing a committed mark change with a stale/inconsistent aggregate result.
+    let overrideRow;
+    await sequelize.transaction(async (t) => {
+      const [updatedRows] = await sequelize.query(`
+        UPDATE exam_results
+        SET marks_obtained = :marks,
+            theory_marks_obtained = :theoryMarks,
+            practical_marks_obtained = :practicalMarks,
+            is_absent = :isAbsent,
+            grade = :grade,
+            is_pass = :isPass,
+            override_by = :userId,
+            override_reason = :reason,
+            updated_at = NOW()
+        WHERE exam_id = :examId
+          AND enrollment_id = :enrollmentId
+          AND subject_id = :subjectId
+        RETURNING exam_id, enrollment_id, subject_id, marks_obtained, theory_marks_obtained,
+          practical_marks_obtained, is_absent, grade, is_pass, override_reason, override_by, updated_at;
+      `, {
+        replacements: {
+          examId: exam_id,
+          enrollmentId: enrollment_id,
+          subjectId: subject_id,
+          marks: finalMarks,
+          theoryMarks,
+          practicalMarks,
+          isAbsent: !!is_absent,
+          grade,
+          isPass,
+          userId: req.user.id,
+          reason,
+        },
+        transaction: t,
+      });
 
-    if (updatedRows.length === 0) {
-      return res.fail('Teacher marks have not been entered for this student yet.', [], 404);
-    }
+      if (updatedRows.length === 0) {
+        throw Object.assign(
+          new Error('Teacher marks have not been entered for this student yet.'),
+          { status: 404 }
+        );
+      }
+      overrideRow = updatedRows[0];
 
-    // Log to audit_logs
-    await writeAuditLog(sequelize, {
-      tableName: 'exam_results',
-      recordId: `${exam_id}_${enrollment_id}_${subject_id}`,
-      changes: { field: 'marks_obtained', oldValue: String(oldResult?.marks_obtained || 0), newValue: String(finalMarks) },
-      changedBy: req.user.id,
-      reason: `Mark override: ${reason}`,
-      ipAddress: req.ip,
-      deviceInfo: req.headers['user-agent']
-    });
+      // Log to audit_logs (within transaction — rolls back if calculateResult fails)
+      await writeAuditLog(sequelize, {
+        tableName: 'exam_results',
+        recordId: `${exam_id}_${enrollment_id}_${subject_id}`,
+        changes: { field: 'marks_obtained', oldValue: String(oldResult?.marks_obtained || 0), newValue: String(finalMarks) },
+        changedBy: req.user.id,
+        reason: `Mark override: ${reason}`,
+        ipAddress: req.ip,
+        deviceInfo: req.headers['user-agent']
+      }, t);
 
-    // Log to MarkHistory
-    await MarkHistory.create({
-      exam_id,
-      enrollment_id,
-      subject_id,
-      old_marks_obtained: oldResult?.marks_obtained,
-      new_marks_obtained: finalMarks,
-      old_theory_marks: oldResult?.theory_marks_obtained,
-      new_theory_marks: theoryMarks,
-      old_practical_marks: oldResult?.practical_marks_obtained,
-      new_practical_marks: practicalMarks,
-      old_is_absent: oldResult?.is_absent,
-      new_is_absent: !!is_absent,
-      changed_by: req.user.id,
-      change_reason: reason,
-      change_type: 'override',
+      // Log to MarkHistory (within transaction)
+      await MarkHistory.create({
+        exam_id,
+        enrollment_id,
+        subject_id,
+        old_marks_obtained: oldResult?.marks_obtained,
+        new_marks_obtained: finalMarks,
+        old_theory_marks: oldResult?.theory_marks_obtained,
+        new_theory_marks: theoryMarks,
+        old_practical_marks: oldResult?.practical_marks_obtained,
+        new_practical_marks: practicalMarks,
+        old_is_absent: oldResult?.is_absent,
+        new_is_absent: !!is_absent,
+        changed_by: req.user.id,
+        change_reason: reason,
+        change_type: 'override',
+      }, { transaction: t });
     });
 
     const [[resultRow]] = await sequelize.query(`
@@ -1521,8 +1573,14 @@ exports.overrideMark = async (req, res, next) => {
 
     invalidateCache(exam.school_id, '/api/results*');
     invalidateCache(exam.school_id, '/api/dashboard*');
-    res.ok(updatedRows[0], 'Marks overridden successfully.');
-  } catch (err) { next(err); }
+    res.ok(overrideRow, 'Marks overridden successfully.');
+  } catch (err) {
+    // Surface custom status codes (e.g., 404 from missing result row)
+    if (err.status) {
+      return res.fail(err.message, [], err.status);
+    }
+    next(err);
+  }
 };
 
 exports.remove = async (req, res, next) => {

@@ -979,7 +979,7 @@ exports.approveAllSubjects = async (req, res, next) => {
           updated_by = :userId,
           updated_at = NOW()
       WHERE exam_id = :examId
-        AND review_status IN ('submitted', 'draft')
+        AND review_status IN ('submitted')
       RETURNING subject_id;
     `, {
       replacements: {
@@ -1086,8 +1086,8 @@ exports.uploadMarks = async (req, res, next) => {
       `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id 
        FROM exams e 
        JOIN sessions s ON s.id = e.session_id
-       WHERE e.id = :id;`,
-      { replacements: { id } }
+       WHERE e.id = :id AND s.school_id = :schoolId;`,
+      { replacements: { id, schoolId: req.user.school_id } }
     );
     if (!exam) return res.fail('Exam not found.', [], 404);
     if (req.user.role === 'teacher' && exam.status === 'draft') {

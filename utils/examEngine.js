@@ -24,6 +24,7 @@
 const sequelize            = require('../config/database');
 const { getAttendancePercent } = require('./attendanceCalculator');
 const auditLogger          = require('./auditLogger');
+const { writeAuditLog }    = require('./writeAuditLog');
 const { GradingScale, MarkHistory, StudentResult } = require('../models');
 
 const RESULT_RULES = {
@@ -151,9 +152,10 @@ async function calculateResult(enrollmentId, sessionId) {
   }
 
   // ── Step 2: Attendance check ─────────────────────────────────────────────
-  const attendanceStats = await getAttendancePercent(enrollmentId);
-  const attendancePct   = attendanceStats.percentage;
-  const failedAttendance = false; // Attendance ignored for pass/fail
+  const attendanceStats  = await getAttendancePercent(enrollmentId);
+  const attendancePct    = attendanceStats.percentage;
+  // Enforce attendance rule: below the minimum threshold → FAIL regardless of marks
+  const failedAttendance = attendancePct < RESULT_RULES.minAttendancePercent;
 
   // ── Step 3: Aggregate marks with Weightage ───────────────────────────────
   let weightedTotalMax    = 0;
@@ -238,9 +240,28 @@ async function calculateResult(enrollmentId, sessionId) {
     : 0.00;
   const overallGrade       = percentageToGrade(percentage, gradingScale);
 
-  const result             = percentage >= 30 ? 'pass' : 'fail';
-  const compartmentSubjects = null;
-  const isPromoted          = percentage >= 30;
+  let result = 'pass';
+  let compartmentSubjects = null;
+  let isPromoted = true;
+
+  // Attendance rule overrides marks entirely
+  if (failedAttendance) {
+    result     = 'fail';
+    isPromoted = false;
+  } else if (percentage < 30) {
+    result = 'fail';
+    isPromoted = false;
+  } else if (failedCoreSubjects.length === 0) {
+    result = 'pass';
+    isPromoted = true;
+  } else if (failedCoreSubjects.length <= RESULT_RULES.maxCoreFailuresForCompartment) {
+    result = 'compartment';
+    compartmentSubjects = failedCoreSubjects.map(sub => sub.subject_id);
+    isPromoted = false;
+  } else {
+    result = 'fail';
+    isPromoted = false;
+  }
 
   // ── Step 5: Upsert student_results ───────────────────────────────────────
   const [existing] = await sequelize.query(`
@@ -291,10 +312,20 @@ async function calculateResult(enrollmentId, sessionId) {
     `, { replacements: resultPayload });
   }
 
-  // Log Grace Marks in MarkHistory or AuditLog?
-  // MarkHistory seems more appropriate for specific subject changes.
-  // But Grace Marks are applied at the session level aggregation.
-  // Let's log them in AuditLog for now if needed.
+  // ── Log Grace Marks to audit_logs for transparency ───────────────────────
+  if (graceAwards.length > 0) {
+    await writeAuditLog(sequelize, {
+      tableName  : 'student_results',
+      recordId   : enrollmentId,
+      changes    : graceAwards.map(award => ({
+        field    : 'grace_marks',
+        oldValue : '0',
+        newValue : String(award.grace_marks),
+      })),
+      changedBy  : null,  // system-applied, not a user action
+      reason     : `Grace marks auto-applied for subjects: ${graceAwards.map(a => a.subject_name).join(', ')}`,
+    }).catch(() => {}); // non-fatal — result is still written even if audit log fails
+  }
 
   return {
     enrollmentId,
@@ -656,6 +687,18 @@ async function saveStudentMarks(data, transaction = null) {
           if (finalMarks != null && finalMarks > parseFloat(subject.combined_total_marks)) {
             throw Object.assign(new Error(`Marks for ${r.subject_id} exceed limit.`), { status: 422 });
           }
+        }
+
+        // Application-level guard: marks must be provided for non-absent students.
+        // This mirrors the corrected DB CHECK constraint (chk_marks_absent_consistency)
+        // and surfaces a clear error to the teacher rather than silently storing a
+        // null mark that would resolve to grade=F with no visible error.
+        if (finalMarks === null) {
+          throw Object.assign(
+            new Error(`Marks are required for non-absent students (subject_id=${r.subject_id}). ` +
+              `Mark the student as absent if no marks are available.`),
+            { status: 422 }
+          );
         }
       }
 

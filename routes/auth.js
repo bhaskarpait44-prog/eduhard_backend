@@ -154,6 +154,39 @@ router.post('/reset-password',
               updated_at = NOW()
           WHERE id = :id;
         `, { replacements: { hash, id: user.id } });
+
+        // Sync if teacher
+        if (user.type === 'teacher') {
+          // Sync with users table by email
+          await sequelize.query(`
+            UPDATE users
+            SET password_hash = :hash,
+                reset_password_token = NULL,
+                reset_password_expires = NULL,
+                failed_login_attempts = 0,
+                locked_until = NULL,
+                force_password_change = false,
+                updated_at = NOW()
+            WHERE LOWER(email) = :email AND is_deleted = false;
+          `, { replacements: { hash, email } });
+        } else if (user.type === 'user') {
+          // Check if this user has role = 'teacher'
+          const [[userRow]] = await sequelize.query(`SELECT role::text FROM users WHERE id = :id`, { replacements: { id: user.id } });
+          if (userRow && userRow.role === 'teacher') {
+            // Sync with teachers table by email
+            await sequelize.query(`
+              UPDATE teachers
+              SET password_hash = :hash,
+                  reset_password_token = NULL,
+                  reset_password_expires = NULL,
+                  failed_login_attempts = 0,
+                  locked_until = NULL,
+                  force_password_change = false,
+                  updated_at = NOW()
+              WHERE LOWER(email) = :email AND is_deleted = false;
+            `, { replacements: { hash, email } });
+          }
+        }
       }
 
       return res.ok({}, 'Password has been reset successfully. You can now log in with your new password.');
@@ -352,7 +385,20 @@ router.post('/login',
       }
 
       const normalizedRole = normalizeUserRole(user.role);
-      const permissions = Array.from(await loadUserPermissions(user.id, normalizedRole));
+      
+      let finalUserId = user.id;
+      let finalUserName = user.name;
+      if (normalizedRole === 'teacher') {
+        const [[teacher]] = await sequelize.query(`
+          SELECT id, first_name, last_name FROM teachers WHERE LOWER(email) = :email AND is_deleted = false LIMIT 1;
+        `, { replacements: { email: user.email } });
+        if (teacher) {
+          finalUserId = teacher.id;
+          finalUserName = `${teacher.first_name} ${teacher.last_name}`.trim();
+        }
+      }
+
+      const permissions = Array.from(await loadUserPermissions(finalUserId, normalizedRole));
 
       // Reset failed attempts on success
       if (user.table_name === 'student_profile') {
@@ -374,10 +420,10 @@ router.post('/login',
       }
 
       const payload = { 
-        userId: user.id, 
+        userId: finalUserId, 
         schoolId: user.school_id, 
         role: normalizedRole,
-        name: user.name,
+        name: finalUserName,
         email: user.email 
       };
 
@@ -388,8 +434,8 @@ router.post('/login',
         token,
         refresh_token,
         user: {
-          id: user.id,
-          name: user.name,
+          id: finalUserId,
+          name: finalUserName,
           email: user.email,
           role: normalizedRole,
           school_id: user.school_id,
@@ -433,6 +479,18 @@ router.post('/change-password',
         await sequelize.query(`UPDATE student_profiles SET parent_password_hash = :hash WHERE id = :id`, { replacements: { hash, id } });
       } else {
         await sequelize.query(`UPDATE ${table} SET password_hash = :hash, force_password_change = false, updated_at = NOW() WHERE id = :id`, { replacements: { hash, id } });
+
+        // Sync if teacher
+        if (role === 'teacher') {
+          const userEmail = req.user.email;
+          if (userEmail) {
+            if (table === 'teachers') {
+              await sequelize.query(`UPDATE users SET password_hash = :hash, updated_at = NOW() WHERE LOWER(email) = :email AND is_deleted = false`, { replacements: { hash, email: userEmail.toLowerCase() } });
+            } else if (table === 'users') {
+              await sequelize.query(`UPDATE teachers SET password_hash = :hash, force_password_change = false, last_password_change = NOW(), updated_at = NOW() WHERE LOWER(email) = :email AND is_deleted = false`, { replacements: { hash, email: userEmail.toLowerCase() } });
+            }
+          }
+        }
       }
 
       res.ok({}, 'Password changed successfully.');
