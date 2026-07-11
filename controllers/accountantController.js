@@ -1761,7 +1761,13 @@ exports.getUpiRequests = async (req, res, next) => {
   try {
     const { status = 'pending', page = 1, limit = 20 } = req.query;
     const schoolId = req.user.school_id;
-    const offset = (Number(page) - 1) * Number(limit);
+
+    let pageNum = parseInt(page, 10);
+    let limitNum = parseInt(limit, 10);
+    if (isNaN(pageNum) || pageNum <= 0) pageNum = 1;
+    if (isNaN(limitNum) || limitNum <= 0) limitNum = 20;
+
+    const offset = (pageNum - 1) * limitNum;
 
     const [requests] = await sequelize.query(`
       SELECT
@@ -1785,7 +1791,7 @@ exports.getUpiRequests = async (req, res, next) => {
         ${status !== 'all' ? 'AND upr.status = :status' : ''}
       ORDER BY upr.created_at DESC
       LIMIT :limit OFFSET :offset;
-    `, { replacements: { schoolId, status, limit: Number(limit), offset } });
+    `, { replacements: { schoolId, status, limit: limitNum, offset } });
 
     const [[{ total }]] = await sequelize.query(`
       SELECT COUNT(*) AS total
@@ -1800,9 +1806,9 @@ exports.getUpiRequests = async (req, res, next) => {
       requests, 
       pagination: {
         total: Number(total),
-        page: Number(page),
-        limit: Number(limit),
-        pages: Math.ceil(Number(total) / Number(limit))
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(Number(total) / limitNum)
       }
     });
   } catch (err) { next(err); }

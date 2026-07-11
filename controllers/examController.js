@@ -172,7 +172,7 @@ exports.getSubjects = async (req, res, next) => {
 
     const [[exam]] = await sequelize.query(`
       SELECT e.id, e.name, e.class_id, e.session_id, e.status, e.published_at, 
-             e.start_date, e.end_date,
+             e.start_date, e.end_date, e.publish_controls,
              c.name AS class_name, c.stream AS class_stream
       FROM exams e
       JOIN classes c ON c.id = e.class_id
@@ -182,7 +182,7 @@ exports.getSubjects = async (req, res, next) => {
 
     if (!exam) return res.fail('Exam not found', [], 404);
 
-    if (req.user.role === 'teacher' && exam.status === 'draft') {
+    if (req.user.role === 'teacher' && exam.status === 'draft' && exam.publish_controls?.results_published !== true) {
       return res.fail('Teachers cannot access draft exam details.', [], 403);
     }
 
@@ -627,8 +627,8 @@ exports.update = async (req, res, next) => {
             status = COALESCE(:status, status),
             weightage = COALESCE(:weightage, weightage),
             publish_controls = COALESCE(:publish_controls, publish_controls),
-            total_marks = :total_marks,
-            passing_marks = :passing_marks,
+            total_marks = COALESCE(:total_marks, total_marks),
+            passing_marks = COALESCE(:passing_marks, passing_marks),
             published_at = CASE 
               WHEN :status = 'published' AND status != 'published' THEN NOW() 
               WHEN :status = 'draft' THEN NULL
@@ -665,7 +665,8 @@ exports.update = async (req, res, next) => {
         // We might want to preserve review_status for existing subjects if not publishing.
         
         const [existingSubjects] = await sequelize.query(`
-          SELECT subject_id, review_status, reviewed_by, reviewed_at, created_by, created_at 
+          SELECT subject_id, review_status, reviewed_by, reviewed_at, created_by, created_at,
+                 assigned_teacher_id, exam_date, start_time, end_time, invigilator_teacher_id
           FROM exam_subjects WHERE exam_id = :id;
         `, { replacements: { id }, transaction });
         

@@ -22,7 +22,7 @@ const LibraryReservation = sequelize.define('LibraryReservation', {
     allowNull: false
   },
   borrower_type: {
-    type: DataTypes.ENUM('student', 'staff'),
+    type: DataTypes.ENUM('student', 'teacher', 'staff'),
     allowNull: false
   },
   reservation_date: {

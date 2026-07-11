@@ -7,7 +7,7 @@ LibraryIssue.init({
   id: { type: DataTypes.INTEGER, autoIncrement: true, primaryKey: true },
   school_id: { type: DataTypes.INTEGER, allowNull: false },
   book_id: { type: DataTypes.INTEGER, allowNull: false },
-  borrower_type: { type: DataTypes.ENUM('student', 'staff'), allowNull: false },
+  borrower_type: { type: DataTypes.ENUM('student', 'teacher', 'staff'), allowNull: false },
   borrower_id: { type: DataTypes.INTEGER, allowNull: false },
   issue_date: { type: DataTypes.DATEONLY, allowNull: false },
   due_date: { type: DataTypes.DATEONLY, allowNull: false },

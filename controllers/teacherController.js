@@ -1454,7 +1454,7 @@ exports.marksExams = async (req, res, next) => {
   try {
     const { session, assignments } = await getTeacherContext(req);
     const subjectAssignments = assignments.filter((assignment) => assignment.subject_id);
-    const classIds = uniqueNumbers(subjectAssignments.map((a) => a.class_id));
+    const classIds = [...new Set(subjectAssignments.map((a) => a.class_id))];
     
     if (classIds.length === 0) return res.ok({ exams: [] }, 'No assigned exams.');
 
@@ -1467,6 +1467,7 @@ exports.marksExams = async (req, res, next) => {
         ex.start_date, 
         ex.end_date, 
         ex.status, 
+        ex.publish_controls,
         c.name AS class_name,
         es.subject_id,
         es.review_status AS entry_status,
@@ -1478,7 +1479,7 @@ exports.marksExams = async (req, res, next) => {
       JOIN subjects s ON s.id = es.subject_id
       WHERE ex.session_id = :sessionId
         AND ex.class_id IN (:classIds)
-        AND ex.status != 'draft'
+        AND (ex.status != 'draft' OR ex.publish_controls->>'results_published' = 'true')
       ORDER BY ex.start_date DESC, ex.id DESC;
     `, { replacements: { sessionId: session?.id || 0, classIds } });
 
@@ -2621,6 +2622,7 @@ exports.examTimetable = async (req, res, next) => {
        AND ta.is_active = true
       WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
         AND ex.status IN ('published', 'upcoming', 'ongoing', 'completed')
+        AND COALESCE((ex.publish_controls->>'results_published')::boolean, false) = false
         AND (
           es.invigilator_teacher_id = :teacherId 
           OR ta.id IS NOT NULL

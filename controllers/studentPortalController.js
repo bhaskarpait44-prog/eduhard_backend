@@ -998,8 +998,7 @@ exports.results = async (req, res, next) => {
         ex.status,
         ex.publish_controls,
         CASE
-          WHEN ex.status IN ('published', 'completed')
-               AND COALESCE((ex.publish_controls->>'results_published')::boolean, false) = true
+          WHEN COALESCE((ex.publish_controls->>'results_published')::boolean, false) = true
                AND EXISTS (
                  SELECT 1 FROM exam_results er
                  WHERE er.exam_id = ex.id AND er.enrollment_id = :enrollmentId
@@ -1072,7 +1071,7 @@ exports.resultByExam = async (req, res, next) => {
       return res.fail('You are not allowed to access this exam.', [], 403);
     }
 
-    if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
+    if (!exam.publish_controls?.results_published) {
       return res.fail('Result not yet released or access denied.', [], 403);
     }
 
@@ -1219,7 +1218,7 @@ exports.reportCard = async (req, res, next) => {
       return res.fail('You are not allowed to access this exam.', [], 403);
     }
 
-    if (!['published', 'completed'].includes(exam.status) || !exam.publish_controls?.results_published) {
+    if (!exam.publish_controls?.results_published) {
       return res.fail('Result not yet released or access denied.', [], 403);
     }
 
@@ -1664,6 +1663,7 @@ exports.timetableExamSchedule = async (req, res, next) => {
       WHERE ex.session_id = :sessionId
         AND ex.class_id = :classId
         AND ex.status IN ('published', 'upcoming', 'ongoing', 'completed')
+        AND COALESCE((ex.publish_controls->>'results_published')::boolean, false) = false
       ORDER BY ex.start_date ASC, es.exam_date ASC, es.start_time ASC;
     `, {
       replacements: {

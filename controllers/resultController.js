@@ -258,10 +258,8 @@ exports.getResults = async (req, res, next) => {
 
     // 3. Fee Check & Access Check (Withholding logic)
     const pendingBalance = await getPendingBalance(enrollment_id);
-    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
-    const isWithheld = isUserRestricted
-      ? (!finalResult || !finalResult.release_result)
-      : (pendingBalance > 0 && !finalResult?.release_result);
+    const isUserRestricted = ['student', 'parent'].includes(req.user.role);
+    const isWithheld = isUserRestricted && (!finalResult || !finalResult.release_result || pendingBalance > 0);
 
     res.ok({
       subject_results: isWithheld ? [] : subjectResults,
@@ -401,7 +399,7 @@ exports.getReportCardData = async (req, res, next) => {
       finalResultData = finalResult;
     }
 
-    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
+    const isUserRestricted = ['student', 'parent'].includes(req.user.role);
     if (isUserRestricted && !finalResultData.release_result) {
       return res.fail('Result not yet released or access denied.', [], 403);
     }
@@ -473,15 +471,16 @@ exports.getReportCard = async (req, res, next) => {
       return res.fail('Result not yet calculated for this student or access denied.', [], 400);
     }
 
-    const isUserRestricted = ['student', 'parent', 'teacher'].includes(req.user.role);
-    if (isUserRestricted && !finalResult.release_result) {
-      return res.fail('Result not yet released or access denied.', [], 403);
-    }
-
-    // 0a. Fee Check
-    const pendingBalance = await getPendingBalance(enrollment_id);
-    if (pendingBalance > 0 && !finalResult.release_result) {
-      return res.fail(`Result withheld due to pending fees of ${pendingBalance.toFixed(2)}. Please clear dues to download report card.`, [], 403);
+    const isUserRestricted = ['student', 'parent'].includes(req.user.role);
+    if (isUserRestricted) {
+      if (!finalResult.release_result) {
+        return res.fail('Result not yet released or access denied.', [], 403);
+      }
+      // Fee Check for restricted users only
+      const pendingBalance = await getPendingBalance(enrollment_id);
+      if (pendingBalance > 0) {
+        return res.fail(`Result withheld due to pending fees of ${pendingBalance.toFixed(2)}. Please clear dues to download report card.`, [], 403);
+      }
     }
 
     // 1. Fetch Enrollment, Student, School, Session
