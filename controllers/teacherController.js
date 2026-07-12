@@ -2549,6 +2549,380 @@ exports.timetable = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+exports.timetablePdf = async (req, res, next) => {
+  try {
+    const { session } = await getTeacherContext(req);
+    const teacherId = req.user.id;
+    const sessionId = session?.id || 0;
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        ts.id,
+        ts.day_of_week,
+        ts.period_number,
+        ts.start_time,
+        ts.end_time,
+        ts.room_number,
+        c.name AS class_name,
+        sec.name AS section_name,
+        sub.name AS subject_name,
+        sub.code AS subject_code
+      FROM timetable_slots ts
+      JOIN classes c ON c.id = ts.class_id
+      JOIN sections sec ON sec.id = ts.section_id
+      JOIN subjects sub ON sub.id = ts.subject_id
+      JOIN teacher_assignments ta
+        ON ta.session_id = ts.session_id
+       AND ta.class_id = ts.class_id
+       AND ta.section_id = ts.section_id
+       AND ta.teacher_id = ts.teacher_id
+       AND ta.subject_id = ts.subject_id
+       AND ta.is_active = true
+      WHERE ts.teacher_id = :teacherId
+        AND ts.session_id = :sessionId
+        AND ts.is_active = true
+      ORDER BY ts.day_of_week, ts.period_number;
+    `, { replacements: { teacherId, sessionId } });
+
+    const [[teacher]] = await sequelize.query(
+      `SELECT first_name, last_name, email, department, designation, employee_id FROM teachers WHERE id = :id LIMIT 1;`,
+      { replacements: { id: teacherId } }
+    );
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId: req.user.school_id } }
+    );
+
+    const teacherName = teacher ? `${teacher.first_name} ${teacher.last_name || ''}`.trim() : 'Teacher';
+    const filename = `${teacherName.replace(/[^a-z0-9-_]+/gi, '-')}-timetable.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({
+      size: 'A4',
+      layout: 'landscape',
+      margins: { top: 40, left: 40, right: 40, bottom: 40 },
+      bufferPages: true,
+    });
+
+    doc.pipe(res);
+
+    // 1. School Header
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(16)
+      .fillColor('#0f172a')
+      .text(school?.name || 'GREENWOOD ACADEMY', 40, 40);
+
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#64748b')
+      .text('WEEKLY TEACHING SCHEDULE', 40, 58);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(12)
+      .fillColor('#2563eb')
+      .text(`SESSION: ${session?.name || '2026-2027'}`, 40, 40, { align: 'right', width: 762 });
+
+    // Header divider line
+    doc
+      .moveTo(40, 75)
+      .lineTo(802, 75)
+      .lineWidth(1.5)
+      .strokeColor('#cbd5e1')
+      .stroke();
+
+    // 2. Teacher Metadata Section
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Teacher:', 40, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacherName, 90, 85);
+
+    if (teacher?.employee_id) {
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .fillColor('#1e293b')
+        .text('ID:', 40, 100);
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor('#334155')
+        .text(teacher.employee_id, 90, 100);
+    }
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Department:', 300, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.department || '--', 370, 85);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Designation:', 300, 100);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.designation || '--', 370, 100);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Email:', 550, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.email || '--', 595, 85);
+
+    // Meta divider line
+    doc
+      .moveTo(40, 115)
+      .lineTo(802, 115)
+      .lineWidth(1)
+      .strokeColor('#e2e8f0')
+      .stroke();
+
+    // 3. Draw Grid
+    const days = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+    const dayLabels = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+    const colX = [
+      40,  // Period/Time
+      125, // Monday
+      237, // Tuesday
+      349, // Wednesday
+      461, // Thursday
+      573, // Friday
+      685  // Saturday
+    ];
+    const colWidths = [
+      85,  // Period
+      112, // Mon
+      112, // Tue
+      112, // Wed
+      112, // Thu
+      112, // Fri
+      112  // Sat
+    ];
+
+    const periods = [...new Set(rows.map((slot) => slot.period_number))].sort((a, b) => a - b);
+
+    if (periods.length === 0) {
+      doc
+        .font('Helvetica-Oblique')
+        .fontSize(12)
+        .fillColor('#64748b')
+        .text('No classes or timetable slots scheduled for this session.', 40, 150, { align: 'center', width: 762 });
+    } else {
+      const startY = 125;
+      const headerHeight = 24;
+      const rowHeight = Math.max(65, Math.min(85, Math.floor(380 / periods.length)));
+
+      // Draw Grid Headers
+      doc
+        .rect(40, startY, 762, headerHeight)
+        .fill('#f1f5f9');
+
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(9)
+        .fillColor('#475569');
+
+      doc.text('Timeline', 40 + 8, startY + 7);
+
+      for (let i = 0; i < 6; i++) {
+        doc.text(dayLabels[i], colX[i + 1], startY + 7, { align: 'center', width: colWidths[i + 1] });
+      }
+
+      doc
+        .moveTo(40, startY + headerHeight)
+        .lineTo(802, startY + headerHeight)
+        .lineWidth(1)
+        .strokeColor('#cbd5e1')
+        .stroke();
+
+      const slotMap = new Map(rows.map((slot) => [`${slot.day_of_week}:${slot.period_number}`, slot]));
+
+      const formatTime12 = (value) => {
+        if (!value) return '--';
+        const [hourStr, minuteStr] = value.split(':');
+        const hour = parseInt(hourStr, 10);
+        const ampm = hour >= 12 ? 'PM' : 'AM';
+        const displayHour = hour % 12 || 12;
+        return `${displayHour}:${minuteStr} ${ampm}`;
+      };
+
+      const SUBJECT_COLORS_PDF = {
+        'Physics':           { accent: '#6366f1', bg: '#f0f2ff', text: '#312e81' },
+        'Chemistry':         { accent: '#10b981', bg: '#ecfdf5', text: '#064e3b' },
+        'Mathematics':       { accent: '#f59e0b', bg: '#fffbeb', text: '#78350f' },
+        'Math':              { accent: '#f59e0b', bg: '#fffbeb', text: '#78350f' },
+        'English':           { accent: '#3b82f6', bg: '#eff6ff', text: '#1e3a8a' },
+        'Biology':           { accent: '#ec4899', bg: '#fdf2f8', text: '#701a75' },
+        'History':           { accent: '#f97316', bg: '#fff7ed', text: '#7c2d12' },
+        'Geography':         { accent: '#84cc16', bg: '#f7fee7', text: '#365314' },
+        'Computer Sc':       { accent: '#a855f7', bg: '#faf5ff', text: '#581c87' },
+        'Computer':          { accent: '#a855f7', bg: '#faf5ff', text: '#581c87' },
+        'Hindi':             { accent: '#ef4444', bg: '#fef2f2', text: '#7f1d1d' },
+        'Assamese':          { accent: '#ef4444', bg: '#fef2f2', text: '#7f1d1d' },
+        'Economics':         { accent: '#06b6d4', bg: '#ecfeff', text: '#083344' },
+        'Political Sc':      { accent: '#d946ef', bg: '#fdf4ff', text: '#4a044e' },
+        'Physical Ed':       { accent: '#22c55e', bg: '#f0fdf4', text: '#14532d' },
+        'EVS':               { accent: '#84cc16', bg: '#f7fee7', text: '#365314' },
+        'Environmental Science': { accent: '#84cc16', bg: '#f7fee7', text: '#365314' },
+        'General Knowledge': { accent: '#ca8a04', bg: '#fefce8', text: '#713f12' },
+        'Sanskrit':          { accent: '#eab308', bg: '#fefce8', text: '#713f12' },
+        'English Oral':      { accent: '#ec4899', bg: '#fdf2f8', text: '#701a75' },
+        'English Writing':   { accent: '#d946ef', bg: '#fdf4ff', text: '#4a044e' },
+        'Rhymes':            { accent: '#06b6d4', bg: '#ecfeff', text: '#083344' },
+        'Drawing':           { accent: '#eab308', bg: '#fefce8', text: '#713f12' },
+      };
+      const FALLBACK_PDF = { accent: '#64748b', bg: '#f8fafc', text: '#334155' };
+
+      periods.forEach((period, pIndex) => {
+        const periodY = startY + headerHeight + pIndex * rowHeight;
+        const matchingSlot = rows.find((s) => s.period_number === period);
+
+        doc
+          .rect(40, periodY, colWidths[0], rowHeight)
+          .fill('#f8fafc');
+
+        doc
+          .moveTo(40, periodY + rowHeight)
+          .lineTo(802, periodY + rowHeight)
+          .lineWidth(0.5)
+          .strokeColor('#cbd5e1')
+          .stroke();
+
+        doc
+          .moveTo(125, periodY)
+          .lineTo(125, periodY + rowHeight)
+          .lineWidth(0.5)
+          .strokeColor('#cbd5e1')
+          .stroke();
+
+        doc
+          .font('Helvetica-Bold')
+          .fontSize(10)
+          .fillColor('#2563eb')
+          .text(`Period ${period}`, 40 + 8, periodY + 12);
+
+        if (matchingSlot) {
+          doc
+            .font('Helvetica')
+            .fontSize(7.5)
+            .fillColor('#64748b')
+            .text(`${formatTime12(matchingSlot.start_time)}`, 40 + 8, periodY + 28);
+          doc
+            .text(`to ${formatTime12(matchingSlot.end_time)}`, 40 + 8, periodY + 38);
+        }
+
+        days.forEach((day, dIndex) => {
+          const x = colX[dIndex + 1];
+          const slot = slotMap.get(`${day}:${period}`);
+          const cellWidth = colWidths[dIndex + 1];
+
+          if (slot) {
+            const c = SUBJECT_COLORS_PDF[slot.subject_name] || FALLBACK_PDF;
+            const pad = 4;
+            const cardX = x + pad;
+            const cardY = periodY + pad;
+            const cardW = cellWidth - pad * 2;
+            const cardH = rowHeight - pad * 2;
+
+            doc
+              .roundedRect(cardX, cardY, cardW, cardH, 6)
+              .fill(c.bg);
+
+            doc
+              .rect(cardX, cardY, 3, cardH)
+              .fill(c.accent);
+
+            doc
+              .font('Helvetica-Bold')
+              .fontSize(9)
+              .fillColor(c.text)
+              .text(slot.subject_name, cardX + 8, cardY + 8, { width: cardW - 12, height: 22, ellipsis: true });
+
+            doc
+              .font('Helvetica')
+              .fontSize(8)
+              .fillColor('#475569')
+              .text(`${slot.class_name}-${slot.section_name}`, cardX + 8, cardY + 30);
+
+            if (slot.room_number) {
+              doc
+                .font('Helvetica-Bold')
+                .fontSize(7)
+                .fillColor(c.accent)
+                .text(`Rm: ${slot.room_number}`, cardX + 8, cardY + 44);
+            }
+          } else {
+            const pad = 4;
+            const cardX = x + pad;
+            const cardY = periodY + pad;
+            const cardW = cellWidth - pad * 2;
+            const cardH = rowHeight - pad * 2;
+
+            doc
+              .roundedRect(cardX, cardY, cardW, cardH, 6)
+              .lineWidth(0.7)
+              .dash(3, { space: 3 })
+              .strokeColor('#e2e8f0')
+              .stroke();
+
+            doc.undash();
+
+            doc
+              .font('Helvetica')
+              .fontSize(7.5)
+              .fillColor('#cbd5e1')
+              .text('FREE', cardX, cardY + (cardH / 2) - 4, { align: 'center', width: cardW });
+          }
+        });
+      });
+    }
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i += 1) {
+      doc.switchToPage(i);
+      doc
+        .font('Helvetica')
+        .fontSize(7.5)
+        .fillColor('#94a3b8')
+        .text(
+          `Generated by EduCore • Page ${i - range.start + 1} of ${range.count}`,
+          40,
+          565,
+          { align: 'center', width: 762, lineBreak: false }
+        );
+    }
+
+    doc.end();
+  } catch (err) { next(err); }
+};
+
 exports.timetableToday = async (req, res, next) => {
   return exports.todaySchedule(req, res, next);
 };
@@ -2634,6 +3008,345 @@ exports.examTimetable = async (req, res, next) => {
     res.ok({ timetable: rows }, `${rows.length} exam duty/assignment(s) found.`);
   } catch (err) { next(err); }
 };
+
+exports.examTimetablePdf = async (req, res, next) => {
+  try {
+    const { session, scope } = await getTeacherContext(req);
+    const teacherId = req.user.id;
+    const sessionId = session?.id || 0;
+
+    const classTeacherPairs = [...scope.classTeacherSections];
+    const hasClassTeacherRole = classTeacherPairs.length > 0;
+
+    const tupleClause = hasClassTeacherRole
+      ? classTeacherPairs.map((_, index) => `(:classId${index}, :sectionId${index})`).join(', ')
+      : '(NULL, NULL)';
+
+    const replacements = {
+      sessionId,
+      teacherId,
+      ...Object.fromEntries(
+        classTeacherPairs.flatMap((key, index) => {
+          const [classId, sectionId] = key.split(':');
+          return [[`classId${index}`, Number(classId)], [`sectionId${index}`, Number(sectionId)]];
+        })
+      ),
+    };
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        ex.id AS exam_id,
+        ex.name AS exam_name,
+        ex.exam_type,
+        ex.start_date AS exam_start_date,
+        ex.end_date AS exam_end_date,
+        ex.status AS exam_status,
+        es.id AS exam_subject_id,
+        es.exam_date,
+        es.start_time,
+        es.end_time,
+        sub.name AS subject_name,
+        sub.code AS subject_code,
+        c.name AS class_name,
+        sec.name AS section_name,
+        CASE
+          WHEN es.invigilator_teacher_id = :teacherId THEN 'invigilator'
+          WHEN ta.id IS NOT NULL THEN 'subject_teacher'
+          WHEN (ex.class_id, sec.id) IN (${tupleClause}) THEN 'class_teacher'
+          ELSE 'none'
+        END AS duty_type
+      FROM exams ex
+      JOIN exam_subjects es ON es.exam_id = ex.id
+      JOIN subjects sub ON sub.id = es.subject_id
+      JOIN classes c ON c.id = ex.class_id
+      JOIN sections sec ON sec.class_id = ex.class_id
+      LEFT JOIN teacher_assignments ta
+        ON ta.session_id = ex.session_id
+       AND ta.class_id = ex.class_id
+       AND ta.section_id = sec.id
+       AND ta.subject_id = es.subject_id
+       AND ta.teacher_id = :teacherId
+       AND ta.is_active = true
+      WHERE (:sessionId::int IS NULL OR ex.session_id = :sessionId)
+        AND ex.status IN ('published', 'upcoming', 'ongoing', 'completed')
+        AND COALESCE((ex.publish_controls->>'results_published')::boolean, false) = false
+        AND (
+          es.invigilator_teacher_id = :teacherId 
+          OR ta.id IS NOT NULL
+          OR (ex.class_id, sec.id) IN (${tupleClause})
+        )
+      ORDER BY es.exam_date ASC, es.start_time ASC;
+    `, { replacements });
+
+    const [[teacher]] = await sequelize.query(
+      `SELECT first_name, last_name, email, department, designation, employee_id FROM teachers WHERE id = :id LIMIT 1;`,
+      { replacements: { id: teacherId } }
+    );
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId: req.user.school_id } }
+    );
+
+    const teacherName = teacher ? `${teacher.first_name} ${teacher.last_name || ''}`.trim() : 'Teacher';
+    const filename = `${teacherName.replace(/[^a-z0-9-_]+/gi, '-')}-exam-duties.pdf`;
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({
+      size: 'A4',
+      layout: 'landscape',
+      margins: { top: 40, left: 40, right: 40, bottom: 40 },
+      bufferPages: true,
+    });
+
+    doc.pipe(res);
+
+    // 1. School Header
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(16)
+      .fillColor('#0f172a')
+      .text(school?.name || 'GREENWOOD ACADEMY', 40, 40);
+
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#64748b')
+      .text('EXAM INVIGILATION & DUTIES SCHEDULE', 40, 58);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(12)
+      .fillColor('#2563eb')
+      .text(`SESSION: ${session?.name || '2026-2027'}`, 40, 40, { align: 'right', width: 762 });
+
+    // Header divider line
+    doc
+      .moveTo(40, 75)
+      .lineTo(802, 75)
+      .lineWidth(1.5)
+      .strokeColor('#cbd5e1')
+      .stroke();
+
+    // 2. Teacher Metadata Section
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Teacher:', 40, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacherName, 90, 85);
+
+    if (teacher?.employee_id) {
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(10)
+        .fillColor('#1e293b')
+        .text('ID:', 40, 100);
+      doc
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor('#334155')
+        .text(teacher.employee_id, 90, 100);
+    }
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Department:', 300, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.department || '--', 370, 85);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Designation:', 300, 100);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.designation || '--', 370, 100);
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(10)
+      .fillColor('#1e293b')
+      .text('Email:', 550, 85);
+    doc
+      .font('Helvetica')
+      .fontSize(10)
+      .fillColor('#334155')
+      .text(teacher?.email || '--', 595, 85);
+
+    // Meta divider line
+    doc
+      .moveTo(40, 115)
+      .lineTo(802, 115)
+      .lineWidth(1)
+      .strokeColor('#e2e8f0')
+      .stroke();
+
+    // 3. Draw Table Grid
+    const colX = [40, 200, 300, 420, 570, 690];
+    const colWidths = [160, 100, 120, 150, 120, 112];
+
+    const startY = 125;
+    const headerHeight = 24;
+    const rowHeight = 35;
+
+    // Draw Grid Headers
+    doc
+      .rect(40, startY, 762, headerHeight)
+      .fill('#f1f5f9');
+
+    doc
+      .font('Helvetica-Bold')
+      .fontSize(9)
+      .fillColor('#475569');
+
+    doc.text('Exam Name', colX[0] + 8, startY + 7);
+    doc.text('Date', colX[1] + 8, startY + 7);
+    doc.text('Time', colX[2] + 8, startY + 7);
+    doc.text('Subject', colX[3] + 8, startY + 7);
+    doc.text('Class & Section', colX[4] + 8, startY + 7);
+    doc.text('Duty Type', colX[5] + 8, startY + 7);
+
+    doc
+      .moveTo(40, startY + headerHeight)
+      .lineTo(802, startY + headerHeight)
+      .lineWidth(1)
+      .strokeColor('#cbd5e1')
+      .stroke();
+
+    if (rows.length === 0) {
+      doc
+        .font('Helvetica-Oblique')
+        .fontSize(12)
+        .fillColor('#64748b')
+        .text('No invigilation or exam duties assigned.', 40, startY + 50, { align: 'center', width: 762 });
+    } else {
+      let currentY = startY + headerHeight;
+
+      const formatTime12 = (value) => {
+        if (!value) return '--';
+        const [hourStr, minuteStr] = value.split(':');
+        const hour = parseInt(hourStr, 10);
+        const ampm = hour >= 12 ? 'PM' : 'AM';
+        const displayHour = hour % 12 || 12;
+        return `${displayHour}:${minuteStr} ${ampm}`;
+      };
+
+      const DUTY_STYLES = {
+        'invigilator':     { fill: '#ecfdf5', text: '#064e3b', label: 'Invigilator' },
+        'subject_teacher': { fill: '#eff6ff', text: '#1e3a8a', label: 'Subject Teacher' },
+        'class_teacher':   { fill: '#fdf4ff', text: '#4a044e', label: 'Class Teacher' },
+        'none':            { fill: '#f8fafc', text: '#334155', label: 'Assigned' }
+      };
+
+      rows.forEach((row) => {
+        if (currentY > 500) {
+          doc.addPage();
+          currentY = 40;
+
+          // Redraw header
+          doc
+            .rect(40, currentY, 762, headerHeight)
+            .fill('#f1f5f9');
+
+          doc
+            .font('Helvetica-Bold')
+            .fontSize(9)
+            .fillColor('#475569');
+
+          doc.text('Exam Name', colX[0] + 8, currentY + 7);
+          doc.text('Date', colX[1] + 8, currentY + 7);
+          doc.text('Time', colX[2] + 8, currentY + 7);
+          doc.text('Subject', colX[3] + 8, currentY + 7);
+          doc.text('Class & Section', colX[4] + 8, currentY + 7);
+          doc.text('Duty Type', colX[5] + 8, currentY + 7);
+
+          doc
+            .moveTo(40, currentY + headerHeight)
+            .lineTo(802, currentY + headerHeight)
+            .lineWidth(1)
+            .strokeColor('#cbd5e1')
+            .stroke();
+
+          currentY += headerHeight;
+        }
+
+        doc
+          .font('Helvetica')
+          .fontSize(9)
+          .fillColor('#334155');
+
+        doc.font('Helvetica-Bold').fillColor('#0f172a').text(row.exam_name || '--', colX[0] + 8, currentY + 12, { width: colWidths[0] - 16, height: rowHeight - 12, ellipsis: true });
+        
+        const dateStr = row.exam_date ? new Date(row.exam_date).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : 'TBA';
+        doc.font('Helvetica').fillColor('#334155').text(dateStr, colX[1] + 8, currentY + 12);
+
+        const timeStr = row.start_time && row.end_time ? `${formatTime12(row.start_time)} - ${formatTime12(row.end_time)}` : 'TBA';
+        doc.text(timeStr, colX[2] + 8, currentY + 12);
+
+        doc.text(row.subject_name || '--', colX[3] + 8, currentY + 12, { width: colWidths[3] - 16, height: rowHeight - 12, ellipsis: true });
+        doc.text(`${row.class_name}-${row.section_name}`, colX[4] + 8, currentY + 12);
+
+        const style = DUTY_STYLES[row.duty_type] || DUTY_STYLES.none;
+        const badgeW = 90;
+        const badgeH = 16;
+        const badgeX = colX[5] + (colWidths[5] - badgeW) / 2;
+        const badgeY = currentY + 9;
+
+        doc
+          .roundedRect(badgeX, badgeY, badgeW, badgeH, 4)
+          .fill(style.fill);
+
+        doc
+          .font('Helvetica-Bold')
+          .fontSize(7.5)
+          .fillColor(style.text)
+          .text(style.label.toUpperCase(), badgeX, badgeY + 4, { align: 'center', width: badgeW });
+
+        currentY += rowHeight;
+        doc
+          .moveTo(40, currentY)
+          .lineTo(802, currentY)
+          .lineWidth(0.5)
+          .strokeColor('#e2e8f0')
+          .stroke();
+      });
+    }
+
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i += 1) {
+      doc.switchToPage(i);
+      doc
+        .font('Helvetica')
+        .fontSize(7.5)
+        .fillColor('#94a3b8')
+        .text(
+          `Generated by EduCore • Page ${i - range.start + 1} of ${range.count}`,
+          40,
+          565,
+          { align: 'center', width: 762, lineBreak: false }
+        );
+    }
+
+    doc.end();
+  } catch (err) { next(err); }
+};
+
 exports.homeworkList = async (req, res, next) => {
   try {
     const { scope } = await getTeacherContext(req);

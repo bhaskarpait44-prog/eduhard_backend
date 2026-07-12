@@ -870,7 +870,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
       const gradingScale = await examEngine.getActiveGradingScale(schoolId);
 
       const [subjectRows] = await sequelize.query(`
-        SELECT DISTINCT sub.id, sub.name, sub.code
+        SELECT sub.id, sub.name, sub.code, es.combined_total_marks, es.combined_passing_marks
         FROM subjects sub
         JOIN exam_subjects es ON es.subject_id = sub.id
         WHERE es.exam_id = :exam_id
@@ -987,10 +987,11 @@ exports.downloadClassResultSheet = async (req, res, next) => {
         SELECT er.enrollment_id, er.subject_id, er.marks_obtained, er.is_absent, e.weightage
         FROM exam_results er
         JOIN exams e ON e.id = er.exam_id
+        JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
         WHERE e.session_id = :session_id 
           AND e.class_id = :class_id
           AND e.exam_type != 'compartment'
-          AND e.status = 'completed';
+          AND es.review_status = 'approved';
       `, { replacements: { session_id, class_id } });
       marks = markRows;
     }
@@ -1021,7 +1022,7 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     });
 
     const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape' });
+    const doc = new PDFDocument({ margin: 30, size: 'A4', layout: 'landscape', bufferPages: true });
 
     res.setHeader('Content-Type', 'application/pdf');
     const pdfFileName = (exam_id && exam)
@@ -1030,102 +1031,281 @@ exports.downloadClassResultSheet = async (req, res, next) => {
     res.setHeader('Content-Disposition', `attachment; filename="${pdfFileName}"`);
     doc.pipe(res);
 
+    const startX = 30;
+    const printableWidth = doc.page.width - 60; // 841.89 - 60 = 781.89
+    const rollWidth = 35;
+    const nameWidth = 140;
+    const staticColsWidth = 160; // Total (45), % (35), Grade (30), Result (50)
+    const availWidth = printableWidth - rollWidth - nameWidth - staticColsWidth;
+    const subWidth = availWidth / Math.max(subjects.length, 1);
+    
+    const headerHeight = 24;
+    const rowHeight = 24;
+
     const drawHeader = () => {
-      doc.fillColor('#0f766e').fontSize(16).font('Helvetica-Bold').text(school.name.toUpperCase(), { align: 'center' });
-      doc.fillColor('#64748b').fontSize(8).font('Helvetica').text(school.address, { align: 'center' });
-      doc.moveDown(0.5);
-      
-      if (exam_id && exam) {
-        doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text(`CLASS RESULT SHEET - ${exam.name.toUpperCase()}`, { align: 'center' });
-        doc.fontSize(10).text(`Class: ${meta.class_name} | Session: ${meta.session_name} | Status: ${exam.status.toUpperCase()}`, { align: 'center' });
-      } else {
-        doc.fillColor('#1e293b').fontSize(12).font('Helvetica-Bold').text('CONSOLIDATED CLASS RESULT SHEET', { align: 'center' });
-        doc.fontSize(10).text(`Class: ${meta.class_name} | Session: ${meta.session_name}`, { align: 'center' });
-      }
-      doc.moveDown(1);
+      // Draw top header colored band
+      doc
+        .rect(30, 30, printableWidth, 45)
+        .fill('#0f766e');
+
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(12)
+        .fillColor('#ffffff')
+        .text(school.name.toUpperCase(), 45, 42);
+
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor('#ccfbf1')
+        .text(school.address || '', 45, 58);
+
+      const titleText = (exam_id && exam)
+        ? `CLASS RESULT SHEET - ${exam.name.toUpperCase()}`
+        : 'CONSOLIDATED CLASS RESULT SHEET';
+
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(9.5)
+        .fillColor('#ffffff')
+        .text(titleText, 45, 42, { align: 'right', width: printableWidth - 30 });
+
+      const subTitleText = (exam_id && exam)
+        ? `Class: ${meta.class_name}  |  Session: ${meta.session_name}  |  Status: ${exam.status.toUpperCase()}`
+        : `Class: ${meta.class_name}  |  Session: ${meta.session_name}`;
+
+      doc
+        .font('Helvetica')
+        .fontSize(8)
+        .fillColor('#ccfbf1')
+        .text(subTitleText, 45, 58, { align: 'right', width: printableWidth - 30 });
+
+      // Move cursor below header
+      doc.y = 90;
     };
 
-    drawHeader();
-
-    const startX = 30;
-    const rollWidth = 35;
-    const nameWidth = 120;
-    const staticColsWidth = 140; // Total, %, Grade, Result
-    const availWidth = doc.page.width - 60 - rollWidth - nameWidth - staticColsWidth;
-    const subWidth = availWidth / Math.max(subjects.length, 1);
-    const rowHeight = 20;
-
     const drawGridHeader = (y) => {
-      doc.fillColor('#f8fafc').rect(startX, y, doc.page.width - 60, rowHeight).fill();
-      doc.fillColor('#475569').fontSize(7).font('Helvetica-Bold');
-      doc.text('ROLL', startX + 2, y + 6, { width: rollWidth });
-      doc.text('STUDENT NAME', startX + rollWidth + 5, y + 6, { width: nameWidth });
-      
+      // Draw table header background
+      doc
+        .rect(startX, y, printableWidth, headerHeight)
+        .fill('#1e293b');
+
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(7.5)
+        .fillColor('#ffffff');
+
+      doc.text('ROLL', startX + 5, y + 8, { width: rollWidth - 5 });
+      doc.text('STUDENT NAME', startX + rollWidth + 5, y + 8, { width: nameWidth - 5 });
+
       subjects.forEach((sub, i) => {
         const x = startX + rollWidth + nameWidth + i * subWidth;
-        doc.text(sub.name.toUpperCase(), x, y + 6, { width: subWidth, align: 'center', lineBreak: false });
+        const marksInfo = sub.combined_total_marks ? `\n(${sub.combined_total_marks}/${sub.combined_passing_marks || '-'})` : '';
+        doc.text(
+          `${sub.code ? sub.code.toUpperCase() : sub.name.substring(0, 5).toUpperCase()}${marksInfo}`,
+          x,
+          y + 4,
+          { width: subWidth, align: 'center' }
+        );
       });
 
       const endX = startX + rollWidth + nameWidth + subjects.length * subWidth;
-      doc.text('TOTAL', endX + 5, y + 6, { width: 40, align: 'center' });
-      doc.text('%', endX + 45, y + 6, { width: 30, align: 'center' });
-      doc.text('GR', endX + 75, y + 6, { width: 25, align: 'center' });
-      doc.text('RESULT', endX + 100, y + 6, { width: 40, align: 'center' });
+      doc.text('TOTAL', endX + 5, y + 8, { width: 45, align: 'center' });
+      doc.text('%', endX + 50, y + 8, { width: 35, align: 'center' });
+      doc.text('GRADE', endX + 85, y + 8, { width: 30, align: 'center' });
+      doc.text('RESULT', endX + 115, y + 8, { width: 45, align: 'center' });
     };
 
-    drawGridHeader(doc.y);
-    doc.moveDown(0.1);
+    drawHeader();
+    let currentY = doc.y;
+    drawGridHeader(currentY);
+    currentY += headerHeight;
 
     students.forEach((student, index) => {
-      if (doc.y > 520) {
+      if (currentY > 420) {
         doc.addPage();
         drawHeader();
-        drawGridHeader(doc.y);
-        doc.moveDown(0.1);
+        currentY = doc.y;
+        drawGridHeader(currentY);
+        currentY += headerHeight;
       }
 
-      const y = doc.y;
-      doc.fillColor('#1e293b').fontSize(7).font('Helvetica');
-      
+      // Zebra striping
       if (index % 2 === 1) {
-        doc.fillColor('#f1f5f9').rect(startX, y, doc.page.width - 60, rowHeight).fill();
-        doc.fillColor('#1e293b');
+        doc
+          .rect(startX, currentY, printableWidth, rowHeight)
+          .fill('#f8fafc');
       }
 
-      doc.text(student.roll_number || '-', startX + 2, y + 6, { width: rollWidth });
-      doc.text(student.student_name, startX + rollWidth + 5, y + 6, { width: nameWidth, lineBreak: false });
+      // Draw bottom row divider line
+      doc
+        .moveTo(startX, currentY + rowHeight)
+        .lineTo(startX + printableWidth, currentY + rowHeight)
+        .lineWidth(0.5)
+        .strokeColor('#e2e8f0')
+        .stroke();
 
+      doc.fontSize(7.5).font('Helvetica');
+
+      // Roll Number
+      doc
+        .font('Helvetica-Bold')
+        .fillColor('#0f172a')
+        .text(student.roll_number || '-', startX + 5, currentY + 8, { width: rollWidth - 5 });
+
+      // Student Name
+      doc
+        .font('Helvetica-Bold')
+        .fillColor('#1e293b')
+        .text(student.student_name, startX + rollWidth + 5, currentY + 8, { width: nameWidth - 5, lineBreak: false, ellipsis: true });
+
+      // Subjects Marks
+      doc.font('Helvetica').fillColor('#334155');
       subjects.forEach((sub, i) => {
         const x = startX + rollWidth + nameWidth + i * subWidth;
         const eid = student.enrollment_id;
         const sid = sub.id;
-        
-        const rawMark = markMap[eid]?.[sid];
-        const mark = rawMark === undefined ? '-' 
-                   : (rawMark === 0 && isAbsentMap[eid]?.[sid]) ? 'ABS'
-                   : parseFloat(rawMark).toFixed(1);
+        const passingMark = sub.combined_passing_marks;
 
-        doc.text(mark, x, y + 6, { width: subWidth, align: 'center' });
+        const rawMark = markMap[eid]?.[sid];
+        let mark = '-';
+        let isFailed = false;
+
+        if (rawMark !== undefined) {
+          if (rawMark === 0 && isAbsentMap[eid]?.[sid]) {
+            mark = 'ABS';
+            isFailed = true;
+          } else {
+            mark = parseFloat(rawMark).toFixed(1);
+            if (passingMark && parseFloat(rawMark) < parseFloat(passingMark)) {
+              isFailed = true;
+            }
+          }
+        }
+
+        if (isFailed) {
+          doc.fillColor('#ef4444').font('Helvetica-Bold');
+        } else {
+          doc.fillColor('#334155').font('Helvetica');
+        }
+
+        doc.text(mark, x, currentY + 8, { width: subWidth, align: 'center' });
       });
 
+      // Total obtained
       const endX = startX + rollWidth + nameWidth + subjects.length * subWidth;
-      doc.text(`${parseFloat(student.total_obtained).toFixed(0)}/${parseFloat(student.total_max).toFixed(0)}`, endX + 5, y + 6, { width: 40, align: 'center' });
-      doc.text(`${student.percentage}%`, endX + 45, y + 6, { width: 30, align: 'center' });
-      doc.text(student.grade || '-', endX + 75, y + 6, { width: 25, align: 'center' });
-      
-      const resColor = student.result === 'pass' ? '#15803d' : student.result === 'fail' ? '#b91c1c' : '#1e293b';
-      doc.fillColor(resColor).font('Helvetica-Bold').text((student.result || '-').toUpperCase(), endX + 100, y + 6, { width: 40, align: 'center' });
-      doc.fillColor('#1e293b').font('Helvetica');
+      const totalObtStr = `${parseFloat(student.total_obtained).toFixed(0)}/${parseFloat(student.total_max).toFixed(0)}`;
+      doc
+        .font('Helvetica-Bold')
+        .fillColor('#0f172a')
+        .text(totalObtStr, endX + 5, currentY + 8, { width: 45, align: 'center' });
 
-      doc.moveDown(1);
-      doc.strokeColor('#e2e8f0').lineWidth(0.2).moveTo(startX, doc.y).lineTo(doc.page.width - 30, doc.y).stroke();
+      // Percentage
+      doc
+        .font('Helvetica')
+        .fillColor('#334155')
+        .text(`${student.percentage}%`, endX + 50, currentY + 8, { width: 35, align: 'center' });
+
+      // Grade
+      doc
+        .font('Helvetica-Bold')
+        .fillColor('#0f172a')
+        .text(student.grade || '-', endX + 85, currentY + 8, { width: 30, align: 'center' });
+
+      // Result Badge
+      const isPass = student.result === 'pass';
+      const isCompartment = student.result === 'compartment';
+      const badgeColor = isPass ? '#dcfce7' : isCompartment ? '#fef3c7' : '#fee2e2';
+      const textColor = isPass ? '#14532d' : isCompartment ? '#78350f' : '#7f1d1d';
+      const label = (student.result || '-').toUpperCase();
+
+      const badgeX = endX + 115 + (45 - 40) / 2;
+      const badgeY = currentY + 5;
+      
+      doc
+        .roundedRect(badgeX, badgeY, 40, 14, 3)
+        .fill(badgeColor);
+
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(6.5)
+        .fillColor(textColor)
+        .text(label, badgeX, badgeY + 4, { align: 'center', width: 40 });
+
+      currentY += rowHeight;
     });
+
+    // Draw Signatures & Legend Footer
+    const drawSignaturesAndLegend = (y) => {
+      let legendY = y + 15;
+      doc
+        .moveTo(startX, legendY)
+        .lineTo(startX + printableWidth, legendY)
+        .lineWidth(0.5)
+        .strokeColor('#cbd5e1')
+        .stroke();
+
+      legendY += 8;
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(7)
+        .fillColor('#475569')
+        .text('SUBJECT CODES: ', startX, legendY);
+
+      let legendParts = [];
+      subjects.forEach(s => {
+        legendParts.push(`${s.code || s.name.substring(0, 3).toUpperCase()}: ${s.name}`);
+      });
+
+      doc
+        .font('Helvetica')
+        .fontSize(7)
+        .fillColor('#64748b')
+        .text(legendParts.join('   |   '), startX + 85, legendY, { width: printableWidth - 85 });
+
+      const sigY = legendY + 35;
+      doc
+        .moveTo(startX + 80, sigY)
+        .lineTo(startX + 220, sigY)
+        .moveTo(startX + printableWidth - 220, sigY)
+        .lineTo(startX + printableWidth - 80, sigY)
+        .lineWidth(0.5)
+        .strokeColor('#94a3b8')
+        .stroke();
+
+      doc
+        .font('Helvetica')
+        .fontSize(7.5)
+        .fillColor('#475569')
+        .text('Class Teacher Signature', startX + 80, sigY + 5, { align: 'center', width: 140 })
+        .text('Principal Signature', startX + printableWidth - 220, sigY + 5, { align: 'center', width: 140 });
+    };
+
+    if (currentY > 400) {
+      doc.addPage();
+      drawHeader();
+      currentY = doc.y;
+    }
+    drawSignaturesAndLegend(currentY);
 
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
-      doc.fillColor('#94a3b8').fontSize(8);
-      doc.text(`Page ${i + 1} of ${range.count} | Generated on ${new Date().toLocaleString()}`, 30, 550, { align: 'center', width: doc.page.width - 60, lineBreak: false });
+      const oldBottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
+
+      doc
+        .font('Helvetica')
+        .fontSize(7.5)
+        .fillColor('#94a3b8')
+        .text(
+          `Page ${i - range.start + 1} of ${range.count}  •  Generated on ${new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
+          startX,
+          565,
+          { align: 'center', width: printableWidth, lineBreak: false }
+        );
+
+      doc.page.margins.bottom = oldBottomMargin;
     }
 
     doc.flushPages();

@@ -115,9 +115,11 @@ router.patch('/remarks/:id', requirePermission('classes.view'), ctrl.updateRemar
 router.get('/remarks/student/:id', requirePermission('classes.view'), ctrl.studentRemarkTimeline);
 
 router.get('/timetable', requirePermission('classes.view'), ctrl.timetable);
+router.get('/timetable/pdf', requirePermission('classes.view'), ctrl.timetablePdf);
 router.get('/timetable/today', requirePermission('classes.view'), ctrl.timetableToday);
 router.get('/timetable/current-period', requirePermission('classes.view'), ctrl.currentPeriod);
 router.get('/exam-timetable', requirePermission('classes.view'), ctrl.examTimetable);
+router.get('/exam-timetable/pdf', requirePermission('classes.view'), ctrl.examTimetablePdf);
 
 router.get('/homework', requirePermission('classes.view'), ctrl.homeworkList);
 router.post('/homework', requirePermission('classes.view'), upload.single('attachment'), ctrl.createHomework);
