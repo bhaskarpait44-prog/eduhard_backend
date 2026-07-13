@@ -56,6 +56,14 @@ exports.updateHealthProfile = async (req, res, next) => {
   try {
     const { student_id } = req.params;
     const { blood_group, height_cm, weight_kg, allergies, medical_conditions } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :student_id AND school_id = :schoolId AND is_deleted = false;
+    `, { replacements: { student_id, schoolId } });
+
+    if (!student) return res.fail('Student not found or access denied.', [], 404);
     
     const [[existing]] = await sequelize.query(`
       SELECT id FROM student_health_profiles WHERE student_id = :student_id
@@ -102,6 +110,14 @@ exports.addVaccination = async (req, res, next) => {
   try {
     const { student_id } = req.params;
     const { vaccine_name, date_administered, next_due_date, remarks } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :student_id AND school_id = :schoolId AND is_deleted = false;
+    `, { replacements: { student_id, schoolId } });
+
+    if (!student) return res.fail('Student not found or access denied.', [], 404);
 
     const [vaccination] = await sequelize.query(`
       INSERT INTO student_vaccinations (
@@ -123,9 +139,15 @@ exports.addVaccination = async (req, res, next) => {
 exports.deleteVaccination = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify and delete vaccination belonging to a student of this school
     const [result] = await sequelize.query(`
-      DELETE FROM student_vaccinations WHERE id = :id RETURNING id
-    `, { replacements: { id } });
+      DELETE FROM student_vaccinations 
+      WHERE id = :id 
+        AND student_id IN (SELECT id FROM students WHERE school_id = :schoolId AND is_deleted = false) 
+      RETURNING id
+    `, { replacements: { id, schoolId } });
 
     if (result.length === 0) return res.fail('Vaccination record not found.', [], 404);
 
@@ -137,6 +159,14 @@ exports.addIncident = async (req, res, next) => {
   try {
     const { student_id } = req.params;
     const { incident_date, incident_time, type, description, action_taken } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :student_id AND school_id = :schoolId AND is_deleted = false;
+    `, { replacements: { student_id, schoolId } });
+
+    if (!student) return res.fail('Student not found or access denied.', [], 404);
 
     const [incident] = await sequelize.query(`
       INSERT INTO student_health_incidents (
@@ -158,9 +188,15 @@ exports.addIncident = async (req, res, next) => {
 exports.deleteIncident = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify and delete incident belonging to a student of this school
     const [result] = await sequelize.query(`
-      DELETE FROM student_health_incidents WHERE id = :id RETURNING id
-    `, { replacements: { id } });
+      DELETE FROM student_health_incidents 
+      WHERE id = :id 
+        AND student_id IN (SELECT id FROM students WHERE school_id = :schoolId AND is_deleted = false) 
+      RETURNING id
+    `, { replacements: { id, schoolId } });
 
     if (result.length === 0) return res.fail('Incident record not found.', [], 404);
 

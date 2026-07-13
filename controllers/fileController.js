@@ -90,21 +90,6 @@ async function getFileMetadata(safeFilename) {
   return null;
 }
 
-function findFileRecursively(dir, filename) {
-  if (!fs.existsSync(dir)) return null;
-  const files = fs.readdirSync(dir);
-  for (const file of files) {
-    const fullPath = path.join(dir, file);
-    if (fs.statSync(fullPath).isDirectory()) {
-      const found = findFileRecursively(fullPath, filename);
-      if (found) return found;
-    } else if (file === filename) {
-      return fullPath;
-    }
-  }
-  return null;
-}
-
 /**
  * Controller for secure file serving
  */
@@ -113,31 +98,28 @@ exports.serveFile = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const reqPath = decodeURIComponent(req.path.replace(/^\//, ''));
     
-    let relativePath = reqPath;
     let safeFilename = path.basename(reqPath);
 
     const metadata = await getFileMetadata(safeFilename);
 
-    if (metadata) {
-      if (Number(metadata.schoolId) !== Number(schoolId)) {
-        return res.status(403).json({ success: false, message: 'Access denied.' });
-      }
-      relativePath = metadata.relativePath;
+    // Strict deny-by-default: metadata must resolve, and it must contain a valid relativePath
+    if (!metadata || !metadata.relativePath) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
     }
 
-    const filePath = path.resolve(__dirname, '..', relativePath);
+    if (Number(metadata.schoolId) !== Number(schoolId)) {
+      return res.status(403).json({ success: false, message: 'Access denied.' });
+    }
+
+    const filePath = path.resolve(__dirname, '..', metadata.relativePath);
     const UPLOADS_BASE = path.resolve(__dirname, '..', 'uploads');
 
+    // Prevent path traversal outside the uploads directory
     if (!filePath.startsWith(UPLOADS_BASE + path.sep) && filePath !== UPLOADS_BASE) {
       return res.status(403).json({ success: false, message: 'Access denied.' });
     }
 
     if (!fs.existsSync(filePath)) {
-      const recursivePath = findFileRecursively(UPLOADS_BASE, safeFilename);
-      if (recursivePath && fs.existsSync(recursivePath)) {
-        return res.sendFile(recursivePath);
-      }
-      
       return res.status(404).json({
         success: false,
         message: 'File not found'

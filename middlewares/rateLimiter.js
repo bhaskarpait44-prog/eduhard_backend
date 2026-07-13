@@ -1,6 +1,7 @@
 'use strict';
 
 const rateLimit = require('express-rate-limit');
+const { MemoryStore } = rateLimit;
 const { RedisStore } = require('rate-limit-redis');
 const redis = require('../config/redis');
 
@@ -52,18 +53,18 @@ class RobustRedisStore {
   constructor(options) {
     this.options = options;
     this.redisStore = REDIS_ENABLED ? new RedisStore(options) : null;
+    this.memoryStore = new MemoryStore();
     this.windowMs = options.windowMs || 60000;
   }
 
   async init(options) {
     this.windowMs = options.windowMs || this.windowMs;
+    this.memoryStore.init(options);
     if (this.redisStore && typeof this.redisStore.init === 'function') {
       try {
         await this.redisStore.init(options);
       } catch (err) {
         // Initialization might fail if Redis is not yet connected.
-        // We catch it here to allow the server to start; 
-        // increment() will handle the actual fallback behavior.
       }
     }
   }
@@ -71,29 +72,37 @@ class RobustRedisStore {
   async increment(key) {
     // If Redis is not ready, immediately use memory fallback
     if (!this.redisStore || redis.status !== 'ready') {
-      return { totalHits: 1, resetTime: new Date(Date.now() + this.windowMs) };
+      return await this.memoryStore.increment(key);
     }
     try {
       return await this.redisStore.increment(key);
     } catch (err) {
       // If a command fails (e.g. connection lost), log once and fallback
-      console.error('[RateLimit] Redis increment failed, falling back:', err.message);
-      return { totalHits: 1, resetTime: new Date(Date.now() + this.windowMs) };
+      console.error('[RateLimit] Redis increment failed, falling back to MemoryStore:', err.message);
+      return await this.memoryStore.increment(key);
     }
   }
 
   async decrement(key) {
-    if (!this.redisStore || redis.status !== 'ready') return;
+    if (!this.redisStore || redis.status !== 'ready') {
+      return await this.memoryStore.decrement(key);
+    }
     try {
       await this.redisStore.decrement(key);
-    } catch (err) {}
+    } catch (err) {
+      return await this.memoryStore.decrement(key);
+    }
   }
 
   async resetKey(key) {
-    if (!this.redisStore || redis.status !== 'ready') return;
+    if (!this.redisStore || redis.status !== 'ready') {
+      return await this.memoryStore.resetKey(key);
+    }
     try {
       await this.redisStore.resetKey(key);
-    } catch (err) {}
+    } catch (err) {
+      return await this.memoryStore.resetKey(key);
+    }
   }
 }
 

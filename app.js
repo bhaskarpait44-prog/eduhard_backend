@@ -25,7 +25,13 @@ const corsOrigins = (() => {
   const isDev = process.env.NODE_ENV === 'development';
   const raw = process.env.CORS_ORIGIN;
 
-  // If CORS_ORIGIN is not specified, or is set to wildcard '*', allow all origins
+  if (!isDev) {
+    if (!raw || raw.trim() === '' || raw.trim() === '*' || raw.trim() === 'all') {
+      throw new Error('FATAL: CORS_ORIGIN environment variable must be explicitly set to specific domain(s) in production. Wildcards are not allowed.');
+    }
+  }
+
+  // If CORS_ORIGIN is not specified, or is set to wildcard '*', allow all origins (only in development)
   if (!raw || raw.trim() === '*' || raw.trim() === 'all') return true;
   
   const allowed = raw.split(',').map((origin) => origin.trim()).filter(Boolean);
