@@ -3,6 +3,7 @@
 const sequelize = require('../config/database');
 const { invalidateCache } = require('../middlewares/cache');
 const { writeAuditLog } = require('../utils/writeAuditLog');
+const { acquireLockWithRetry, releaseLock } = require('../utils/lock');
 
 async function getSessionMeta(sessionId, schoolId) {
   const [[session]] = await sequelize.query(`
@@ -107,8 +108,18 @@ function normalizePromotionOutcome(result) {
 
 // ── POST /api/enrollments ─────────────────────────────────────────────────────
 exports.enroll = async (req, res, next) => {
+  const lockKey = `enrollment:section:${req.body.section_id}`;
+  let lockAcquired = false;
+
   try {
     const { student_id, session_id, class_id, section_id, stream, joining_type, joined_date, roll_number } = req.body;
+    
+    // Acquire section distributed lock to prevent race conditions on capacity check
+    lockAcquired = await acquireLockWithRetry(lockKey);
+    if (!lockAcquired) {
+      return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
+    }
+
     const normalizedStream = stream ? String(stream).trim().toLowerCase() : 'regular';
 
     // Verify session status
@@ -183,6 +194,10 @@ exports.enroll = async (req, res, next) => {
   } catch (err) {
     if (err.status) return res.fail(err.message, [], err.status);
     next(err);
+  } finally {
+    if (lockAcquired) {
+      await releaseLock(lockKey);
+    }
   }
 };
 
@@ -210,12 +225,21 @@ exports.getById = async (req, res, next) => {
 
 // ── POST /api/enrollments/promote ────────────────────────────────────────────
 exports.promote = async (req, res, next) => {
+  const lockKey = `enrollment:section:${req.body.new_section_id}`;
+  let lockAcquired = false;
+
   try {
     const { session_id, new_session_id, class_id, new_class_id, new_section_id } = req.body;
     const today = new Date().toISOString().split('T')[0];
 
     if (!session_id || !new_session_id || !class_id || !new_class_id || !new_section_id) {
       return res.fail('session_id, new_session_id, class_id, new_class_id and new_section_id are required.');
+    }
+
+    // Acquire section distributed lock to prevent race conditions on capacity check
+    lockAcquired = await acquireLockWithRetry(lockKey);
+    if (!lockAcquired) {
+      return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
     }
 
     const targetSession = await getSessionMeta(new_session_id, req.user.school_id);
@@ -342,7 +366,13 @@ exports.promote = async (req, res, next) => {
     invalidateCache(req.user.school_id, '/api/students*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok({ promoted_count: promoted.length, students: promoted }, `${promoted.length} student(s) promoted.`);
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  } finally {
+    if (lockAcquired) {
+      await releaseLock(lockKey);
+    }
+  }
 };
 
 exports.promotionCandidates = async (req, res, next) => {
@@ -672,9 +702,18 @@ exports.processPromotions = async (req, res, next) => {
 
 // ── POST /api/enrollments/transfer ───────────────────────────────────────────
 exports.transfer = async (req, res, next) => {
+  const lockKey = `enrollment:section:${req.body.new_section_id}`;
+  let lockAcquired = false;
+
   try {
     const { enrollment_id, new_section_id, reason } = req.body;
     const today = new Date().toISOString().split('T')[0];
+
+    // Acquire section distributed lock to prevent race conditions on capacity check
+    lockAcquired = await acquireLockWithRetry(lockKey);
+    if (!lockAcquired) {
+      return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
+    }
 
     // FIX #3: Added school_id guard via students JOIN to prevent IDOR (cross-school transfer)
     const [[current]] = await sequelize.query(`
@@ -728,7 +767,13 @@ exports.transfer = async (req, res, next) => {
     invalidateCache(req.user.school_id, '/api/students*');
     invalidateCache(req.user.school_id, '/api/dashboard*');
     res.ok({ enrollment_id, new_section_id }, 'Student transferred to new section.');
-  } catch (err) { next(err); }
+  } catch (err) {
+    next(err);
+  } finally {
+    if (lockAcquired) {
+      await releaseLock(lockKey);
+    }
+  }
 };
 
 exports.downloadPromotionSummary = async (req, res, next) => {

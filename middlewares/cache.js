@@ -82,7 +82,22 @@ const invalidateCache = async (schoolId, pattern = '*') => {
   }
 };
 
+/**
+ * Invalidate cache specifically for a class (clears list, query lists, and detail views of this class)
+ * @param {string|number} schoolId
+ * @param {string|number} classId
+ */
+const invalidateClassCache = async (schoolId, classId) => {
+  if (!schoolId || !classId) return;
+  
+  // Clear list and list with query variants, and specific class sub-paths
+  await invalidateCache(schoolId, '/api/classes');
+  await invalidateCache(schoolId, '/api/classes?*');
+  await invalidateCache(schoolId, `/api/classes/${classId}*`);
+};
+
 module.exports = {
   cache,
   invalidateCache,
+  invalidateClassCache,
 };

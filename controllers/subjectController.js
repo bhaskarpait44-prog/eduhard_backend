@@ -4,7 +4,7 @@ const { Op } = require('sequelize');
 const sequelize = require('../config/database');
 const { Class, Subject } = require('../models');
 const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
-const { invalidateCache } = require('../middlewares/cache');
+const { invalidateCache, invalidateClassCache } = require('../middlewares/cache');
 
 const auditCtx = (req) => ({
   schoolId: req.user?.school_id || null,
@@ -219,7 +219,7 @@ exports.create = async (req, res, next) => {
       ...auditCtx(req),
     });
 
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateClassCache(req.user.school_id, classId);
     return res.ok(subject, 'Subject created successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -283,7 +283,7 @@ exports.update = async (req, res, next) => {
       });
     }
 
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateClassCache(req.user.school_id, classId);
     return res.ok(subject, 'Subject updated successfully.');
   } catch (err) { next(err); }
 };
@@ -324,7 +324,7 @@ exports.remove = async (req, res, next) => {
       ...auditCtx(req),
     });
 
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateClassCache(req.user.school_id, classId);
     return res.ok({}, 'Subject deleted successfully.');
   } catch (err) { next(err); }
 };
@@ -366,7 +366,7 @@ exports.reorder = async (req, res, next) => {
       order: [['order_number', 'ASC'], ['id', 'ASC']],
     });
 
-    invalidateCache(req.user.school_id, '/api/classes*');
+    invalidateClassCache(req.user.school_id, classId);
     return res.ok(reordered, 'Subjects reordered successfully.');
   } catch (err) { next(err); }
 };
