@@ -1196,7 +1196,7 @@ exports.getById = async (req, res, next) => {
 
     if (!student) return res.fail('Student not found.', [], 404);
 
-    // Fetch siblings if family_id exists
+    // Fetch siblings if family_id exists (scoped to same school to prevent cross-tenant leak)
     let siblings = [];
     if (student.family_id) {
       [siblings] = await sequelize.query(`
@@ -1208,9 +1208,10 @@ exports.getById = async (req, res, next) => {
         LEFT JOIN sections sec ON sec.id = e.section_id
         WHERE s.family_id = :familyId 
           AND s.id <> :studentId
+          AND s.school_id = :schoolId
           AND s.is_deleted = false
         ORDER BY s.first_name ASC;
-      `, { replacements: { familyId: student.family_id, studentId: id } });
+      `, { replacements: { familyId: student.family_id, studentId: id, schoolId: req.user.school_id } });
     }
 
     // Fetch active library issues
@@ -1380,12 +1381,6 @@ exports.updateProfile = async (req, res, next) => {
       ...newData 
     } = req.body;
 
-    if (admission_no !== undefined) {
-      if (!admission_no?.trim()) return res.fail('Admission number is required.', [], 422);
-      if (!/^[a-zA-Z0-9\-_]+$/.test(admission_no.trim()))
-        return res.fail('Admission number contains invalid characters.', [], 422);
-    }
-
     if (!change_reason?.trim() || change_reason.trim().length < 5)
       return res.fail('A reason for the update is required (minimum 5 characters).', [], 422);
 
@@ -1417,9 +1412,12 @@ exports.updateProfile = async (req, res, next) => {
 
     // Relax father's phone validation during update profile.
     // First, fetch current profile to perform mutual validation on merged values
+    // NOTE: Join with students to enforce school_id isolation (pre-ownership-check safety)
     const [[currentProfile]] = await sequelize.query(`
-      SELECT * FROM student_profiles WHERE student_id = :id AND is_current = true LIMIT 1;
-    `, { replacements: { id } });
+      SELECT sp.* FROM student_profiles sp
+      JOIN students s ON s.id = sp.student_id
+      WHERE sp.student_id = :id AND sp.is_current = true AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { id, schoolId: req.user.school_id } });
 
     const mergedProfile = { ...currentProfile, ...newData };
 
@@ -1454,12 +1452,13 @@ exports.updateProfile = async (req, res, next) => {
       }
     }
 
-    // Get existing emails from current profile to verify update conflict
+    // Get existing emails from current profile to verify update conflict (school-scoped)
     const [[existingEmails]] = await sequelize.query(`
       SELECT sp.email, sp.parent_email 
-      FROM student_profiles sp 
-      WHERE sp.student_id = :id AND sp.is_current = true LIMIT 1;
-    `, { replacements: { id } });
+      FROM student_profiles sp
+      JOIN students s ON s.id = sp.student_id
+      WHERE sp.student_id = :id AND sp.is_current = true AND s.school_id = :schoolId LIMIT 1;
+    `, { replacements: { id, schoolId: req.user.school_id } });
 
     const finalStudentEmail = (newData.email !== undefined ? newData.email : (existingEmails?.email || ''))?.trim().toLowerCase();
     const finalParentEmail = (newData.parent_email !== undefined ? newData.parent_email : (existingEmails?.parent_email || ''))?.trim().toLowerCase();
@@ -1587,7 +1586,7 @@ exports.updateProfile = async (req, res, next) => {
         });
       }
 
-      // 3. Fetch full updated record (same logic as getById)
+      // 3. Fetch full updated record (school-scoped for defense-in-depth)
       const [[updated]] = await sequelize.query(`
         SELECT s.id, s.admission_no, s.first_name, s.last_name, s.date_of_birth, s.gender, s.aadhar_no,
                s.status, s.is_active, s.created_at, s.family_id, s.transport_stop_id,
@@ -1610,8 +1609,8 @@ exports.updateProfile = async (req, res, next) => {
                sp.blood_group, sp.medical_notes, sp.photo_path, sp.emergency_contact
         FROM students s
         LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
-        WHERE s.id = :id AND s.is_deleted = false;
-      `, { replacements: { id }, transaction: t });
+        WHERE s.id = :id AND s.school_id = :schoolId AND s.is_deleted = false;
+      `, { replacements: { id, schoolId: req.user.school_id }, transaction: t });
 
       return updated;
     });
@@ -1814,6 +1813,14 @@ exports.remove = async (req, res, next) => {
 exports.getHistory = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
 
     const [classColumns] = await sequelize.query(`
       SELECT column_name
@@ -1893,29 +1900,35 @@ exports.downloadAdmissionForm = async (req, res, next) => {
 
     if (!student) return res.fail('Student not found.', [], 404);
 
+    // All sub-queries below use the verified student id (school check above ensures ownership)
     const [[profile]] = await sequelize.query(`
-      SELECT * FROM student_profiles WHERE student_id = :id AND is_current = true;
-    `, { replacements: { id } });
+      SELECT sp.* FROM student_profiles sp
+      JOIN students s ON s.id = sp.student_id
+      WHERE sp.student_id = :id AND sp.is_current = true AND s.school_id = :schoolId;
+    `, { replacements: { id, schoolId } });
 
     // 2. Fetch School and Session info
     const [[school]] = await sequelize.query(`SELECT * FROM schools WHERE id = :schoolId;`, { replacements: { schoolId } });
     
-    // Get latest enrollment
+    // Get latest enrollment (school-scoped via students join)
     const [[enrollment]] = await sequelize.query(`
       SELECT e.*, c.name AS class_name, sec.name AS section_name, sess.name AS session_name
       FROM enrollments e
+      JOIN students s ON s.id = e.student_id
       JOIN classes c ON c.id = e.class_id
       LEFT JOIN sections sec ON sec.id = e.section_id
       JOIN sessions sess ON sess.id = e.session_id
-      WHERE e.student_id = :id
+      WHERE e.student_id = :id AND s.school_id = :schoolId
       ORDER BY e.joined_date DESC, e.id DESC
       LIMIT 1;
-    `, { replacements: { id } });
+    `, { replacements: { id, schoolId } });
 
-    // Fetch Academic Records
+    // Fetch Academic Records (school-scoped via students join)
     const [academicRecords] = await sequelize.query(`
-      SELECT * FROM student_previous_academic_records WHERE student_id = :id ORDER BY created_at ASC;
-    `, { replacements: { id } });
+      SELECT par.* FROM student_previous_academic_records par
+      JOIN students s ON s.id = par.student_id
+      WHERE par.student_id = :id AND s.school_id = :schoolId ORDER BY par.created_at ASC;
+    `, { replacements: { id, schoolId } });
 
     // Handle WebP conversion if needed
     let photoBuffer = null;
