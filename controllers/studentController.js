@@ -1946,6 +1946,15 @@ exports.downloadAdmissionForm = async (req, res, next) => {
 exports.getDocuments = async (req, res, next) => {
   try {
     const { id } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
+
     const [docs] = await sequelize.query(`
       SELECT d.*, u.name AS uploader_name
       FROM student_documents d
@@ -1961,6 +1970,20 @@ exports.uploadDocument = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, document_type } = req.body;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) {
+      if (req.file) {
+        const fs = require('fs');
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      }
+      return res.fail('Student not found.', [], 404);
+    }
 
     if (!req.file) return res.fail('No file uploaded.');
 
@@ -1991,14 +2014,29 @@ exports.uploadDocument = async (req, res, next) => {
 exports.deleteDocument = async (req, res, next) => {
   try {
     const { id, docId } = req.params;
+    const schoolId = req.user.school_id;
+
+    // Verify student belongs to this school
+    const [[student]] = await sequelize.query(`
+      SELECT id FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false LIMIT 1;
+    `, { replacements: { id, schoolId } });
+
+    if (!student) return res.fail('Student not found.', [], 404);
+
     const [[doc]] = await sequelize.query(`
-      SELECT id FROM student_documents WHERE id = :docId AND student_id = :id;
+      SELECT id, file_path FROM student_documents WHERE id = :docId AND student_id = :id;
     `, { replacements: { docId, id } });
 
     if (!doc) return res.fail('Document not found.', [], 404);
 
     await sequelize.query(`DELETE FROM student_documents WHERE id = :docId;`, { replacements: { docId } });
-    // In a real app, also delete the file from storage
+    
+    // Delete file from disk to prevent storage leaks
+    if (doc.file_path) {
+      const fs = require('fs');
+      try { fs.unlinkSync(doc.file_path); } catch (e) {}
+    }
+
     res.ok({}, 'Document deleted.');
   } catch (err) { next(err); }
 };

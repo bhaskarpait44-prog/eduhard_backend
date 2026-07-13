@@ -2,6 +2,8 @@
 
 const PDFDocument = require('pdfkit');
 const sequelize = require('../config/database');
+const { acquireLockWithRetry, releaseLock } = require('../utils/lock');
+const { invalidateCache } = require('../middlewares/cache');
 
 async function currentSessionId(schoolId) {
   const [[session]] = await sequelize.query(`
@@ -579,24 +581,57 @@ exports.getEnrollmentHistory = async (req, res, next) => {
 };
 
 exports.readmitStudent = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { session_id, class_id, section_id, joined_date, roll_number } = req.body;
-    const schoolId = req.user.school_id;
+  const { id } = req.params;
+  const { session_id, class_id, section_id, joined_date, roll_number } = req.body;
+  const schoolId = req.user.school_id;
+  const lockKey = `enrollment:section:${section_id}`;
+  let lockAcquired = false;
 
+  try {
     const [[student]] = await sequelize.query(`
-      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false
+      SELECT id, status FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
     `, { replacements: { id, schoolId } });
 
     if (!student) return res.fail('Student not found.', [], 404);
 
+    if (student.status === 'active') {
+      return res.fail('Student is already active.', [], 400);
+    }
+
+    // Acquire lock to prevent race condition on section capacity/roll assignment
+    lockAcquired = await acquireLockWithRetry(lockKey, 5000, 10, 150);
+    if (!lockAcquired) {
+      return res.status(429).json({
+        success: false,
+        message: 'Too many concurrent admission/enrollment requests. Please try again.'
+      });
+    }
+
+    // Verify section capacity
+    const [[capacityCheck]] = await sequelize.query(`
+      SELECT sec.capacity,
+             COALESCE(COUNT(e.id), 0)::int AS current_count
+      FROM sections sec
+      LEFT JOIN enrollments e ON e.section_id = sec.id
+        AND e.session_id = :session_id AND e.status = 'active'
+      WHERE sec.id = :section_id
+      GROUP BY sec.capacity;
+    `, { replacements: { section_id, session_id } });
+
+    if (capacityCheck && capacityCheck.current_count >= capacityCheck.capacity) {
+      return res.status(409).json({
+        success: false,
+        message: `Section is at full capacity (${capacityCheck.capacity} students). Cannot re-admit.`
+      });
+    }
+
     const [[lastEnrollment]] = await sequelize.query(`
-      SELECT id FROM enrollments WHERE student_id = :id ORDER BY joined_date DESC LIMIT 1
+      SELECT id FROM enrollments WHERE student_id = :id ORDER BY joined_date DESC LIMIT 1;
     `, { replacements: { id } });
 
     await sequelize.transaction(async (t) => {
       const [[existingEnrollment]] = await sequelize.query(`
-        SELECT id FROM enrollments WHERE student_id = :id AND session_id = :session_id LIMIT 1
+        SELECT id FROM enrollments WHERE student_id = :id AND session_id = :session_id LIMIT 1;
       `, { replacements: { id, session_id }, transaction: t });
 
       if (existingEnrollment) {
@@ -611,7 +646,7 @@ exports.readmitStudent = async (req, res, next) => {
               leaving_type = null,
               status = 'active',
               updated_at = NOW()
-          WHERE id = :enrollmentId
+          WHERE id = :enrollmentId;
         `, { replacements: {
           enrollmentId: existingEnrollment.id,
           class_id,
@@ -627,7 +662,7 @@ exports.readmitStudent = async (req, res, next) => {
           ) VALUES (
             :id, :session_id, :class_id, :section_id, :roll_number, 
             :joined_date, 'rejoined', 'active', :prevId, NOW(), NOW()
-          )
+          );
         `, { replacements: { 
           id, session_id, class_id, section_id, roll_number, 
           joined_date: joined_date || new Date().toISOString().split('T')[0],
@@ -654,7 +689,7 @@ exports.readmitStudent = async (req, res, next) => {
            changed_by, reason, ip_address, device_info, created_at)
         VALUES
           ('students', :id, 'status', :oldStatus, 'active',
-           :changedBy, 'Student re-admitted', :ip, :device, NOW())
+           :changedBy, 'Student re-admitted', :ip, :device, NOW());
       `, { replacements: {
         id,
         oldStatus,
@@ -664,8 +699,19 @@ exports.readmitStudent = async (req, res, next) => {
       }, transaction: t });
     });
 
+    // Invalidate caches
+    invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/enrollments*');
+    invalidateCache(schoolId, '/api/dashboard*');
+
     res.ok({}, 'Student re-admitted successfully.');
-  } catch (err) { next(err); }
+  } catch (err) { 
+    next(err); 
+  } finally {
+    if (lockAcquired) {
+      await releaseLock(lockKey);
+    }
+  }
 };
 
 exports.getLeavingSummary = async (req, res, next) => {
