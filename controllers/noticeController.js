@@ -41,7 +41,7 @@ async function getTargetStaffIds(schoolId, audience, { target_teacher_id }) {
   if (audience === 'school_wide' || audience === 'everyone') {
     // Get all staff users
     const [users] = await sequelize.query(`
-      SELECT id FROM users WHERE school_id = :schoolId AND is_active = true AND is_deleted = false AND role != 'student'
+      SELECT id FROM users WHERE school_id = :schoolId AND is_active = true AND is_deleted = false AND role != 'student' AND role != 'parent'
     `, { replacements });
     result.userIds = users.map(u => u.id);
     
@@ -83,9 +83,57 @@ async function getTargetStaffIds(schoolId, audience, { target_teacher_id }) {
 }
 
 /**
+ * Helper to resolve audience to parent user IDs for push notifications
+ */
+async function getTargetParentUserIds(schoolId, audience, { target_class_id, target_section_id, target_student_id }) {
+  let query = '';
+  let replacements = { schoolId };
+
+  if (audience === 'school_wide' || audience === 'everyone' || audience === 'parents') {
+    query = `
+      SELECT DISTINCT f.user_id 
+      FROM families f
+      JOIN students s ON s.family_id = f.id
+      WHERE s.school_id = :schoolId AND s.is_active = true AND s.is_deleted = false AND f.user_id IS NOT NULL
+    `;
+  } else if (audience === 'class') {
+    query = `
+      SELECT DISTINCT f.user_id
+      FROM families f
+      JOIN students s ON s.family_id = f.id
+      JOIN enrollments e ON e.student_id = s.id
+      WHERE s.school_id = :schoolId AND e.class_id = :classId AND e.status = 'active' AND f.user_id IS NOT NULL
+    `;
+    replacements.classId = target_class_id;
+  } else if (audience === 'section') {
+    query = `
+      SELECT DISTINCT f.user_id
+      FROM families f
+      JOIN students s ON s.family_id = f.id
+      JOIN enrollments e ON e.student_id = s.id
+      WHERE s.school_id = :schoolId AND e.section_id = :sectionId AND e.status = 'active' AND f.user_id IS NOT NULL
+    `;
+    replacements.sectionId = target_section_id;
+  } else if (audience === 'student' || audience === 'students') {
+    query = `
+      SELECT DISTINCT f.user_id
+      FROM families f
+      JOIN students s ON s.family_id = f.id
+      WHERE s.id = :studentId AND f.user_id IS NOT NULL
+    `;
+    replacements.studentId = target_student_id;
+  } else {
+    return [];
+  }
+
+  const [parents] = await sequelize.query(query, { replacements });
+  return parents.map(p => p.user_id);
+}
+
+/**
  * Helper to fire push notifications in background
  */
-async function fireNoticePush(notice, studentIds, staffIds) {
+async function fireNoticePush(notice, studentIds, staffIds, parentUserIds = []) {
   const payload = {
     title: notice.title,
     body: (notice.body || notice.content || '').length > 100 
@@ -108,10 +156,14 @@ async function fireNoticePush(notice, studentIds, staffIds) {
     if (staffIds?.teacherIds?.length > 0) {
       await sendPushToTeachers(staffIds.teacherIds, payload);
     }
+    if (parentUserIds?.length > 0) {
+      await sendPushToUsers(parentUserIds, payload);
+    }
   } catch (err) {
     console.error('[fireNoticePush] Error dispatching notices:', err);
   }
 }
+
 
 // ── Admin Functions ──────────────────────────────────────────────────────────
 
@@ -240,7 +292,13 @@ exports.createNotice = async (req, res, next) => {
           target_teacher_id: parseInt(target_teacher_id) || null
         });
 
-        fireNoticePush(createdNotice, studentIds, staffIds);
+        const parentUserIds = await getTargetParentUserIds(schoolId, audience, {
+          target_class_id: parseInt(target_class_id) || null,
+          target_section_id: parseInt(target_section_id) || null,
+          target_student_id: parseInt(target_student_id) || null
+        });
+
+        fireNoticePush(createdNotice, studentIds, staffIds, parentUserIds);
       } catch (err) {
         console.error('[createNotice] Push background error:', err);
       }

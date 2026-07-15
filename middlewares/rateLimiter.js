@@ -7,48 +7,8 @@ const redis = require('../config/redis');
 
 const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
 
-/**
- * Creates a rate limiter.
- * Automatically falls back to MemoryStore if Redis is disabled or not connected.
- */
-const createLimiter = (max, windowMs, message) => {
-  const options = {
-    windowMs,
-    max,
-    standardHeaders: true,
-    legacyHeaders: false,
-    message: {
-      success: false,
-      message: message || 'Too many requests, please try again later.',
-      errors: ['Rate limit exceeded'],
-    },
-  };
 
-  // Only use RedisStore if REDIS_ENABLED is true
-  if (REDIS_ENABLED) {
-    options.store = new RedisStore({
-      sendCommand: async (...args) => {
-        // If redis is not ready, we throw an error which rate-limit-redis 
-        // will hopefully handle or we'll catch.
-        // Actually, rate-limit-redis doesn't have a built-in fallback.
-        if (redis.status !== 'ready') {
-          throw new Error('Redis not ready');
-        }
-        return redis.call(...args);
-      },
-    });
-
-    // Handle potential errors from the Redis store by falling back to MemoryStore behavior
-    // express-rate-limit doesn't easily allow switching stores on the fly, 
-    // but we can make the sendCommand fail-safe by using a proxy-like behavior if we wanted.
-    // For now, let's stick to a simpler approach: 
-    // If Redis is enabled, we use it. If it fails, express-rate-limit will log the error.
-  }
-
-  return rateLimit(options);
-};
-
-// More robust FailSafe store implementation
+// Robust failsafe store: uses Redis when available, falls back to MemoryStore transparently.
 class RobustRedisStore {
   constructor(options) {
     this.options = options;
@@ -119,8 +79,14 @@ const robustLimiter = (max, windowMs, message, keyPrefix) => {
       message: message || 'Too many requests, please try again later.',
       errors: ['Rate limit exceeded'],
     },
+    // Fix #5: guard redis.call() with a status check so the RobustRedisStore's
+    // own fallback (increment/decrement/resetKey) handles the failure path cleanly
+    // without throwing and logging an error on every request during an outage.
     store: new RobustRedisStore({
-      sendCommand: (...args) => redis.call(...args),
+      sendCommand: (...args) => {
+        if (redis.status !== 'ready') throw new Error('Redis not ready');
+        return redis.call(...args);
+      },
       prefix: `rl:${keyPrefix}:`,
       windowMs, // Pass windowMs to constructor as well
     }),

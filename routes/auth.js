@@ -18,6 +18,9 @@ const { generateResetPasswordHtml } = require('../utils/emailTemplates');
 
 const RESET_TOKEN_EXPIRY = 60 * 60 * 1000; // 1 hour
 const MAX_FAILED_ATTEMPTS = 20;
+// Fix #3: evaluate once at module load \u2014 not per-request
+const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+
 const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
 
 const { authenticate } = require('../middlewares/auth');
@@ -561,7 +564,7 @@ router.post('/refresh', async (req, res) => {
     // Bug 7: Hash the token before checking blacklist
     const tokenHash = crypto.createHash('sha256').update(refresh_token).digest('hex');
 
-    const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+    // Fix #3 (refresh): use module-level REDIS_ENABLED constant (see top of file)
     if (REDIS_ENABLED) {
       if (redis.status === 'ready') {
         const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
@@ -569,13 +572,8 @@ router.post('/refresh', async (req, res) => {
           return res.fail('Token has been revoked. Please log in again.', [], 401);
         }
       } else {
-        console.error(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check failed on refresh!`);
-        return res.status(503).json({
-          success: false,
-          data: null,
-          message: 'Security verification service temporarily unavailable.',
-          errors: ['Redis unavailable'],
-        });
+        // Fix #2 (refresh): fail-open \u2014 a Redis blip must not lock out all users from refreshing tokens.
+        console.warn(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check skipped on refresh \u2014 allowing through.`);
       }
     }
 
@@ -637,6 +635,14 @@ router.post('/logout', authenticate, async (req, res) => {
 
     await blacklistToken(accessToken);
     if (refresh_token) await blacklistToken(refresh_token);
+
+    // Fix #7: delete the online heartbeat key so the user shows as offline immediately.
+    // Without this, the UI would continue showing them as online for up to 5 minutes.
+    if (req.user && redis.status === 'ready') {
+      const { id, role, school_id } = req.user;
+      const onlineKey = `online:${school_id}:${role}:${id}`;
+      redis.del(onlineKey).catch(() => {});
+    }
 
     res.ok({}, 'Logged out successfully.');
   } catch (err) {

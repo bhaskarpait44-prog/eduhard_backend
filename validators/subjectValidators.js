@@ -7,11 +7,15 @@ const subjectTypeRule = body('subject_type')
   .isIn(['theory', 'practical', 'both'])
   .withMessage('subject_type must be theory, practical, or both');
 
+// Fix #10: use isInt({ min: 1 }) instead of isFloat({ gt: 0 }).
+// isFloat({ gt: 0 }) allowed fractional values like 0.1 which are semantically
+// invalid as exam marks in a school context.
 const markRule = (field) =>
   body(field)
     .optional({ nullable: true })
-    .isFloat({ gt: 0 })
-    .withMessage(`${field} must be a positive number`);
+    .isInt({ min: 1 })
+    .withMessage(`${field} must be a whole number of at least 1`);
+
 
 const createSubjectRules = [
   param('classId').isInt({ min: 1 }).withMessage('Invalid class ID'),

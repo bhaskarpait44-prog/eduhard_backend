@@ -17,6 +17,7 @@ if (!process.env.JWT_SECRET) {
 
 const logger = require('./utils/logger');
 const sequelize = require('./config/database');
+const redis = require('./config/redis');
 const app = require('./app');
 const { initBrowser } = require('./utils/pdfGenerator');
 const { initializeFirebase } = require('./utils/firebase');
@@ -31,6 +32,20 @@ async function boot() {
     logger.info(`Starting EduCore API [${NODE_ENV}]...`);
 
     await sequelize.authenticate();
+
+    // Fix #11: verify Redis connectivity on startup so a misconfigured Redis
+    // is caught immediately rather than silently causing 503s for every request.
+    if (process.env.REDIS_ENABLED !== 'false') {
+      try {
+        await redis.ping();
+        logger.info('[Redis] Connected and ready.');
+      } catch (err) {
+        logger.error(`[Redis] Startup ping failed: ${err.message}. Check REDIS_HOST/REDIS_PORT in .env.`);
+        // Do not exit — the app uses fail-open for most Redis operations.
+        // Authenticated requests will still work; caching and rate limiting will
+        // degrade gracefully to in-memory fallbacks.
+      }
+    }
     
     initializeFirebase();
     

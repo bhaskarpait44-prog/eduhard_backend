@@ -6,6 +6,12 @@ const { invalidateCache } = require('../middlewares/cache');
 const { generateAcademicCalendarPdf } = require('../utils/pdfGenerator');
 const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
 
+// Ensure column academic_event_id exists in notices table (for sync)
+sequelize.query(`
+  ALTER TABLE notices 
+  ADD COLUMN IF NOT EXISTS academic_event_id INTEGER REFERENCES academic_events(id) ON DELETE CASCADE;
+`).catch(err => console.error('[AcademicCalendar] Notices ALTER TABLE failed:', err.message));
+
 const auditCtx = (req) => ({
   schoolId   : req.user?.school_id || null,
   changedBy  : req.user?.id || null,
@@ -19,7 +25,7 @@ const auditCtx = (req) => ({
  */
 exports.downloadPdf = async (req, res, next) => {
   try {
-    const { session_id, month, year, event_type, audience } = req.query;
+    const { session_id, month, year, event_type, audience, view_type } = req.query;
     const schoolId = req.user.school_id;
 
     if (!session_id) {
@@ -110,7 +116,7 @@ exports.downloadPdf = async (req, res, next) => {
     const [events] = await sequelize.query(query, { replacements });
 
     // 4. Generate PDF
-    const pdfBuffer = await generateAcademicCalendarPdf({ school, session, events });
+    const pdfBuffer = await generateAcademicCalendarPdf({ school, session, events, viewType: view_type, selectedMonth: month, selectedYear: year });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=Academic_Calendar_${session.name.replace(/\s+/g, '_')}.pdf`);
@@ -299,6 +305,7 @@ exports.create = async (req, res, next) => {
 
     if (event.is_published && event.notify_on_publish) {
       fireEventNotification(event);
+      await upsertEventNotice(event);
     }
 
     res.ok(event, 'Event created successfully');
@@ -396,9 +403,13 @@ exports.update = async (req, res, next) => {
 
     invalidateCache(schoolId, '/api/academic-calendar*');
 
-    // Only notify if status changed from false -> true
-    if (event.is_published && event.notify_on_publish && updates.is_published && !existing.is_published) {
-      fireEventNotification(event);
+    if (event.is_published && event.notify_on_publish) {
+      await upsertEventNotice(event);
+      if (updates.is_published && !existing.is_published) {
+        fireEventNotification(event);
+      }
+    } else {
+      await removeEventNotice(event.id);
     }
 
     res.ok(event, 'Event updated successfully');
@@ -438,6 +449,7 @@ exports.destroy = async (req, res, next) => {
       ...auditCtx(req),
     });
 
+    await removeEventNotice(id);
     invalidateCache(schoolId, '/api/academic-calendar*');
     res.ok(null, 'Event deleted successfully');
   } catch (err) {
@@ -490,6 +502,9 @@ exports.togglePublish = async (req, res, next) => {
 
     if (newPublished && event.notify_on_publish) {
       fireEventNotification(event);
+      await upsertEventNotice(event);
+    } else {
+      await removeEventNotice(event.id);
     }
 
     res.ok(event, `Event ${newPublished ? 'published' : 'unpublished'} successfully`);
@@ -578,5 +593,122 @@ async function fireEventNotification(event) {
     }
   } catch (err) {
     console.error('[EventNotification] Error:', err.message);
+  }
+}
+
+/**
+ * Helper to upsert a notice representing the academic calendar event
+ */
+async function upsertEventNotice(event) {
+  try {
+    const schoolId = event.school_id;
+    const eventId = event.id;
+    
+    // Map event audience to notices audience
+    let audience = 'school_wide';
+    let isSchoolWide = false;
+    let targetClassId = event.target_class_id || null;
+    
+    if (event.audience === 'everyone') {
+      audience = 'school_wide';
+      isSchoolWide = true;
+    } else if (event.audience === 'students') {
+      if (targetClassId) {
+        audience = 'class';
+      } else {
+        audience = 'school_wide';
+        isSchoolWide = true;
+      }
+    } else if (event.audience === 'teachers' || event.audience === 'staff') {
+      audience = 'teachers';
+    } else if (event.audience === 'parents') {
+      audience = 'parents';
+    }
+    
+    // Format notice title and body
+    const title = `New Event: ${event.title}`;
+    const dateStr = event.start_date === event.end_date 
+      ? event.start_date 
+      : `${event.start_date} to ${event.end_date}`;
+    const timeStr = event.is_all_day ? 'All Day' : `${event.start_time || ''} - ${event.end_time || ''}`;
+    
+    const body = `An academic event has been scheduled.
+Date: ${dateStr}
+Time: ${timeStr}
+Type: ${event.event_type.replace('_', ' ').toUpperCase()}
+
+${event.description || ''}`;
+
+    // Check if notice already exists for this event
+    const [[existingNotice]] = await sequelize.query(
+      `SELECT id FROM notices WHERE academic_event_id = :eventId LIMIT 1`,
+      { replacements: { eventId } }
+    );
+    
+    if (existingNotice) {
+      // Update existing notice
+      await sequelize.query(`
+        UPDATE notices SET
+          title = :title,
+          body = :body,
+          audience = :audience,
+          is_school_wide = :isSchoolWide,
+          target_class_id = :targetClassId,
+          expires_at = :expiresAt,
+          updated_at = NOW()
+        WHERE id = :noticeId
+      `, {
+        replacements: {
+          title,
+          body,
+          audience,
+          isSchoolWide,
+          targetClassId,
+          expiresAt: `${event.end_date} 23:59:59`,
+          noticeId: existingNotice.id
+        }
+      });
+    } else {
+      // Insert new notice
+      await sequelize.query(`
+        INSERT INTO notices (
+          school_id, title, body, posted_by_user_id, posted_by_role,
+          audience, is_school_wide, target_class_id, priority,
+          expires_at, academic_event_id, created_at, updated_at
+        ) VALUES (
+          :schoolId, :title, :body, :postedByUserId, 'admin',
+          :audience, :isSchoolWide, :targetClassId, 'info',
+          :expiresAt, :eventId, NOW(), NOW()
+        )
+      `, {
+        replacements: {
+          schoolId,
+          title,
+          body,
+          postedByUserId: event.created_by || null,
+          audience,
+          isSchoolWide,
+          targetClassId,
+          expiresAt: `${event.end_date} 23:59:59`,
+          eventId
+        }
+      });
+    }
+  } catch (err) {
+    console.error('[EventNotice] Error upserting event notice:', err.message);
+  }
+}
+
+/**
+ * Helper to delete a notice associated with the academic calendar event
+ */
+async function removeEventNotice(eventId) {
+  try {
+    await sequelize.query(
+      `DELETE FROM notices WHERE academic_event_id = :eventId`,
+      { replacements: { eventId } }
+    );
+  } catch (err) {
+    console.error('[EventNotice] Error deleting event notice:', err.message);
   }
 }

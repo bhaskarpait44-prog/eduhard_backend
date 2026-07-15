@@ -72,7 +72,11 @@ const invalidateCache = async (schoolId, pattern = '*') => {
         const [nextCursor, foundKeys] = await redis.scan(cursor, 'MATCH', keyPattern, 'COUNT', 100);
         cursor = nextCursor;
         if (foundKeys.length > 0) {
-          await redis.del(...foundKeys);
+          // Fix #6: use a pipeline instead of spread to avoid hitting JS's
+          // argument count limit when foundKeys contains thousands of keys.
+          const pipeline = redis.pipeline();
+          foundKeys.forEach((k) => pipeline.del(k));
+          await pipeline.exec();
         }
       } while (cursor !== '0');
     }

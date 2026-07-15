@@ -5,6 +5,8 @@ const sequelize = require('../config/database');
 const { Class, Subject } = require('../models');
 const { writeAuditLog, diffFields } = require('../utils/writeAuditLog');
 const { invalidateCache, invalidateClassCache } = require('../middlewares/cache');
+// Fix #1: import the shared utility so combined-marks logic is not duplicated
+const computeSubjectMarks = require('../utils/computeSubjectMarks');
 
 const auditCtx = (req) => ({
   schoolId: req.user?.school_id || null,
@@ -98,21 +100,22 @@ function normalizeSubjectPayload(input, isCreate = false) {
     throw error;
   }
 
-  const combinedTotal = (normalized.theory_total_marks || 0) + (normalized.practical_total_marks || 0);
-  const combinedPassing = (normalized.theory_passing_marks || 0) + (normalized.practical_passing_marks || 0);
+  // Fix #1: delegate combined-marks computation to the shared utility.
+  // Fix #2: use >= (not >) so passing === total is also rejected (e.g. 100/100).
+  const { combined_total_marks, combined_passing_marks } = computeSubjectMarks(normalized);
 
-  if (combinedTotal <= 0 || combinedPassing <= 0 || combinedPassing > combinedTotal) {
+  if (combined_total_marks <= 0 || combined_passing_marks <= 0 || combined_passing_marks >= combined_total_marks) {
     const error = new Error('Invalid combined marks configuration.');
     error.status = 422;
     throw error;
   }
 
-  normalized.combined_total_marks = combinedTotal;
-  normalized.combined_passing_marks = combinedPassing;
+  normalized.combined_total_marks = combined_total_marks;
+  normalized.combined_passing_marks = combined_passing_marks;
 
   // Keep legacy fields populated for backward-compatible reads.
-  normalized.total_marks = combinedTotal;
-  normalized.passing_marks = combinedPassing;
+  normalized.total_marks = combined_total_marks;
+  normalized.passing_marks = combined_passing_marks;
 
   return normalized;
 }
@@ -309,7 +312,22 @@ exports.remove = async (req, res, next) => {
     if (resultCount > 0) {
       return res.fail(
         'Cannot delete this subject because exam marks are already entered for it.',
-        [{ code: 'SUBJECT_IN_USE', count: resultCount }],
+        [{ code: 'SUBJECT_HAS_RESULTS', count: resultCount }],
+        400
+      );
+    }
+
+    // Fix #9: also block deletion when the subject is scheduled in an exam
+    // (exam_subjects exists) even if no marks have been entered yet.
+    const [[examSubjRow]] = await sequelize.query(
+      `SELECT COUNT(*) AS cnt FROM exam_subjects WHERE subject_id = :subjectId;`,
+      { replacements: { subjectId: id } }
+    );
+    const examSubjCount = Number(examSubjRow?.cnt || 0);
+    if (examSubjCount > 0) {
+      return res.fail(
+        'Cannot delete this subject because it is already scheduled in one or more exams.',
+        [{ code: 'SUBJECT_IN_EXAM', count: examSubjCount }],
         400
       );
     }
@@ -373,8 +391,193 @@ exports.reorder = async (req, res, next) => {
 
 exports.downloadPdf = async (req, res, next) => {
   try {
-    const classId = Number(req.params.classId);
+    const classIdParam = req.params.classId;
     const schoolId = req.user.school_id;
+
+    const [[school]] = await sequelize.query(
+      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
+      { replacements: { schoolId } }
+    );
+
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({
+      size: 'A4',
+      margins: { top: 50, left: 50, right: 50, bottom: 20 },
+      bufferPages: true,
+    });
+
+    if (classIdParam === 'all') {
+      const classes = await Class.findAll({
+        where: { school_id: schoolId, is_deleted: false },
+        order: [['order_number', 'ASC'], ['id', 'ASC']],
+      });
+
+      const subjects = await Subject.findAll({
+        where: {
+          class_id: { [Op.in]: classes.map(c => c.id) },
+          is_deleted: false,
+        },
+        order: [['class_id', 'ASC'], ['order_number', 'ASC'], ['id', 'ASC']],
+      });
+
+      const filename = `All-Classes-Subjects.pdf`;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      doc.pipe(res);
+
+      // Header
+      doc
+        .font('Helvetica-Bold')
+        .fontSize(18)
+        .fillColor('#1e293b')
+        .text(school?.name || 'School', { align: 'center' });
+
+      doc
+        .fontSize(14)
+        .fillColor('#334155')
+        .text(`Subject List - All Classes`, { align: 'center' });
+
+      doc.moveDown(1.5);
+
+      const colName = 50;
+      const colCode = 200;
+      const colType = 280;
+      const colCategory = 360;
+      const colMarks = 440;
+
+      let currentY = doc.y;
+
+      for (let i = 0; i < classes.length; i++) {
+        const cls = classes[i];
+        const classSubjects = subjects.filter(sub => sub.class_id === cls.id);
+
+        const streamPart = cls.stream && cls.stream !== 'regular'
+          ? ` - ${cls.stream.charAt(0).toUpperCase() + cls.stream.slice(1)}`
+          : '';
+        const fullClassName = `${cls.name}${streamPart}`;
+
+        if (currentY > 700) {
+          doc.addPage();
+          currentY = 50;
+        }
+
+        // Draw Class Section Header
+        doc
+          .font('Helvetica-Bold')
+          .fontSize(12)
+          .fillColor('#4f46e5')
+          .text(`Class: ${fullClassName}`, colName, currentY);
+
+        currentY += 18;
+
+        // Draw Table Header
+        doc
+          .font('Helvetica-Bold')
+          .fontSize(9)
+          .fillColor('#475569');
+
+        doc.text('Subject Name', colName, currentY);
+        doc.text('Code', colCode, currentY);
+        doc.text('Type', colType, currentY);
+        doc.text('Category', colCategory, currentY);
+        doc.text('Marks (Total/Pass)', colMarks, currentY);
+
+        doc
+          .moveTo(50, currentY + 12)
+          .lineTo(545, currentY + 12)
+          .lineWidth(0.8)
+          .strokeColor('#cbd5e1')
+          .stroke();
+
+        currentY += 20;
+
+        if (classSubjects.length === 0) {
+          doc.font('Helvetica-Oblique').fontSize(8.5).fillColor('#94a3b8');
+          doc.text('No subjects found for this class.', colName, currentY);
+          currentY += 20;
+        } else {
+          classSubjects.forEach((sub) => {
+            if (currentY > 730) {
+              doc.addPage();
+              currentY = 50;
+
+              // Redraw header on new page
+              doc
+                .font('Helvetica-Bold')
+                .fontSize(11)
+                .fillColor('#4f46e5')
+                .text(`Class: ${fullClassName} (Continued)`, colName, currentY);
+              currentY += 15;
+
+              doc.font('Helvetica-Bold').fontSize(9).fillColor('#475569');
+              doc.text('Subject Name', colName, currentY);
+              doc.text('Code', colCode, currentY);
+              doc.text('Type', colType, currentY);
+              doc.text('Category', colCategory, currentY);
+              doc.text('Marks (Total/Pass)', colMarks, currentY);
+
+              doc
+                .moveTo(50, currentY + 12)
+                .lineTo(545, currentY + 12)
+                .lineWidth(0.8)
+                .strokeColor('#cbd5e1')
+                .stroke();
+
+              currentY += 20;
+            }
+
+            doc.font('Helvetica').fontSize(8.5).fillColor('#334155');
+
+            const name = sub.name || '--';
+            const code = sub.code || '--';
+            const type = sub.subject_type ? sub.subject_type.charAt(0).toUpperCase() + sub.subject_type.slice(1) : '--';
+            const category = sub.is_core ? 'Core' : 'Optional';
+            const marks = `${sub.combined_total_marks || 0} / ${sub.combined_passing_marks || 0}`;
+
+            doc.text(name, colName, currentY, { width: 140 });
+            doc.text(code, colCode, currentY);
+            doc.text(type, colType, currentY);
+            doc.text(category, colCategory, currentY);
+            doc.text(marks, colMarks, currentY);
+
+            doc
+              .moveTo(50, currentY + 12)
+              .lineTo(545, currentY + 12)
+              .lineWidth(0.5)
+              .strokeColor('#f1f5f9')
+              .stroke();
+
+            currentY += 18;
+          });
+        }
+
+        currentY += 12; // Gap between classes
+      }
+
+      const range = doc.bufferedPageRange();
+      for (let i = range.start; i < range.start + range.count; i++) {
+        doc.switchToPage(i);
+        const oldBottomMargin = doc.page.margins.bottom;
+        doc.page.margins.bottom = 0;
+        doc
+          .font('Helvetica')
+          .fontSize(8)
+          .fillColor('#94a3b8')
+          .text(
+            `Generated on ${new Date().toLocaleDateString()} • Page ${i + 1} of ${range.count}`,
+            50,
+            doc.page.height - 25,
+            { align: 'center', width: doc.page.width - 100, lineBreak: false }
+          );
+        doc.page.margins.bottom = oldBottomMargin;
+      }
+
+      doc.end();
+      return;
+    }
+
+    const classId = Number(classIdParam);
+    if (isNaN(classId)) return res.fail('Invalid Class ID.', [], 400);
 
     const cls = await Class.findOne({
       where: { id: classId, school_id: schoolId, is_deleted: false },
@@ -386,22 +589,15 @@ exports.downloadPdf = async (req, res, next) => {
       order: [['order_number', 'ASC'], ['id', 'ASC']],
     });
 
-    const [[school]] = await sequelize.query(
-      `SELECT name FROM schools WHERE id = :schoolId LIMIT 1`,
-      { replacements: { schoolId } }
-    );
+    const streamPart = cls.stream && cls.stream !== 'regular'
+      ? ` - ${cls.stream.charAt(0).toUpperCase() + cls.stream.slice(1)}`
+      : '';
+    const fullClassName = `${cls.name}${streamPart}`;
 
-    const filename = `${cls.name.replace(/[^a-z0-9-_]+/gi, '-')}-subjects.pdf`;
+    const filename = `${fullClassName.replace(/[^a-z0-9-_]+/gi, '-')}-subjects.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    const PDFDocument = require('pdfkit');
-    const doc = new PDFDocument({
-      size: 'A4',
-      margins: { top: 50, left: 50, right: 50, bottom: 50 },
-      bufferPages: true,
-    });
 
     doc.pipe(res);
 
@@ -415,7 +611,7 @@ exports.downloadPdf = async (req, res, next) => {
     doc
       .fontSize(14)
       .fillColor('#334155')
-      .text(`Subject List - Class: ${cls.name}`, { align: 'center' });
+      .text(`Subject List - Class: ${fullClassName}`, { align: 'center' });
 
     doc.moveDown(1.5);
 
@@ -492,6 +688,8 @@ exports.downloadPdf = async (req, res, next) => {
     const range = doc.bufferedPageRange();
     for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
+      const oldBottomMargin = doc.page.margins.bottom;
+      doc.page.margins.bottom = 0;
       doc
         .font('Helvetica')
         .fontSize(8)
@@ -501,7 +699,8 @@ exports.downloadPdf = async (req, res, next) => {
           50,
           doc.page.height - 25,
           { align: 'center', width: doc.page.width - 100, lineBreak: false }
-        );
+          );
+      doc.page.margins.bottom = oldBottomMargin;
     }
 
     doc.end();

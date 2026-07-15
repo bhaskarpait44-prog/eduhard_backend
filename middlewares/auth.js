@@ -14,6 +14,9 @@ const redis = require('../config/redis');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
+// Fix #3: evaluate once at module load — not per-request — consistent with redis.js and rateLimiter.js
+const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+
 /**
  * Helper to update user's online status in Redis
  * Uses a 5-minute TTL as a heartbeat
@@ -88,7 +91,7 @@ const authenticate = async (req, res, next) => {
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
     // Check if token is blacklisted in Redis
-    const REDIS_ENABLED = process.env.REDIS_ENABLED !== 'false';
+    // Fix #3: use the module-level constant (no longer re-reading process.env per request)
     if (REDIS_ENABLED) {
       if (redis.status === 'ready') {
         const isBlacklisted = await redis.get(`blacklist:${tokenHash}`);
@@ -101,14 +104,13 @@ const authenticate = async (req, res, next) => {
           });
         }
       } else {
-        // Fail closed for security if Redis is enabled but down
-        console.error(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check failed!`);
-        return res.status(503).json({
-          success: false,
-          data: null,
-          message: 'Security verification service temporarily unavailable.',
-          errors: ['Redis unavailable'],
-        });
+        // Fix #2: fail-open instead of fail-closed.
+        // Returning 503 for every request while Redis is momentarily down (restart,
+        // network blip) brings the entire API offline. We log a security warning
+        // and allow the request through. The window of exposure is narrow: an
+        // attacker would need a valid, non-expired JWT that was already blacklisted,
+        // AND Redis must be down at exactly that moment.
+        console.warn(`[SECURITY] Redis is enabled but status is "${redis.status}". Blacklist check skipped — allowing request through.`);
       }
     }
 
