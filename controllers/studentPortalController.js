@@ -277,16 +277,16 @@ async function getTodaySchedule(context) {
   // Check if today is a holiday
   const today = todayDate();
   const [[holiday]] = await sequelize.query(`
-    SELECT id FROM session_holidays
+    SELECT id, name FROM session_holidays
     WHERE session_id = :sessionId AND holiday_date = :today LIMIT 1;
   `, { replacements: { sessionId: context.sessionId, today } });
 
   if (holiday) {
-    return [];
+    return { schedule: [], isHoliday: true, holidayName: holiday.name || 'Declared Holiday' };
   }
 
   const dayName = DAY_NAMES[new Date().getDay()];
-  if (dayName === 'sunday') return [];
+  if (dayName === 'sunday') return { schedule: [], isHoliday: false, holidayName: '' };
 
   const [rows] = await sequelize.query(`
     SELECT
@@ -329,7 +329,7 @@ async function getTodaySchedule(context) {
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
   
   // Check online status in Redis for each teacher
-  return Promise.all(rows.map(async (row) => {
+  const decoratedRows = await Promise.all(rows.map(async (row) => {
     const [startHour, startMinute] = String(row.start_time).slice(0, 5).split(':').map(Number);
     const [endHour, endMinute] = String(row.end_time).slice(0, 5).split(':').map(Number);
     const start = startHour * 60 + startMinute;
@@ -355,6 +355,8 @@ async function getTodaySchedule(context) {
 
     return { ...row, status, countdown_minutes, is_online };
   }));
+
+  return { schedule: decoratedRows, isHoliday: false, holidayName: '' };
 }
 
 async function getLatestExamResult(context) {
@@ -756,7 +758,7 @@ exports.dashboard = async (req, res, next) => {
     const attendance = await getAttendanceSummary(context.enrollmentId);
     const latest_result = await getLatestExamResult(context);
     const fee = await getFeeSummary(context);
-    const schedule = await getTodaySchedule(context);
+    const { schedule, isHoliday, holidayName } = await getTodaySchedule(context);
     const attendance_strip = await getRecentAttendanceStrip(context);
     const upcoming_events = await getUpcomingEvents(context);
     const homework_due_today = await getHomeworkDueToday(context);
@@ -780,6 +782,8 @@ exports.dashboard = async (req, res, next) => {
       attendance,
       latest_result,
       fee,
+      is_holiday: isHoliday,
+      holiday_name: holidayName,
       classes_today: { total_periods: schedule.length, current_period, next_period },
       today_schedule: schedule,
       recent_attendance: attendance_strip,
@@ -802,8 +806,8 @@ exports.dashboard = async (req, res, next) => {
 exports.dashboardTodaySchedule = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
-    const schedule = await getTodaySchedule(context);
-    res.ok({ schedule }, `${schedule.length} class(es) found for today.`);
+    const { schedule, isHoliday, holidayName } = await getTodaySchedule(context);
+    res.ok({ schedule, is_holiday: isHoliday, holiday_name: holidayName }, `${schedule.length} class(es) found for today.`);
   } catch (err) { next(err); }
 };
 
@@ -1633,15 +1637,15 @@ exports.timetable = async (req, res, next) => {
 exports.timetableToday = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
-    const schedule = await getTodaySchedule(context);
-    res.ok({ schedule }, `${schedule.length} slot(s) found for today.`);
+    const { schedule, isHoliday, holidayName } = await getTodaySchedule(context);
+    res.ok({ schedule, is_holiday: isHoliday, holiday_name: holidayName }, `${schedule.length} slot(s) found for today.`);
   } catch (err) { next(err); }
 };
 
 exports.timetableCurrentPeriod = async (req, res, next) => {
   try {
     const context = await getStudentContext(req);
-    const schedule = await getTodaySchedule(context);
+    const { schedule } = await getTodaySchedule(context);
     res.ok({
       current_period: schedule.find((item) => item.status === 'current') || null,
       next_period: schedule.find((item) => item.status === 'upcoming') || null,

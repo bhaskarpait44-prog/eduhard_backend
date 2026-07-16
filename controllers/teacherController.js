@@ -232,18 +232,18 @@ async function getTodayScheduleRows(teacherId, sessionId) {
   // Check if today is a holiday
   const todayStr = TODAY();
   const [[holiday]] = await sequelize.query(`
-    SELECT id FROM session_holidays
+    SELECT id, name FROM session_holidays
     WHERE session_id = :sessionId AND holiday_date = :todayStr LIMIT 1;
   `, { replacements: { sessionId, todayStr } });
 
   if (holiday) {
-    return [];
+    return { rows: [], isHoliday: true, holidayName: holiday.name || 'Declared Holiday' };
   }
 
   const today = new Date();
   const dayName = DAY_NAMES[today.getDay()];
   if (dayName === 'sunday') {
-    return [];
+    return { rows: [], isHoliday: false, holidayName: '' };
   }
 
   const [rows] = await sequelize.query(`
@@ -278,7 +278,7 @@ async function getTodayScheduleRows(teacherId, sessionId) {
     ORDER BY ts.start_time ASC, ts.period_number ASC;
   `, { replacements: { teacherId, sessionId, dayName } });
 
-  return rows;
+  return { rows, isHoliday: false, holidayName: '' };
 }
 
 function decorateScheduleRows(rows) {
@@ -626,7 +626,8 @@ exports.dashboard = async (req, res, next) => {
     const teacherId = req.user.id;
     const sessionId = session?.id || 0;
 
-    const schedule = decorateScheduleRows(await getTodayScheduleRows(teacherId, sessionId));
+    const { rows: scheduleRawRows, isHoliday: todayIsHoliday, holidayName: todayHolidayName } = await getTodayScheduleRows(teacherId, sessionId);
+    const schedule = decorateScheduleRows(scheduleRawRows);
     const recentActivity = await getRecentActivity(req);
     const pendingMarks = await getPendingMarkCount(scope, sessionId, teacherId);
 
@@ -663,22 +664,17 @@ exports.dashboard = async (req, res, next) => {
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today;
     `, { replacements: { today, sessionId, teacherId: req.user.id } });
 
-    // Check if today is a holiday
-    const [[holiday]] = await sequelize.query(`
-      SELECT id FROM session_holidays
-      WHERE session_id = :sessionId AND holiday_date = :today LIMIT 1;
-    `, { replacements: { sessionId, today } });
-
+    // Use holiday info from getTodayScheduleRows (already queried)
     const attendanceRow = attendanceRows[0];
     const attendanceStatus = {
-      marked: holiday ? 0 : Number(attendanceRow?.marked || 0),
-      total: holiday ? 0 : Number(attendanceRow?.total || 0),
+      marked: todayIsHoliday ? 0 : Number(attendanceRow?.marked || 0),
+      total: todayIsHoliday ? 0 : Number(attendanceRow?.total || 0),
     };
 
     const studentToday = {
-      present: holiday ? 0 : Number(attendanceRow?.present || 0),
-      absent: holiday ? 0 : Number(attendanceRow?.absent || 0),
-      percentage: holiday ? 100 : Number(attendanceRow?.percentage || 0),
+      present: todayIsHoliday ? 0 : Number(attendanceRow?.present || 0),
+      absent: todayIsHoliday ? 0 : Number(attendanceRow?.absent || 0),
+      percentage: todayIsHoliday ? 100 : Number(attendanceRow?.percentage || 0),
     };
 
     const nextPeriod = schedule.find((item) => item.status === 'current' || item.status === 'upcoming') || null;
@@ -738,6 +734,8 @@ exports.dashboard = async (req, res, next) => {
       teacher: { id: req.user.id, name: req.user.name },
       date: today,
       current_session: session,
+      is_holiday: todayIsHoliday,
+      holiday_name: todayHolidayName,
       today_at_a_glance: {
         todays_classes: {
           total_periods: schedule.length,
@@ -759,8 +757,9 @@ exports.dashboard = async (req, res, next) => {
 exports.todaySchedule = async (req, res, next) => {
   try {
     const { session } = await getTeacherContext(req);
-    const rows = decorateScheduleRows(await getTodayScheduleRows(req.user.id, session?.id));
-    res.ok({ schedule: rows }, `${rows.length} period(s) found for today.`);
+    const { rows, isHoliday, holidayName } = await getTodayScheduleRows(req.user.id, session?.id);
+    const schedule = decorateScheduleRows(rows);
+    res.ok({ schedule, is_holiday: isHoliday, holiday_name: holidayName }, `${schedule.length} period(s) found for today.`);
   } catch (err) { next(err); }
 };
 
@@ -2947,7 +2946,8 @@ exports.timetableToday = async (req, res, next) => {
 exports.currentPeriod = async (req, res, next) => {
   try {
     const { session } = await getTeacherContext(req);
-    const schedule = decorateScheduleRows(await getTodayScheduleRows(req.user.id, session?.id));
+    const { rows } = await getTodayScheduleRows(req.user.id, session?.id);
+    const schedule = decorateScheduleRows(rows);
     const current = schedule.find((row) => row.status === 'current') || null;
     res.ok({ current_period: current }, current ? 'Current period found.' : 'No active period right now.');
   } catch (err) { next(err); }
