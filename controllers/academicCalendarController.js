@@ -93,8 +93,10 @@ exports.downloadPdf = async (req, res, next) => {
       replacements.audience = audience;
     }
 
-    // Include session holidays
-    if ((!event_type || event_type === 'holiday') && (!audience || audience === 'everyone')) {
+    // Bug fix 1: Always include session holidays regardless of audience filter.
+    // Holidays affect everyone (school closure) — they should not disappear when
+    // audience is filtered to 'students', 'teachers', etc.
+    if (!event_type || event_type === 'holiday') {
       let holidaysQuery = `
         SELECT 
           id, :schoolId as school_id, session_id, name as title, CAST(NULL AS TEXT) as description, 'holiday' as event_type, 
@@ -111,7 +113,9 @@ exports.downloadPdf = async (req, res, next) => {
       query = `(${query}) UNION ALL (${holidaysQuery})`;
     }
 
-    query += ` ORDER BY start_date ASC, start_time ASC`;
+    // Bug fix 2: Use NULLS LAST on start_time so holiday rows (with NULL start_time)
+    // sort after timed events on the same day, not randomly before them.
+    query += ` ORDER BY start_date ASC, start_time ASC NULLS LAST`;
 
     const [events] = await sequelize.query(query, { replacements });
 
@@ -188,8 +192,10 @@ exports.list = async (req, res, next) => {
       replacements.audience = audience;
     }
 
-    // Include session holidays if event_type is not filtered or is 'holiday', and audience is not staff/teacher-only
-    if ((!event_type || event_type === 'holiday') && (!audience || audience === 'everyone')) {
+    // Bug fix 1: Always include session holidays regardless of audience filter.
+    // Holidays affect everyone (school closure) — they should not disappear when
+    // audience is filtered to 'students', 'teachers', etc.
+    if (!event_type || event_type === 'holiday') {
       let holidaysQuery = `
         SELECT 
           id, :schoolId as school_id, session_id, name as title, CAST(NULL AS TEXT) as description, 'holiday' as event_type, 
@@ -206,7 +212,8 @@ exports.list = async (req, res, next) => {
       query = `(${query}) UNION ALL (${holidaysQuery})`;
     }
 
-    query += ` ORDER BY start_date ASC, start_time ASC`;
+    // Bug fix 2: NULLS LAST on start_time so holiday rows sort after timed events on the same day.
+    query += ` ORDER BY start_date ASC, start_time ASC NULLS LAST`;
 
     const [events] = await sequelize.query(query, { replacements });
 
@@ -501,7 +508,11 @@ exports.togglePublish = async (req, res, next) => {
     invalidateCache(schoolId, '/api/academic-calendar*');
 
     if (newPublished && event.notify_on_publish) {
-      fireEventNotification(event);
+      // Bug fix 3: Only fire push notification when transitioning from unpublished → published.
+      // Avoid sending duplicate pushes every time an already-published event is toggled.
+      if (!existing.is_published) {
+        fireEventNotification(event);
+      }
       await upsertEventNotice(event);
     } else {
       await removeEventNotice(event.id);
@@ -631,11 +642,14 @@ async function upsertEventNotice(event) {
       ? event.start_date 
       : `${event.start_date} to ${event.end_date}`;
     const timeStr = event.is_all_day ? 'All Day' : `${event.start_time || ''} - ${event.end_time || ''}`;
-    
+    // Bug fix 4: Use \n\n for paragraph breaks so most renderers show line breaks.
+    // Bug fix 5: Use replaceAll to replace ALL underscores in event_type (e.g. 'fee_deadline' → 'FEE DEADLINE').
+    const eventTypeLabel = event.event_type.replaceAll('_', ' ').toUpperCase();
     const body = `An academic event has been scheduled.
+
 Date: ${dateStr}
 Time: ${timeStr}
-Type: ${event.event_type.replace('_', ' ').toUpperCase()}
+Type: ${eventTypeLabel}
 
 ${event.description || ''}`;
 
