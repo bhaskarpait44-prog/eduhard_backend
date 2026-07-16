@@ -229,6 +229,17 @@ async function getAccessibleStudent(scope, schoolId, studentId) {
 }
 
 async function getTodayScheduleRows(teacherId, sessionId) {
+  // Check if today is a holiday
+  const todayStr = TODAY();
+  const [[holiday]] = await sequelize.query(`
+    SELECT id FROM session_holidays
+    WHERE session_id = :sessionId AND holiday_date = :todayStr LIMIT 1;
+  `, { replacements: { sessionId, todayStr } });
+
+  if (holiday) {
+    return [];
+  }
+
   const today = new Date();
   const dayName = DAY_NAMES[today.getDay()];
   if (dayName === 'sunday') {
@@ -652,16 +663,22 @@ exports.dashboard = async (req, res, next) => {
       LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :today;
     `, { replacements: { today, sessionId, teacherId: req.user.id } });
 
+    // Check if today is a holiday
+    const [[holiday]] = await sequelize.query(`
+      SELECT id FROM session_holidays
+      WHERE session_id = :sessionId AND holiday_date = :today LIMIT 1;
+    `, { replacements: { sessionId, today } });
+
     const attendanceRow = attendanceRows[0];
     const attendanceStatus = {
-      marked: Number(attendanceRow?.marked || 0),
-      total: Number(attendanceRow?.total || 0),
+      marked: holiday ? 0 : Number(attendanceRow?.marked || 0),
+      total: holiday ? 0 : Number(attendanceRow?.total || 0),
     };
 
     const studentToday = {
-      present: Number(attendanceRow?.present || 0),
-      absent: Number(attendanceRow?.absent || 0),
-      percentage: Number(attendanceRow?.percentage || 0),
+      present: holiday ? 0 : Number(attendanceRow?.present || 0),
+      absent: holiday ? 0 : Number(attendanceRow?.absent || 0),
+      percentage: holiday ? 100 : Number(attendanceRow?.percentage || 0),
     };
 
     const nextPeriod = schedule.find((item) => item.status === 'current' || item.status === 'upcoming') || null;

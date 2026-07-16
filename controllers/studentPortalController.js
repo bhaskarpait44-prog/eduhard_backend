@@ -274,6 +274,17 @@ async function getSharedStudentRemarks(studentId, enrollmentId = null, { limit =
 }
 
 async function getTodaySchedule(context) {
+  // Check if today is a holiday
+  const today = todayDate();
+  const [[holiday]] = await sequelize.query(`
+    SELECT id FROM session_holidays
+    WHERE session_id = :sessionId AND holiday_date = :today LIMIT 1;
+  `, { replacements: { sessionId: context.sessionId, today } });
+
+  if (holiday) {
+    return [];
+  }
+
   const dayName = DAY_NAMES[new Date().getDay()];
   if (dayName === 'sunday') return [];
 

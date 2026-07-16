@@ -318,7 +318,7 @@ function getGreenfieldCategory(ev) {
 /**
  * Draws the Greenfield layout header on a PDF page
  */
-function drawGreenfieldHeader(doc, school, session) {
+function drawGreenfieldHeader(doc, school, session, subTitleText = 'LIST VIEW') {
   const navy = '#0a1c3f';
   const gold = '#d97706';
   const gray = '#4b5563';
@@ -335,21 +335,28 @@ function drawGreenfieldHeader(doc, school, session) {
   doc.moveTo(cx + 31, cy + 23).lineTo(cx + 31, cy + 31).strokeColor('#ffffff').lineWidth(1).stroke();
   doc.circle(cx + 31, cy + 31, 1.5).fill('#ffffff');
 
-  // School name & details
-  doc.fillColor(navy).fontSize(14).font('Helvetica-Bold').text('GREENFIELD', cx + 60, cy + 5);
-  doc.fontSize(10).text('INTERNATIONAL SCHOOL', cx + 60, cy + 20);
-  doc.fillColor(gray).fontSize(7.5).font('Helvetica-Oblique').text('Nurturing Minds. Building Futures.', cx + 60, cy + 33);
-
-  // 2. Middle Title block
-  doc.fillColor(navy).fontSize(17).font('Helvetica-Bold').text('ACADEMIC CALENDAR', 190, cy + 3, { align: 'center', width: 200 });
-  doc.fontSize(11).text('LIST VIEW', 190, cy + 20, { align: 'center', width: 200 });
+  // Center Title block
+  const rawSchoolName = (school.name || 'GREENFIELD INTERNATIONAL SCHOOL').toUpperCase();
+  const schoolAddress = school.address || '';
+  
+  // 1. School name (top, large, bold)
+  const schoolFontSize = rawSchoolName.length > 28 ? 12 : rawSchoolName.length > 20 ? 13 : 14;
+  doc.fillColor(navy).fontSize(schoolFontSize).font('Helvetica-Bold').text(rawSchoolName, 100, cy + 1, { align: 'center', width: 385 });
+  
+  // 2. School address (below school name)
+  if (schoolAddress) {
+    doc.fillColor(gray).fontSize(7.5).font('Helvetica').text(schoolAddress, 100, cy + 16, { align: 'center', width: 385, height: 10, ellipsis: true });
+  }
+  
+  // 3. ACADEMIC CALENDAR (slightly smaller than school name, below address)
+  doc.fillColor(navy).fontSize(10.5).font('Helvetica-Bold').text('ACADEMIC CALENDAR', 100, cy + 28, { align: 'center', width: 385 });
   
   // Gold divider
-  doc.moveTo(225, cy + 33).lineTo(355, cy + 33).strokeColor(gold).lineWidth(1).stroke();
+  doc.moveTo(220, cy + 42).lineTo(360, cy + 42).strokeColor(gold).lineWidth(1).stroke();
   
   // Banner curved badge
-  doc.roundedRect(238, cy + 38, 90, 15, 7.5).fill(navy);
-  doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold').text(session.name || '2025 - 2026', 238, cy + 42.5, { align: 'center', width: 90 });
+  doc.roundedRect(230, cy + 46, 105, 14, 7).fill(navy);
+  doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold').text(subTitleText, 230, cy + 49.5, { align: 'center', width: 105 });
 
   // 3. Right Calendar shield badge
   const bx = 495, by = 20;
@@ -670,6 +677,106 @@ function drawGreenfieldLargeMonth(doc, year, month, startY, eventsMap) {
 }
 
 /**
+ * Draws a clean, paginated table of academic calendar events in Greenfield styling
+ */
+function drawGreenfieldEventsTable(doc, events, tableX, startY, school, session, drawHeader = false, subTitleText = 'LIST VIEW') {
+  let tableY = startY;
+  
+  const drawTableHeaderBar = (y) => {
+    doc.rect(tableX, y, 535, 18, 3).fill('#0a1c3f');
+    doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold');
+    
+    doc.text('MONTH', tableX + 8, y + 5.5);
+    doc.text('DATE / DURATION', tableX + 85, y + 5.5);
+    doc.text('EVENT', tableX + 195, y + 5.5);
+    doc.text('CATEGORY', tableX + 335, y + 5.5);
+    doc.text('REMARKS', tableX + 440, y + 5.5);
+    return y + 18;
+  };
+
+  tableY = drawTableHeaderBar(tableY);
+
+  const monthColors = {
+    'april': '#4caf50',
+    'may': '#ffc107',
+    'june': '#009688',
+    'july': '#00bcd4',
+    'august': '#3f51b5',
+    'september': '#9c27b0',
+    'october': '#ff5722',
+    'november': '#e91e63',
+    'december': '#607d8b',
+    'january': '#2196f3',
+    'february': '#673ab7',
+    'march': '#4caf50'
+  };
+
+  const sortedEvents = [...events].sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
+  let isAltRow = false;
+
+  sortedEvents.forEach((ev) => {
+    const rowHeight = 28;
+    if (tableY + rowHeight > 730) {
+      doc.addPage();
+      if (drawHeader) {
+        drawGreenfieldHeader(doc, school, session, subTitleText);
+      }
+      tableY = 95;
+      tableY = drawTableHeaderBar(tableY);
+    }
+
+    const cellY = tableY;
+
+    if (isAltRow) {
+      doc.rect(tableX, cellY, 535, rowHeight).fill('#fafafa');
+    }
+    isAltRow = !isAltRow;
+
+    // 1. Month badge Column
+    const startDate = new Date(ev.start_date);
+    const monthName = startDate.toLocaleString('en-US', { month: 'long' });
+    const monthKey = monthName.toLowerCase();
+    const mColor = monthColors[monthKey] || '#607d8b';
+
+    doc.roundedRect(tableX + 4, cellY + 6, 72, 16, 3).fill(mColor);
+    drawMonthIcon(doc, monthName, tableX + 8, cellY + 9);
+    doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold').text(monthName.toUpperCase(), tableX + 18, cellY + 10.5, { align: 'center', width: 54 });
+
+    // 2. Date column
+    const dateText = ev.start_date === ev.end_date 
+      ? formatLocalDateString(ev.start_date)
+      : `${formatLocalDateString(ev.start_date)} – ${formatLocalDateString(ev.end_date)}`;
+    
+    doc.fillColor('#0a1c3f').fontSize(8).font('Helvetica-Bold').text(dateText, tableX + 85, cellY + 10.5);
+
+    // 3. Event Column
+    doc.fillColor('#000000').fontSize(8.5).font('Helvetica-Bold').text(ev.title, tableX + 195, cellY + 10.5, { width: 135, height: 18, ellipsis: true });
+
+    // 4. Category Badges
+    const category = getGreenfieldCategory(ev);
+    doc.roundedRect(tableX + 335, cellY + 7, 95, 14, 7).fill(category.bg);
+    doc.roundedRect(tableX + 335, cellY + 7, 95, 14, 7).strokeColor(category.color).lineWidth(0.5).stroke();
+    drawCategoryIcon(doc, category.icon, tableX + 341, cellY + 9, category.color);
+    doc.fillColor(category.color).fontSize(7).font('Helvetica-Bold').text(category.name, tableX + 351, cellY + 10.5, { align: 'center', width: 75 });
+
+    // 5. Remarks Column with Target Audience / Class Info
+    let remarkText = '';
+    if (ev.audience && ev.audience !== 'everyone') {
+      const target = ev.target_class_name ? `Class ${ev.target_class_name}` : ev.audience;
+      remarkText = `[For ${target}] `;
+    }
+    remarkText += ev.description || 'Academic activity scheduled';
+
+    doc.fillColor('#555555').fontSize(7.5).font('Helvetica').text(remarkText, tableX + 440, cellY + 10.5, { width: 90, height: 18, ellipsis: true });
+
+    doc.moveTo(tableX, cellY + rowHeight).lineTo(tableX + 535, cellY + rowHeight).strokeColor('#eef2f5').lineWidth(0.5).stroke();
+    tableY += rowHeight;
+  });
+
+  return tableY;
+}
+
+/**
  * Generates an Academic Calendar PDF using PDFKit.
  */
 async function generateAcademicCalendarPdf(data) {
@@ -717,7 +824,7 @@ async function generateAcademicCalendarPdf(data) {
 
       if (viewType === 'calendar') {
         // --- CALENDAR GRID VIEW ---
-        drawGreenfieldHeader(doc, school, session);
+        drawGreenfieldHeader(doc, school, session, 'CALENDAR VIEW');
 
         if (selectedMonth && selectedYear) {
           // Render single large month calendar view
@@ -725,6 +832,22 @@ async function generateAcademicCalendarPdf(data) {
           const month = parseInt(selectedMonth, 10) - 1; // 0-indexed
           drawGreenfieldLargeMonth(doc, year, month, 95, eventsMap);
           drawGreenfieldFooter(doc, 460);
+
+          // --- EVENT SCHEDULE APPENDIX (Holidays Only) ---
+          const holidaysOnly = events.filter(e => e.event_type === 'holiday');
+          doc.addPage();
+          drawGreenfieldHeader(doc, school, session, 'HOLIDAYS LIST');
+          
+          // Print Appendix title
+          doc.fillColor('#0a1c3f').fontSize(10).font('Helvetica-Bold').text('HOLIDAYS LIST', 30, 95);
+          doc.moveTo(30, 109).lineTo(565, 109).strokeColor('#d97706').lineWidth(1).stroke();
+          
+          if (holidaysOnly.length > 0) {
+            drawGreenfieldEventsTable(doc, holidaysOnly, 30, 120, school, session, true, 'HOLIDAYS LIST');
+          } else {
+            doc.fillColor('#555555').fontSize(9).font('Helvetica-Oblique').text('No holidays scheduled for this period.', 30, 130);
+          }
+          drawGreenfieldFooter(doc, 735);
         } else {
           // Render full 12-month grid view starting from session start_date month
           const startParts = (session.start_date || '2025-04-01').split('-');
@@ -759,98 +882,27 @@ async function generateAcademicCalendarPdf(data) {
 
           // Draw bottom legend & widgets
           drawGreenfieldFooter(doc, 490);
+
+          // --- EVENT SCHEDULE APPENDIX (Holidays Only) ---
+          const holidaysOnly = events.filter(e => e.event_type === 'holiday');
+          doc.addPage();
+          drawGreenfieldHeader(doc, school, session, 'HOLIDAYS LIST');
+          
+          // Print Appendix title
+          doc.fillColor('#0a1c3f').fontSize(10).font('Helvetica-Bold').text('HOLIDAYS LIST', 30, 95);
+          doc.moveTo(30, 109).lineTo(565, 109).strokeColor('#d97706').lineWidth(1).stroke();
+          
+          if (holidaysOnly.length > 0) {
+            drawGreenfieldEventsTable(doc, holidaysOnly, 30, 120, school, session, true, 'HOLIDAYS LIST');
+          } else {
+            doc.fillColor('#555555').fontSize(9).font('Helvetica-Oblique').text('No holidays scheduled for this period.', 30, 130);
+          }
+          drawGreenfieldFooter(doc, 735);
         }
       } else {
         // --- LIST VIEW TABLE ---
-        drawGreenfieldHeader(doc, school, session);
-
-        // Draw Table Header Bar
-        const tableX = 30;
-        let tableY = 95;
-        
-        const drawTableHeaderBar = (y) => {
-          doc.rect(tableX, y, 535, 18, 3).fill('#0a1c3f');
-          doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold');
-          
-          doc.text('MONTH', tableX + 8, y + 5.5);
-          doc.text('DATE / DURATION', tableX + 85, y + 5.5);
-          doc.text('EVENT', tableX + 195, y + 5.5);
-          doc.text('CATEGORY', tableX + 335, y + 5.5);
-          doc.text('REMARKS', tableX + 440, y + 5.5);
-          return y + 18;
-        };
-
-        tableY = drawTableHeaderBar(tableY);
-
-        const monthColors = {
-          'april': '#4caf50',
-          'may': '#ffc107',
-          'june': '#009688',
-          'july': '#00bcd4',
-          'august': '#3f51b5',
-          'september': '#9c27b0',
-          'october': '#ff5722',
-          'november': '#e91e63',
-          'december': '#607d8b',
-          'january': '#2196f3',
-          'february': '#673ab7',
-          'march': '#4caf50'
-        };
-
-        const sortedEvents = [...events].sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
-        let isAltRow = false;
-
-        sortedEvents.forEach((ev) => {
-          const rowHeight = 28;
-          if (tableY + rowHeight > 730) {
-            doc.addPage();
-            drawGreenfieldHeader(doc, school, session);
-            tableY = 95;
-            tableY = drawTableHeaderBar(tableY);
-          }
-
-          const cellY = tableY;
-
-          if (isAltRow) {
-            doc.rect(tableX, cellY, 535, rowHeight).fill('#fafafa');
-          }
-          isAltRow = !isAltRow;
-
-          // 1. Month badge Column
-          const startDate = new Date(ev.start_date);
-          const monthName = startDate.toLocaleString('en-US', { month: 'long' });
-          const monthKey = monthName.toLowerCase();
-          const mColor = monthColors[monthKey] || '#607d8b';
-
-          doc.roundedRect(tableX + 4, cellY + 6, 72, 16, 3).fill(mColor);
-          drawMonthIcon(doc, monthName, tableX + 8, cellY + 9);
-          doc.fillColor('#ffffff').fontSize(7.5).font('Helvetica-Bold').text(monthName.toUpperCase(), tableX + 18, cellY + 10.5, { align: 'center', width: 54 });
-
-          // 2. Date column
-          const dateText = ev.start_date === ev.end_date 
-            ? formatLocalDateString(ev.start_date)
-            : `${formatLocalDateString(ev.start_date)} – ${formatLocalDateString(ev.end_date)}`;
-          
-          doc.fillColor('#0a1c3f').fontSize(8).font('Helvetica-Bold').text(dateText, tableX + 85, cellY + 10.5);
-
-          // 3. Event Column
-          doc.fillColor('#000000').fontSize(8.5).font('Helvetica-Bold').text(ev.title, tableX + 195, cellY + 10.5, { width: 135, height: 18, ellipsis: true });
-
-          // 4. Category Badges
-          const category = getGreenfieldCategory(ev);
-          doc.roundedRect(tableX + 335, cellY + 7, 95, 14, 7).fill(category.bg);
-          doc.roundedRect(tableX + 335, cellY + 7, 95, 14, 7).strokeColor(category.color).lineWidth(0.5).stroke();
-          drawCategoryIcon(doc, category.icon, tableX + 341, cellY + 9, category.color);
-          doc.fillColor(category.color).fontSize(7).font('Helvetica-Bold').text(category.name, tableX + 351, cellY + 10.5, { align: 'center', width: 75 });
-
-          // 5. Remarks Column
-          doc.fillColor('#555555').fontSize(7.5).font('Helvetica').text(ev.description || 'Academic activity scheduled', tableX + 440, cellY + 10.5, { width: 90, height: 18, ellipsis: true });
-
-          doc.moveTo(tableX, cellY + rowHeight).lineTo(tableX + 535, cellY + rowHeight).strokeColor('#eef2f5').lineWidth(0.5).stroke();
-          tableY += rowHeight;
-        });
-
-        // Draw bottom legend & widgets
+        drawGreenfieldHeader(doc, school, session, 'LIST VIEW');
+        drawGreenfieldEventsTable(doc, events, 30, 95, school, session, true, 'LIST VIEW');
         drawGreenfieldFooter(doc, 735);
       }
 
@@ -858,12 +910,19 @@ async function generateAcademicCalendarPdf(data) {
       const pageCount = doc.bufferedPageRange().count;
       for (let i = 0; i < pageCount; i++) {
         doc.switchToPage(i);
+        
+        // Temporarily disable margins for safety to prevent auto page breaks
+        const oldMargins = doc.page.margins;
+        doc.page.margins = { top: 0, bottom: 0, left: 0, right: 0 };
+        
         drawGreenfieldContactBar(doc, school);
         
         doc.fillColor('#999999').fontSize(7).font('Helvetica').text(
           `Page ${i + 1} of ${pageCount}`,
           30, 804, { align: 'right', width: 535 }
         );
+        
+        doc.page.margins = oldMargins;
       }
 
       doc.end();
