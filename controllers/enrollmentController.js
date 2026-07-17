@@ -545,6 +545,24 @@ exports.processPromotions = async (req, res, next) => {
 
     const enrollmentMap = new Map(activeEnrollments.map((row) => [Number(row.id), row]));
 
+    // Resolve which students already have an enrollment in the target session to prevent false capacity counts
+    const studentIds = activeEnrollments.map((e) => e.student_id);
+    let existingTargets = [];
+    if (studentIds.length > 0) {
+      [existingTargets] = await sequelize.query(`
+        SELECT student_id
+        FROM enrollments
+        WHERE student_id IN (:studentIds)
+          AND session_id = :targetSessionId;
+      `, {
+        replacements: {
+          studentIds,
+          targetSessionId: Number(target_session_id),
+        },
+      });
+    }
+    const existingTargetStudentIds = new Set(existingTargets.map((row) => Number(row.student_id)));
+
     // Resolve all target sections and count required seats before processing
     const targetSectionIds = new Set();
     const sectionAddCountMap = {}; // sectionId -> count of students we want to add
@@ -573,8 +591,12 @@ exports.processPromotions = async (req, res, next) => {
         enrollmentId: enrollment.id,
         targetSection,
       });
-      targetSectionIds.add(targetSection.id);
-      sectionAddCountMap[targetSection.id] = (sectionAddCountMap[targetSection.id] || 0) + 1;
+
+      // Exclude already-enrolled students from target section capacity count & locking
+      if (!existingTargetStudentIds.has(Number(enrollment.student_id))) {
+        targetSectionIds.add(targetSection.id);
+        sectionAddCountMap[targetSection.id] = (sectionAddCountMap[targetSection.id] || 0) + 1;
+      }
     }
 
     // Acquire locks for all target sections
@@ -693,21 +715,10 @@ exports.processPromotions = async (req, res, next) => {
             throw new Error(`Pre-resolved section not found for enrollment ${enrollment.id}.`);
           }
 
-          const [[existingTarget]] = await sequelize.query(`
-            SELECT id
-            FROM enrollments
-            WHERE student_id = :studentId
-              AND session_id = :targetSessionId
-            LIMIT 1;
-          `, {
-            replacements: {
-              studentId: enrollment.student_id,
-              targetSessionId: Number(target_session_id),
-            },
-            transaction: t,
-          });
+          // Use the pre-computed set to check for existing targets to optimize performance and transactions
+          const hasExistingTarget = existingTargetStudentIds.has(Number(enrollment.student_id));
 
-          if (existingTarget) {
+          if (hasExistingTarget) {
             processed.push({
               enrollment_id: enrollment.id,
               student_id: enrollment.student_id,

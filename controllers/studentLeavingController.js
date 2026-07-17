@@ -674,7 +674,11 @@ exports.readmitStudent = async (req, res, next) => {
 
     await sequelize.transaction(async (t) => {
       const [[existingEnrollment]] = await sequelize.query(`
-        SELECT id FROM enrollments WHERE student_id = :id AND session_id = :session_id LIMIT 1;
+        SELECT id FROM enrollments 
+        WHERE student_id = :id 
+          AND session_id = :session_id 
+        ORDER BY joined_date DESC, id DESC 
+        LIMIT 1;
       `, { replacements: { id, session_id }, transaction: t });
 
       if (existingEnrollment) {
