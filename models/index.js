@@ -55,6 +55,7 @@ const TransportStop      = require('./TransportStop');
 const User               = require('./User');
 const AlumniProfile      = require('./AlumniProfile');
 const AlumniEvent        = require('./AlumniEvent');
+const Stream             = require('./Stream');
 
 // ── Associations ─────────────────────────────────────────────────────────────
 
@@ -261,6 +262,7 @@ const db = {
   User,
   AlumniProfile,
   AlumniEvent,
+  Stream,
 };
 
 module.exports = db;

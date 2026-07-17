@@ -129,6 +129,20 @@ exports.enroll = async (req, res, next) => {
       return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
     }
 
+    // Verify stream is valid for the school
+    if (normalizedStream !== 'regular') {
+      const [[validStream]] = await sequelize.query(`
+        SELECT id FROM streams
+        WHERE school_id = :schoolId
+          AND LOWER(name) = :streamName
+        LIMIT 1;
+      `, { replacements: { schoolId: req.user.school_id, streamName: normalizedStream } });
+
+      if (!validStream) {
+        return res.fail(`Stream "${stream}" is not registered for this school.`, [], 400);
+      }
+    }
+
     const enrollment = await sequelize.transaction(async (t) => {
       // Check if student is already enrolled in this session
       const [[existingEnrollment]] = await sequelize.query(`

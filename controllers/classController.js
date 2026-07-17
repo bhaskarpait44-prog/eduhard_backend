@@ -194,6 +194,20 @@ exports.create = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const normalizedStream = normalizeStream(stream);
 
+    // Verify stream is valid for the school
+    if (normalizedStream !== 'regular') {
+      const [[validStream]] = await sequelize.query(`
+        SELECT id FROM streams
+        WHERE school_id = :schoolId
+          AND LOWER(name) = :streamName
+        LIMIT 1;
+      `, { replacements: { schoolId, streamName: normalizedStream } });
+
+      if (!validStream) {
+        return res.fail(`Stream "${stream}" is not registered for this school.`, [], 400);
+      }
+    }
+
     const conflict = await findClassConflict({
       schoolId,
       name,
@@ -359,6 +373,21 @@ exports.update = async (req, res, next) => {
     const nextStream = normalizeStream(
       Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream,
     );
+
+    // Verify stream is valid for the school
+    if (nextStream !== 'regular') {
+      const [[validStream]] = await sequelize.query(`
+        SELECT id FROM streams
+        WHERE school_id = :schoolId
+          AND LOWER(name) = :streamName
+        LIMIT 1;
+      `, { replacements: { schoolId, streamName: nextStream } });
+
+      if (!validStream) {
+        const streamVal = Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream;
+        return res.fail(`Stream "${streamVal}" is not registered for this school.`, [], 400);
+      }
+    }
 
     const conflict = await findClassConflict({
       schoolId,

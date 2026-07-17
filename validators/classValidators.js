@@ -13,7 +13,7 @@ const createClassRules = [
   body('stream')
     .optional({ nullable: true, checkFalsy: true })
     .trim()
-    .isIn(['regular', 'arts', 'commerce', 'science']).withMessage('Stream must be Regular, Arts, Commerce, or Science'),
+    .isString().withMessage('Stream must be a valid string'),
   body('display_name')
     .optional({ nullable: true })
     .trim()
@@ -50,7 +50,7 @@ const updateClassRules = [
   body('stream')
     .optional({ nullable: true, checkFalsy: true })
     .trim()
-    .isIn(['regular', 'arts', 'commerce', 'science']).withMessage('Stream must be Regular, Arts, Commerce, or Science'),
+    .isString().withMessage('Stream must be a valid string'),
   body('display_name')
     .optional({ nullable: true })
     .trim()
