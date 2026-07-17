@@ -109,14 +109,14 @@ function normalizePromotionOutcome(result) {
 // ── POST /api/enrollments ─────────────────────────────────────────────────────
 exports.enroll = async (req, res, next) => {
   const lockKey = `enrollment:section:${req.body.section_id}`;
-  let lockAcquired = false;
+  let lockToken = null;
 
   try {
     const { student_id, session_id, class_id, section_id, stream, joining_type, joined_date, roll_number } = req.body;
     
     // Acquire section distributed lock to prevent race conditions on capacity check
-    lockAcquired = await acquireLockWithRetry(lockKey);
-    if (!lockAcquired) {
+    lockToken = await acquireLockWithRetry(lockKey);
+    if (!lockToken) {
       return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
     }
 
@@ -132,15 +132,18 @@ exports.enroll = async (req, res, next) => {
     const enrollment = await sequelize.transaction(async (t) => {
       // Check if student is already enrolled in this session
       const [[existingEnrollment]] = await sequelize.query(`
-        SELECT id FROM enrollments 
+        SELECT id, status FROM enrollments 
         WHERE student_id = :student_id 
           AND session_id = :session_id 
-          AND status = 'active'
         LIMIT 1;
       `, { replacements: { student_id, session_id }, transaction: t });
 
       if (existingEnrollment) {
-        throw Object.assign(new Error('Student is already enrolled in an active class for this session.'), { status: 409 });
+        if (existingEnrollment.status === 'active') {
+          throw Object.assign(new Error('Student is already enrolled in an active class for this session.'), { status: 409 });
+        } else {
+          throw Object.assign(new Error('Student has a historical inactive enrollment for this session. Please use re-admission instead.'), { status: 409 });
+        }
       }
 
       // Check section capacity
@@ -195,8 +198,8 @@ exports.enroll = async (req, res, next) => {
     if (err.status) return res.fail(err.message, [], err.status);
     next(err);
   } finally {
-    if (lockAcquired) {
-      await releaseLock(lockKey);
+    if (lockToken) {
+      await releaseLock(lockKey, lockToken);
     }
   }
 };
@@ -226,7 +229,7 @@ exports.getById = async (req, res, next) => {
 // ── POST /api/enrollments/promote ────────────────────────────────────────────
 exports.promote = async (req, res, next) => {
   const lockKey = `enrollment:section:${req.body.new_section_id}`;
-  let lockAcquired = false;
+  let lockToken = null;
 
   try {
     const { session_id, new_session_id, class_id, new_class_id, new_section_id } = req.body;
@@ -237,8 +240,8 @@ exports.promote = async (req, res, next) => {
     }
 
     // Acquire section distributed lock to prevent race conditions on capacity check
-    lockAcquired = await acquireLockWithRetry(lockKey);
-    if (!lockAcquired) {
+    lockToken = await acquireLockWithRetry(lockKey);
+    if (!lockToken) {
       return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
     }
 
@@ -369,8 +372,8 @@ exports.promote = async (req, res, next) => {
   } catch (err) {
     next(err);
   } finally {
-    if (lockAcquired) {
-      await releaseLock(lockKey);
+    if (lockToken) {
+      await releaseLock(lockKey, lockToken);
     }
   }
 };
@@ -505,7 +508,7 @@ exports.processPromotions = async (req, res, next) => {
       return res.fail(`Cannot process promotions: target session is ${targetSession.status}.`);
     }
 
-    const nextClass = await getNextClass(currentClass.order_number, schoolId);
+    const nextClass = await getNextClass(currentClass.order_number, schoolId, currentClass.stream);
     const today = targetSession.start_date || new Date().toISOString().split('T')[0];
 
     const enrollmentIds = students.map((row) => Number(row.enrollment_id)).filter(Boolean);
@@ -541,149 +544,249 @@ exports.processPromotions = async (req, res, next) => {
     });
 
     const enrollmentMap = new Map(activeEnrollments.map((row) => [Number(row.id), row]));
+
+    // Resolve all target sections and count required seats before processing
+    const targetSectionIds = new Set();
+    const sectionAddCountMap = {}; // sectionId -> count of students we want to add
+    const studentTargetSections = []; // array of { enrollmentId, targetSection }
+    
+    for (const requestedStudent of students) {
+      const enrollment = enrollmentMap.get(Number(requestedStudent.enrollment_id));
+      if (!enrollment) continue;
+
+      const outcome = result_source === 'board_result'
+        ? normalizePromotionOutcome(requestedStudent.board_result)
+        : normalizePromotionOutcome(enrollment.final_result);
+
+      if (!outcome) continue; // skipped later in loop as skipped_no_result
+
+      const passLike = outcome === 'pass';
+      const targetClass = passLike ? nextClass : currentClass;
+      if (!targetClass) continue; // student is graduating, no section needed
+
+      const targetSection = await getSectionForTargetClass(targetClass.id, enrollment.section_name);
+      if (!targetSection) {
+        return res.fail(`No section found in target class ${targetClass.name}.`);
+      }
+
+      studentTargetSections.push({
+        enrollmentId: enrollment.id,
+        targetSection,
+      });
+      targetSectionIds.add(targetSection.id);
+      sectionAddCountMap[targetSection.id] = (sectionAddCountMap[targetSection.id] || 0) + 1;
+    }
+
+    // Acquire locks for all target sections
+    const acquiredLocks = [];
+    let lockAcquisitionFailed = false;
+
+    for (const sectionId of targetSectionIds) {
+      const lockKey = `enrollment:section:${sectionId}`;
+      const token = await acquireLockWithRetry(lockKey);
+      if (!token) {
+        lockAcquisitionFailed = true;
+        break;
+      }
+      acquiredLocks.push({ key: lockKey, token });
+    }
+
+    if (lockAcquisitionFailed) {
+      for (const item of acquiredLocks) {
+        await releaseLock(item.key, item.token);
+      }
+      return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
+    }
+
     const processed = [];
 
-    await sequelize.transaction(async (t) => {
-      for (const requestedStudent of students) {
-        const enrollment = enrollmentMap.get(Number(requestedStudent.enrollment_id));
-        if (!enrollment) continue;
-
-        const outcome = result_source === 'board_result'
-          ? normalizePromotionOutcome(requestedStudent.board_result)
-          : normalizePromotionOutcome(enrollment.final_result);
-
-        if (!outcome) continue;
-
-        const passLike = outcome === 'pass';
-        const targetClass = passLike ? nextClass : currentClass;
-        const actionType = passLike ? (nextClass ? 'promoted' : 'graduated') : 'failed';
-
-        await sequelize.query(`
-          UPDATE enrollments
-          SET status = 'inactive',
-              left_date = :today,
-              leaving_type = :leavingType,
-              updated_at = NOW()
-          WHERE id = :id;
+    try {
+      // Verify capacities for target sections in the target session
+      for (const sectionId of targetSectionIds) {
+        const [[capacityCheck]] = await sequelize.query(`
+          SELECT sec.capacity,
+                 COALESCE(COUNT(e.id), 0)::int AS current_count
+          FROM sections sec
+          LEFT JOIN enrollments e ON e.section_id = sec.id
+            AND e.session_id = :targetSessionId AND e.status = 'active'
+          WHERE sec.id = :sectionId
+          GROUP BY sec.capacity;
         `, {
           replacements: {
-            today,
-            leavingType: actionType,
-            id: enrollment.id,
-          },
-          transaction: t,
-        });
-
-        if (!targetClass) {
-          await sequelize.query(`
-            UPDATE students
-            SET status = 'graduated',
-                is_active = false,
-                updated_at = NOW()
-            WHERE id = :studentId;
-          `, { replacements: { studentId: enrollment.student_id }, transaction: t });
-
-          processed.push({
-            enrollment_id: enrollment.id,
-            student_id: enrollment.student_id,
-            action: 'graduated',
-            target_class_id: null,
-            target_section_id: null,
-          });
-          continue;
-        }
-
-        const targetSection = await getSectionForTargetClass(targetClass.id, enrollment.section_name);
-        if (!targetSection) {
-          throw new Error(`No section found in target class ${targetClass.name}.`);
-        }
-
-        const [[existingTarget]] = await sequelize.query(`
-          SELECT id
-          FROM enrollments
-          WHERE student_id = :studentId
-            AND session_id = :targetSessionId
-          LIMIT 1;
-        `, {
-          replacements: {
-            studentId: enrollment.student_id,
+            sectionId,
             targetSessionId: Number(target_session_id),
           },
-          transaction: t,
         });
 
-        if (existingTarget) {
+        if (capacityCheck) {
+          const limit = capacityCheck.capacity;
+          const current = capacityCheck.current_count;
+          const adding = sectionAddCountMap[sectionId] || 0;
+          if (limit !== null && (current + adding) > limit) {
+            return res.fail(`Target section is at full capacity. Capacity: ${limit}, Current: ${current}, Adding: ${adding}.`);
+          }
+        }
+      }
+
+      await sequelize.transaction(async (t) => {
+        for (const requestedStudent of students) {
+          const enrollment = enrollmentMap.get(Number(requestedStudent.enrollment_id));
+          if (!enrollment) continue;
+
+          const outcome = result_source === 'board_result'
+            ? normalizePromotionOutcome(requestedStudent.board_result)
+            : normalizePromotionOutcome(enrollment.final_result);
+
+          if (!outcome) {
+            processed.push({
+              enrollment_id: enrollment.id,
+              student_id: enrollment.student_id,
+              action: 'skipped_no_result',
+              target_class_id: null,
+              target_section_id: null,
+            });
+            continue;
+          }
+
+          const passLike = outcome === 'pass';
+          const targetClass = passLike ? nextClass : currentClass;
+          const actionType = passLike ? (nextClass ? 'promoted' : 'graduated') : 'failed';
+
+          await sequelize.query(`
+            UPDATE enrollments
+            SET status = 'inactive',
+                left_date = :today,
+                leaving_type = :leavingType,
+                updated_at = NOW()
+            WHERE id = :id;
+          `, {
+            replacements: {
+              today,
+              leavingType: actionType,
+              id: enrollment.id,
+            },
+            transaction: t,
+          });
+
+          if (!targetClass) {
+            await sequelize.query(`
+              UPDATE students
+              SET status = 'graduated',
+                  is_active = false,
+                  updated_at = NOW()
+              WHERE id = :studentId;
+            `, { replacements: { studentId: enrollment.student_id }, transaction: t });
+
+            processed.push({
+              enrollment_id: enrollment.id,
+              student_id: enrollment.student_id,
+              action: 'graduated',
+              target_class_id: null,
+              target_section_id: null,
+            });
+            continue;
+          }
+
+          const targetSectionInfo = studentTargetSections.find(x => x.enrollmentId === enrollment.id);
+          const targetSection = targetSectionInfo?.targetSection;
+          if (!targetSection) {
+            throw new Error(`Pre-resolved section not found for enrollment ${enrollment.id}.`);
+          }
+
+          const [[existingTarget]] = await sequelize.query(`
+            SELECT id
+            FROM enrollments
+            WHERE student_id = :studentId
+              AND session_id = :targetSessionId
+            LIMIT 1;
+          `, {
+            replacements: {
+              studentId: enrollment.student_id,
+              targetSessionId: Number(target_session_id),
+            },
+            transaction: t,
+          });
+
+          if (existingTarget) {
+            processed.push({
+              enrollment_id: enrollment.id,
+              student_id: enrollment.student_id,
+              action: 'skipped_existing_target',
+              target_class_id: targetClass.id,
+              target_section_id: targetSection.id,
+            });
+            continue;
+          }
+
+          const rollNumber = await nextRollNumber(targetSection.id, Number(target_session_id), t);
+
+          const [[createdEnrollment]] = await sequelize.query(`
+            INSERT INTO enrollments
+              (student_id, session_id, class_id, section_id, stream, roll_number, joined_date, joining_type,
+               previous_enrollment_id, status, created_at, updated_at)
+            VALUES
+              (:studentId, :targetSessionId, :targetClassId, :targetSectionId, :stream, :rollNumber, :today, :joiningType,
+               :previousEnrollmentId, 'active', NOW(), NOW())
+            RETURNING id;
+          `, {
+            replacements: {
+              studentId: enrollment.student_id,
+              targetSessionId: Number(target_session_id),
+              targetClassId: targetClass.id,
+              targetSectionId: targetSection.id,
+              stream: enrollment.stream,
+              rollNumber,
+              today,
+              joiningType: passLike ? 'promoted' : 'failed',
+              previousEnrollmentId: enrollment.id,
+            },
+            transaction: t,
+          });
+
+          await sequelize.query(`
+            INSERT INTO student_subjects
+              (student_id, session_id, subject_id, is_core, is_active, created_by, updated_by, created_at, updated_at)
+            SELECT
+              :studentId,
+              :targetSessionId,
+              sub.id,
+              COALESCE(sub.is_core, false),
+              true,
+              :userId,
+              :userId,
+              NOW(),
+              NOW()
+            FROM subjects sub
+            WHERE sub.class_id = :targetClassId
+              AND COALESCE(sub.is_deleted, false) = false;
+          `, {
+            replacements: {
+              studentId: enrollment.student_id,
+              targetSessionId: Number(target_session_id),
+              targetClassId: targetClass.id,
+              userId: req.user.id,
+            },
+            transaction: t,
+          });
+
           processed.push({
             enrollment_id: enrollment.id,
             student_id: enrollment.student_id,
-            action: 'skipped_existing_target',
+            action: passLike ? 'promoted' : 'repeated',
             target_class_id: targetClass.id,
             target_section_id: targetSection.id,
+            new_enrollment_id: createdEnrollment.id,
           });
-          continue;
         }
-
-        const rollNumber = await nextRollNumber(targetSection.id, Number(target_session_id), t);
-
-        const [[createdEnrollment]] = await sequelize.query(`
-          INSERT INTO enrollments
-            (student_id, session_id, class_id, section_id, stream, roll_number, joined_date, joining_type,
-             previous_enrollment_id, status, created_at, updated_at)
-          VALUES
-            (:studentId, :targetSessionId, :targetClassId, :targetSectionId, :stream, :rollNumber, :today, :joiningType,
-             :previousEnrollmentId, 'active', NOW(), NOW())
-          RETURNING id;
-        `, {
-          replacements: {
-            studentId: enrollment.student_id,
-            targetSessionId: Number(target_session_id),
-            targetClassId: targetClass.id,
-            targetSectionId: targetSection.id,
-            stream: enrollment.stream,
-            rollNumber,
-            today,
-            joiningType: passLike ? 'promoted' : 'failed',
-            previousEnrollmentId: enrollment.id,
-          },
-          transaction: t,
-        });
-
-        await sequelize.query(`
-          INSERT INTO student_subjects
-            (student_id, session_id, subject_id, is_core, is_active, created_by, updated_by, created_at, updated_at)
-          SELECT
-            :studentId,
-            :targetSessionId,
-            sub.id,
-            COALESCE(sub.is_core, false),
-            true,
-            :userId,
-            :userId,
-            NOW(),
-            NOW()
-          FROM subjects sub
-          WHERE sub.class_id = :targetClassId
-            AND COALESCE(sub.is_deleted, false) = false;
-        `, {
-          replacements: {
-            studentId: enrollment.student_id,
-            targetSessionId: Number(target_session_id),
-            targetClassId: targetClass.id,
-            userId: req.user.id,
-          },
-          transaction: t,
-        });
-
-        processed.push({
-          enrollment_id: enrollment.id,
-          student_id: enrollment.student_id,
-          action: passLike ? 'promoted' : 'repeated',
-          target_class_id: targetClass.id,
-          target_section_id: targetSection.id,
-          new_enrollment_id: createdEnrollment.id,
-        });
+      });
+    } catch (err) {
+      throw err;
+    } finally {
+      // Release all acquired locks
+      for (const item of acquiredLocks) {
+        await releaseLock(item.key, item.token);
       }
-    });
+    }
 
     // FIX #2: Cache invalidation was dead code after return — moved before res.ok()
     invalidateCache(req.user.school_id, '/api/enrollments*');
@@ -695,6 +798,7 @@ exports.processPromotions = async (req, res, next) => {
       repeated_count: processed.filter((row) => row.action === 'repeated').length,
       graduated_count: processed.filter((row) => row.action === 'graduated').length,
       skipped_count: processed.filter((row) => row.action === 'skipped_existing_target').length,
+      skipped_no_result_count: processed.filter((row) => row.action === 'skipped_no_result').length,
       items: processed,
     }, `${processed.length} student promotion record(s) processed.`);
   } catch (err) { next(err); }
@@ -703,15 +807,15 @@ exports.processPromotions = async (req, res, next) => {
 // ── POST /api/enrollments/transfer ───────────────────────────────────────────
 exports.transfer = async (req, res, next) => {
   const lockKey = `enrollment:section:${req.body.new_section_id}`;
-  let lockAcquired = false;
+  let lockToken = null;
 
   try {
     const { enrollment_id, new_section_id, reason } = req.body;
     const today = new Date().toISOString().split('T')[0];
 
     // Acquire section distributed lock to prevent race conditions on capacity check
-    lockAcquired = await acquireLockWithRetry(lockKey);
-    if (!lockAcquired) {
+    lockToken = await acquireLockWithRetry(lockKey);
+    if (!lockToken) {
       return res.fail('Server is busy processing enrollments. Please try again.', [], 429);
     }
 
@@ -741,13 +845,16 @@ exports.transfer = async (req, res, next) => {
         WHERE id = :id;
       `, { replacements: { today, id: enrollment_id }, transaction: t });
 
+      // Generate next roll number in target section
+      const rollNumber = await nextRollNumber(new_section_id, current.session_id, t);
+
       // Open new in different section
       await sequelize.query(`
         INSERT INTO enrollments
-          (student_id, session_id, class_id, section_id, stream, joined_date, joining_type,
+          (student_id, session_id, class_id, section_id, stream, roll_number, joined_date, joining_type,
            previous_enrollment_id, status, created_at, updated_at)
         VALUES
-          (:student_id, :session_id, :class_id, :new_section_id, :stream, :today,
+          (:student_id, :session_id, :class_id, :new_section_id, :stream, :roll_number, :today,
            'transfer_in', :prev_id, 'active', NOW(), NOW());
       `, {
         replacements: {
@@ -755,7 +862,9 @@ exports.transfer = async (req, res, next) => {
           session_id: current.session_id,
           class_id  : current.class_id,
           stream    : current.stream,
-          new_section_id, today,
+          new_section_id,
+          roll_number: rollNumber,
+          today,
           prev_id   : enrollment_id,
         },
         transaction: t,
@@ -770,8 +879,8 @@ exports.transfer = async (req, res, next) => {
   } catch (err) {
     next(err);
   } finally {
-    if (lockAcquired) {
-      await releaseLock(lockKey);
+    if (lockToken) {
+      await releaseLock(lockKey, lockToken);
     }
   }
 };

@@ -21,7 +21,11 @@ router.get('/promotion/summary/download',requireAdmin, ctrl.downloadPromotionSum
 router.post('/promotion/process',        requireAdmin, ctrl.processPromotions);
 // FIX #1: Specific named routes must come BEFORE the /:id wildcard to avoid shadowing
 router.post('/promote',                  requireAdmin, ctrl.promote);
-router.post('/transfer',                 requireAdmin, ctrl.transfer);
+router.post('/transfer',                 requireAdmin, [
+  body('enrollment_id').isInt(),
+  body('new_section_id').isInt(),
+  body('reason').optional({ nullable: true }).isString(),
+], validate, ctrl.transfer);
 router.get('/:id',                       [param('id').isInt()], validate, ctrl.getById);
 
 module.exports = router;

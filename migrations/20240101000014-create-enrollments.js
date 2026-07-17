@@ -101,6 +101,7 @@ module.exports = {
     await queryInterface.addIndex('enrollments', ['student_id', 'session_id'], {
       name   : 'idx_enrollments_student_session',
       unique : true,
+      where  : { status: 'active' },
     });
 
     await queryInterface.addIndex('enrollments', ['session_id', 'class_id', 'section_id', 'status'], {

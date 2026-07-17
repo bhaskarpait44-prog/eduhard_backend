@@ -5,6 +5,18 @@ const sequelize = require('../config/database');
 const { acquireLockWithRetry, releaseLock } = require('../utils/lock');
 const { invalidateCache } = require('../middlewares/cache');
 
+async function getSessionMeta(sessionId, schoolId) {
+  const [[session]] = await sequelize.query(`
+    SELECT id, name, start_date, end_date, status, is_locked
+    FROM sessions
+    WHERE id = :sessionId
+      AND school_id = :schoolId
+    LIMIT 1;
+  `, { replacements: { sessionId, schoolId } });
+
+  return session || null;
+}
+
 async function currentSessionId(schoolId) {
   const [[session]] = await sequelize.query(`
     SELECT id, name
@@ -334,25 +346,45 @@ exports.markAsLeft = async (req, res, next) => {
 
     const finalLeftDate = left_date || new Date().toISOString().split('T')[0];
 
-    await sequelize.query(`
-      UPDATE enrollments
-      SET status = 'inactive',
-          left_date = :finalLeftDate,
-          leaving_type = 'left',
-          updated_at = NOW()
-      WHERE id = :enrollmentId;
-    `, { replacements: { enrollmentId: activeEnrollment.id, finalLeftDate } });
+    await sequelize.transaction(async (t) => {
+      await sequelize.query(`
+        UPDATE enrollments
+        SET status = 'inactive',
+            left_date = :finalLeftDate,
+            leaving_type = 'left',
+            updated_at = NOW()
+        WHERE id = :enrollmentId;
+      `, { replacements: { enrollmentId: activeEnrollment.id, finalLeftDate }, transaction: t });
 
-    await sequelize.query(`
-      UPDATE students
-      SET status = 'left',
-          left_date = :finalLeftDate,
-          leaving_reason = :leaving_reason,
-          leaving_remarks = :leaving_remarks,
-          is_active = false,
-          updated_at = NOW()
-      WHERE id = :id;
-    `, { replacements: { id, finalLeftDate, leaving_reason, leaving_remarks } });
+      await sequelize.query(`
+        UPDATE students
+        SET status = 'left',
+            left_date = :finalLeftDate,
+            leaving_reason = :leaving_reason,
+            leaving_remarks = :leaving_remarks,
+            is_active = false,
+            updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { id, finalLeftDate, leaving_reason, leaving_remarks }, transaction: t });
+
+      await sequelize.query(`
+        INSERT INTO audit_logs
+          (table_name, record_id, field_name, old_value, new_value,
+           changed_by, reason, ip_address, device_info, created_at)
+        VALUES
+          ('students', :id, 'status', 'active', 'left',
+           :changedBy, 'Student marked as left manually', :ip, :device, NOW());
+      `, { replacements: {
+        id,
+        changedBy: req.user.id,
+        ip: req.ip || null,
+        device: (req.headers['user-agent'] || '').slice(0, 299)
+      }, transaction: t });
+    });
+
+    invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/enrollments*');
+    invalidateCache(schoolId, '/api/dashboard*');
 
     res.ok({}, 'Student marked as left successfully.');
   } catch (err) { next(err); }
@@ -417,6 +449,10 @@ exports.markAsGraduated = async (req, res, next) => {
         device: (req.headers['user-agent'] || '').slice(0, 299)
       }, transaction: t });
     });
+
+    invalidateCache(schoolId, '/api/students*');
+    invalidateCache(schoolId, '/api/enrollments*');
+    invalidateCache(schoolId, '/api/dashboard*');
 
     res.ok({}, 'Student marked as graduated successfully.');
   } catch (err) { next(err); }
@@ -585,7 +621,7 @@ exports.readmitStudent = async (req, res, next) => {
   const { session_id, class_id, section_id, joined_date, roll_number } = req.body;
   const schoolId = req.user.school_id;
   const lockKey = `enrollment:section:${section_id}`;
-  let lockAcquired = false;
+  let lockToken = null;
 
   try {
     const [[student]] = await sequelize.query(`
@@ -598,9 +634,16 @@ exports.readmitStudent = async (req, res, next) => {
       return res.fail('Student is already active.', [], 400);
     }
 
+    // Verify session status
+    const sessionMeta = await getSessionMeta(session_id, schoolId);
+    if (!sessionMeta) return res.fail('Session not found.', [], 404);
+    if (['closed', 'archived', 'locked'].includes(sessionMeta.status) || sessionMeta.is_locked) {
+      return res.fail(`Cannot re-admit student: session is ${sessionMeta.status || 'locked'}.`);
+    }
+
     // Acquire lock to prevent race condition on section capacity/roll assignment
-    lockAcquired = await acquireLockWithRetry(lockKey, 5000, 10, 150);
-    if (!lockAcquired) {
+    lockToken = await acquireLockWithRetry(lockKey, 5000, 10, 150);
+    if (!lockToken) {
       return res.status(429).json({
         success: false,
         message: 'Too many concurrent admission/enrollment requests. Please try again.'
@@ -645,6 +688,7 @@ exports.readmitStudent = async (req, res, next) => {
               left_date = null,
               leaving_type = null,
               status = 'active',
+              previous_enrollment_id = :prevId,
               updated_at = NOW()
           WHERE id = :enrollmentId;
         `, { replacements: {
@@ -652,7 +696,8 @@ exports.readmitStudent = async (req, res, next) => {
           class_id,
           section_id,
           roll_number,
-          joined_date: joined_date || new Date().toISOString().split('T')[0]
+          joined_date: joined_date || new Date().toISOString().split('T')[0],
+          prevId: lastEnrollment ? lastEnrollment.id : null
         }, transaction: t });
       } else {
         await sequelize.query(`
@@ -708,8 +753,8 @@ exports.readmitStudent = async (req, res, next) => {
   } catch (err) { 
     next(err); 
   } finally {
-    if (lockAcquired) {
-      await releaseLock(lockKey);
+    if (lockToken) {
+      await releaseLock(lockKey, lockToken);
     }
   }
 };
