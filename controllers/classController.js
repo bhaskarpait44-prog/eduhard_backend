@@ -194,7 +194,7 @@ exports.create = async (req, res, next) => {
     const schoolId = req.user.school_id;
     const normalizedStream = normalizeStream(stream);
 
-    // Verify stream is valid for the school
+    // Automatically register stream if not exists
     if (normalizedStream !== 'regular') {
       const [[validStream]] = await sequelize.query(`
         SELECT id FROM streams
@@ -204,7 +204,12 @@ exports.create = async (req, res, next) => {
       `, { replacements: { schoolId, streamName: normalizedStream } });
 
       if (!validStream) {
-        return res.fail(`Stream "${stream}" is not registered for this school.`, [], 400);
+        await sequelize.query(`
+          INSERT INTO streams (school_id, name, created_at, updated_at)
+          VALUES (:schoolId, :streamName, NOW(), NOW());
+        `, { replacements: { schoolId, streamName: normalizedStream } });
+
+        invalidateCache(schoolId, '/api/streams*');
       }
     }
 
@@ -374,7 +379,7 @@ exports.update = async (req, res, next) => {
       Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream,
     );
 
-    // Verify stream is valid for the school
+    // Automatically register stream if not exists
     if (nextStream !== 'regular') {
       const [[validStream]] = await sequelize.query(`
         SELECT id FROM streams
@@ -384,8 +389,12 @@ exports.update = async (req, res, next) => {
       `, { replacements: { schoolId, streamName: nextStream } });
 
       if (!validStream) {
-        const streamVal = Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream;
-        return res.fail(`Stream "${streamVal}" is not registered for this school.`, [], 400);
+        await sequelize.query(`
+          INSERT INTO streams (school_id, name, created_at, updated_at)
+          VALUES (:schoolId, :streamName, NOW(), NOW());
+        `, { replacements: { schoolId, streamName: nextStream } });
+
+        invalidateCache(schoolId, '/api/streams*');
       }
     }
 

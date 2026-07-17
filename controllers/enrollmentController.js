@@ -129,7 +129,7 @@ exports.enroll = async (req, res, next) => {
       return res.fail(`Cannot enroll student: session is ${sessionMeta.status}.`);
     }
 
-    // Verify stream is valid for the school
+    // Automatically register stream if not exists
     if (normalizedStream !== 'regular') {
       const [[validStream]] = await sequelize.query(`
         SELECT id FROM streams
@@ -139,7 +139,12 @@ exports.enroll = async (req, res, next) => {
       `, { replacements: { schoolId: req.user.school_id, streamName: normalizedStream } });
 
       if (!validStream) {
-        return res.fail(`Stream "${stream}" is not registered for this school.`, [], 400);
+        await sequelize.query(`
+          INSERT INTO streams (school_id, name, created_at, updated_at)
+          VALUES (:schoolId, :streamName, NOW(), NOW());
+        `, { replacements: { schoolId: req.user.school_id, streamName: normalizedStream } });
+
+        invalidateCache(req.user.school_id, '/api/streams*');
       }
     }
 
