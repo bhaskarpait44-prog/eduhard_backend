@@ -29,12 +29,12 @@ const cleanOrphanedStudentFiles = async () => {
     for (const doc of docs) {
       if (doc.file_path) {
         try {
-          if (fs.existsSync(doc.file_path)) {
-            fs.unlinkSync(doc.file_path);
-            docFilesDeletedCount++;
-          }
+          await fs.promises.unlink(doc.file_path);
+          docFilesDeletedCount++;
         } catch (fileErr) {
-          logger.error(`[StudentScheduler] Failed to delete file on disk ${doc.file_path}: ${fileErr.message}`);
+          if (fileErr.code !== 'ENOENT') {
+            logger.error(`[StudentScheduler] Failed to delete file on disk ${doc.file_path}: ${fileErr.message}`);
+          }
         }
       }
 
@@ -57,12 +57,12 @@ const cleanOrphanedStudentFiles = async () => {
     for (const profile of profiles) {
       if (profile.photo_path) {
         try {
-          if (fs.existsSync(profile.photo_path)) {
-            fs.unlinkSync(profile.photo_path);
-            photosDeletedCount++;
-          }
+          await fs.promises.unlink(profile.photo_path);
+          photosDeletedCount++;
         } catch (fileErr) {
-          logger.error(`[StudentScheduler] Failed to delete photo on disk ${profile.photo_path}: ${fileErr.message}`);
+          if (fileErr.code !== 'ENOENT') {
+            logger.error(`[StudentScheduler] Failed to delete photo on disk ${profile.photo_path}: ${fileErr.message}`);
+          }
         }
       }
       
