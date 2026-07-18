@@ -11,6 +11,9 @@ const redisConfig = {
   // Fix #10: use undefined (not null) so ioredis skips the AUTH command entirely
   password: process.env.REDIS_PASSWORD || undefined,
   lazyConnect: !REDIS_ENABLED, // Don't connect if disabled
+  connectTimeout: 2000, // Fail fast if Redis is down
+  keepAlive: 30000, // Keep idle connection alive
+  keyPrefix: 'eduhard:', // Partition keys for safe sharing
   // Fix #1: maxRetriesPerRequest has no effect when enableOfflineQueue is false
   // (commands are rejected immediately, never queued, so retries never happen).
   // Set to null to be explicit: don't retry individual commands.
