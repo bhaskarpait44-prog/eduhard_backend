@@ -79,9 +79,12 @@ async function clearPermissionCache(userId, userRole = 'user') {
         const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', 'perms:*', 'COUNT', 100);
         cursor = nextCursor;
         if (keys.length > 0) {
-          // Fix #6: use pipeline instead of spread to avoid JS argument count limits
+          const prefix = redis.options.keyPrefix || '';
           const pipeline = redis.pipeline();
-          keys.forEach((k) => pipeline.del(k));
+          keys.forEach((k) => {
+            const cleanKey = prefix && k.startsWith(prefix) ? k.slice(prefix.length) : k;
+            pipeline.del(cleanKey);
+          });
           await pipeline.exec();
         }
       } while (cursor !== '0');
