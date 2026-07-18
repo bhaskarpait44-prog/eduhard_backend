@@ -5,9 +5,9 @@ module.exports = {
     await queryInterface.createTable('families', {
       id: { type: Sequelize.INTEGER, autoIncrement: true, primaryKey: true, allowNull: false },
       school_id: { type: Sequelize.INTEGER, allowNull: false, references: { model: 'schools', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'CASCADE' },
-      family_name: { type: Sequelize.STRING(150), allowNull: true },
-      primary_contact: { type: Sequelize.STRING(150), allowNull: true },
-      phone: { type: Sequelize.STRING(20), allowNull: true },
+      family_name: { type: Sequelize.STRING(150), allowNull: false },
+      primary_contact: { type: Sequelize.STRING(150), allowNull: false },
+      phone: { type: Sequelize.STRING(20), allowNull: false },
       email: { type: Sequelize.STRING(150), allowNull: true },
       created_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
       updated_at: { type: Sequelize.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
