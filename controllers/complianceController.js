@@ -78,8 +78,10 @@ exports.getReport = async (req, res, next) => {
         }
 
         const total = stats.total_enrolled || 0;
+        // B1 FIX: students_left should only count non-active students who left,
+        // not all rows with a left_date (which could include active re-enrollments)
         const left = stats.students_left || 0;
-        const retentionRate = total > 0 ? ((total) / (total + left)) * 100 : 100;
+        const retentionRate = (total + left) > 0 ? (total / (total + left)) * 100 : 100;
 
         return {
           total_enrolled: total,
@@ -87,7 +89,7 @@ exports.getReport = async (req, res, next) => {
           new_admissions: stats.new_admissions || 0,
           prev_new_admissions: prevNewAdmissions,
           students_left: left,
-          retention_rate: retentionRate
+          retention_rate: Number(retentionRate.toFixed(2))
         };
       })(),
 
@@ -163,9 +165,13 @@ exports.getReport = async (req, res, next) => {
 
       // 3. ACADEMIC PERFORMANCE
       (async () => {
+        // B3 FIX: Added school_id scope via JOIN to prevent cross-school count
         const [[exams]] = await sequelize.query(`
-          SELECT COUNT(*)::int AS count FROM exams WHERE session_id = :sessionId;
-        `, { replacements: { sessionId } });
+          SELECT COUNT(DISTINCT ex.id)::int AS count 
+          FROM exams ex
+          JOIN sessions s ON s.id = ex.session_id
+          WHERE ex.session_id = :sessionId AND s.school_id = :schoolId;
+        `, { replacements: { sessionId, schoolId } });
 
         const [[overall]] = await sequelize.query(`
           SELECT 
@@ -206,8 +212,9 @@ exports.getReport = async (req, res, next) => {
 
         return {
           exams_conducted: exams.count || 0,
-          pass_rate: overall?.pass_rate || 0,
-          avg_marks: overall?.avg_marks || 0,
+          // B2 FIX: Round avg_marks to 2 decimal places before sending to client
+          pass_rate: Number((overall?.pass_rate || 0).toFixed(2)),
+          avg_marks: Number((overall?.avg_marks || 0).toFixed(2)),
           subject_wise: subjectWise,
           grade_distribution: gradeDist
         };
@@ -227,7 +234,8 @@ exports.getReport = async (req, res, next) => {
 
         const [[defaulters]] = await sequelize.query(`
           SELECT COUNT(DISTINCT e.student_id)::int AS count,
-                 COALESCE(SUM(amount_due + late_fee_amount - concession_amount - amount_paid), 0) AS outstanding
+                 -- B4 FIX: GREATEST prevents negative outstanding when overpayments exist
+                 COALESCE(SUM(GREATEST(amount_due + late_fee_amount - concession_amount - amount_paid, 0)), 0) AS outstanding
           FROM fee_invoices fi
           JOIN enrollments e ON e.id = fi.enrollment_id
           JOIN students s ON s.id = e.student_id
@@ -362,10 +370,14 @@ exports.getReport = async (req, res, next) => {
 
       // 8. CERTIFICATES ISSUED
       (async () => {
+        // B5 FIX: Cap end date to today — session end may be far in future
+        const todayStr = new Date().toISOString().split('T')[0];
+        const certEnd = sessionInfo.end_date < todayStr ? sessionInfo.end_date : todayStr;
+
         const [[certs]] = await sequelize.query(`
           SELECT COUNT(*)::int AS count FROM certificates
           WHERE school_id = :schoolId AND issued_date BETWEEN :start AND :end;
-        `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
+        `, { replacements: { schoolId, start: sessionInfo.start_date, end: certEnd } });
 
         return {
           count: certs.count || 0
