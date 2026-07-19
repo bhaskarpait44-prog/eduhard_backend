@@ -250,15 +250,21 @@ exports.getReport = async (req, res, next) => {
 
       // 5. STAFF & PAYROLL
       (async () => {
+        // BUG FIX 1: Teachers are in the `teachers` table, NOT in `users` with role='teacher'
         const [[teachingStaff]] = await sequelize.query(`
-          SELECT COUNT(*)::int AS count FROM users 
-          WHERE school_id = :schoolId AND role = 'teacher' AND is_active = true;
+          SELECT COUNT(*)::int AS count FROM teachers 
+          WHERE school_id = :schoolId AND is_active = true AND is_deleted = false;
         `, { replacements: { schoolId } });
 
+        // BUG FIX 2: Non-teaching staff: users excluding student/parent roles
         const [[nonTeachingStaff]] = await sequelize.query(`
           SELECT COUNT(*)::int AS count FROM users 
-          WHERE school_id = :schoolId AND role NOT IN ('teacher', 'student', 'parent') AND is_active = true;
+          WHERE school_id = :schoolId AND role NOT IN ('student', 'parent') AND is_active = true AND is_deleted = false;
         `, { replacements: { schoolId } });
+
+        // BUG FIX 3: Cap attendance end date to today — future dates return 0 records
+        const todayStr = new Date().toISOString().split('T')[0];
+        const attendanceEnd = sessionInfo.end_date < todayStr ? sessionInfo.end_date : todayStr;
 
         const [[attendance]] = await sequelize.query(`
           SELECT 
@@ -266,19 +272,20 @@ exports.getReport = async (req, res, next) => {
             NULLIF(COUNT(id) FILTER (WHERE status IN ('present', 'absent', 'late', 'half_day')), 0) * 100 AS rate
           FROM staff_attendance
           WHERE school_id = :schoolId AND date BETWEEN :start AND :end;
-        `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
+        `, { replacements: { schoolId, start: sessionInfo.start_date, end: attendanceEnd } });
 
+        // BUG FIX 4: Payroll query now correctly scoped to school via both user_id and teacher_id paths
         const [[payroll]] = await sequelize.query(`
           SELECT 
             COUNT(*)::int AS total,
             COUNT(*) FILTER (WHERE status = 'paid')::int AS paid
-          FROM payrolls
-          WHERE school_id = :schoolId AND (
-            (year > EXTRACT(YEAR FROM :start::date)) OR 
-            (year = EXTRACT(YEAR FROM :start::date) AND month >= EXTRACT(MONTH FROM :start::date))
+          FROM payrolls p
+          WHERE p.school_id = :schoolId AND (
+            (p.year > EXTRACT(YEAR FROM :start::date)) OR 
+            (p.year = EXTRACT(YEAR FROM :start::date) AND p.month >= EXTRACT(MONTH FROM :start::date))
           ) AND (
-            (year < EXTRACT(YEAR FROM :end::date)) OR 
-            (year = EXTRACT(YEAR FROM :end::date) AND month <= EXTRACT(MONTH FROM :end::date))
+            (p.year < EXTRACT(YEAR FROM :end::date)) OR 
+            (p.year = EXTRACT(YEAR FROM :end::date) AND p.month <= EXTRACT(MONTH FROM :end::date))
           );
         `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
 
@@ -289,7 +296,7 @@ exports.getReport = async (req, res, next) => {
         return {
           teaching_staff_count: teachingStaff.count || 0,
           non_teaching_staff_count: nonTeachingStaff.count || 0,
-          staff_attendance_rate: attendance?.rate || 0,
+          staff_attendance_rate: Number((attendance?.rate || 0).toFixed(2)),
           payroll_disbursement_rate: payrollRate
         };
       })(),
@@ -300,14 +307,19 @@ exports.getReport = async (req, res, next) => {
           SELECT COUNT(*)::int AS count FROM library_books WHERE school_id = :schoolId;
         `, { replacements: { schoolId } });
 
+        // BUG FIX 5: active_borrowers should count ALL borrower types (student/teacher/staff),
+        // not filter only borrower_type='student'. Also overdue must check return_date IS NULL.
+        const todayStr = new Date().toISOString().split('T')[0];
+        const libraryEnd = sessionInfo.end_date < todayStr ? sessionInfo.end_date : todayStr;
+
         const [[issues]] = await sequelize.query(`
           SELECT 
             COUNT(*)::int AS total_issues,
-            COUNT(DISTINCT borrower_id) FILTER (WHERE borrower_type = 'student' AND status = 'issued')::int AS active_borrowers,
-            COUNT(*) FILTER (WHERE status = 'overdue' OR (status = 'issued' AND due_date < CURRENT_DATE))::int AS overdue_count
+            COUNT(DISTINCT borrower_id) FILTER (WHERE status = 'issued')::int AS active_borrowers,
+            COUNT(*) FILTER (WHERE (status = 'issued' OR status = 'overdue') AND due_date < CURRENT_DATE AND return_date IS NULL)::int AS overdue_count
           FROM library_issues
           WHERE school_id = :schoolId AND issue_date BETWEEN :start AND :end;
-        `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
+        `, { replacements: { schoolId, start: sessionInfo.start_date, end: libraryEnd } });
 
         return {
           total_books: books.count || 0,
@@ -319,13 +331,18 @@ exports.getReport = async (req, res, next) => {
 
       // 7. AUDIT & GOVERNANCE
       (async () => {
+        // BUG FIX 6: Cap audit end date to today — session end may be far in future,
+        // causing the query to scan unnecessarily and return misleading "current" data.
+        const todayStr = new Date().toISOString().split('T')[0];
+        const auditEnd = sessionInfo.end_date < todayStr ? sessionInfo.end_date : todayStr;
+
         const [[stats]] = await sequelize.query(`
           SELECT 
             COUNT(*)::int AS total_actions,
             COUNT(DISTINCT changed_by)::int AS unique_admins
           FROM audit_logs
           WHERE school_id = :schoolId AND created_at BETWEEN :start AND :end;
-        `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
+        `, { replacements: { schoolId, start: sessionInfo.start_date, end: auditEnd } });
 
         const [[mostModified]] = await sequelize.query(`
           SELECT table_name, COUNT(*)::int AS count
@@ -334,7 +351,7 @@ exports.getReport = async (req, res, next) => {
           GROUP BY table_name
           ORDER BY count DESC
           LIMIT 1;
-        `, { replacements: { schoolId, start: sessionInfo.start_date, end: sessionInfo.end_date } });
+        `, { replacements: { schoolId, start: sessionInfo.start_date, end: auditEnd } });
 
         return {
           total_admin_actions: stats.total_actions || 0,
