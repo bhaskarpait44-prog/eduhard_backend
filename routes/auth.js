@@ -650,4 +650,147 @@ router.post('/logout', authenticate, async (req, res) => {
   }
 });
 
+// Local fallback cache in case Redis is disabled
+const localQrSessions = new Map();
+
+// Helper to set session status
+const setQrSession = async (token, value, ttlSeconds) => {
+  if (REDIS_ENABLED && redis.status === 'ready') {
+    await redis.setex(`qr_login:${token}`, ttlSeconds, JSON.stringify(value));
+  } else {
+    localQrSessions.set(token, value);
+    setTimeout(() => {
+      localQrSessions.delete(token);
+    }, ttlSeconds * 1000);
+  }
+};
+
+// Helper to get session status
+const getQrSession = async (token) => {
+  if (REDIS_ENABLED && redis.status === 'ready') {
+    const data = await redis.get(`qr_login:${token}`);
+    return data ? JSON.parse(data) : null;
+  } else {
+    return localQrSessions.get(token) || null;
+  }
+};
+
+// Helper to delete session
+const deleteQrSession = async (token) => {
+  if (REDIS_ENABLED && redis.status === 'ready') {
+    await redis.del(`qr_login:${token}`);
+  } else {
+    localQrSessions.delete(token);
+  }
+};
+
+/**
+ * Initialize QR login session
+ */
+router.post('/qr/init', async (req, res, next) => {
+  try {
+    const token = crypto.randomBytes(32).toString('hex');
+    await setQrSession(token, { status: 'pending', user: null }, 120); // 2 minutes TTL
+    return res.ok({ token }, 'QR login session initialized.');
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Check QR login session status
+ */
+router.get('/qr/status/:token', async (req, res, next) => {
+  try {
+    const { token } = req.params;
+    const session = await getQrSession(token);
+
+    if (!session) {
+      return res.ok({ status: 'expired' }, 'QR login session expired or invalid.');
+    }
+
+    if (session.status === 'authorized') {
+      const user = session.user;
+      
+      // Load user permissions
+      const permissions = Array.from(await loadUserPermissions(user.id, user.role));
+      
+      const payload = {
+        userId: user.id,
+        schoolId: user.school_id,
+        role: user.role,
+        name: user.name,
+        email: user.email
+      };
+
+      const tokenVal = jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+      const refresh_token = jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+
+      // Auto delete token so it is single use
+      await deleteQrSession(token);
+
+      return res.ok({
+        status: 'authorized',
+        token: tokenVal,
+        refresh_token,
+        user: {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          school_id: user.school_id,
+        },
+        permissions,
+      }, 'Login successful.');
+    }
+
+    return res.ok({ status: 'pending' }, 'QR login session is pending scanning.');
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Confirm QR login from mobile app (Requires authentication, role must be teacher)
+ */
+router.post('/qr/confirm', authenticate, async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.fail('Token is required.', [], 400);
+    }
+
+    const normalizedRole = normalizeUserRole(req.user.role);
+    if (normalizedRole !== 'teacher') {
+      return res.fail('Access denied. Only teachers can authorize web portal login.', [], 403);
+    }
+
+    const session = await getQrSession(token);
+    if (!session) {
+      return res.fail('Invalid or expired QR code.', [], 400);
+    }
+
+    if (session.status === 'authorized') {
+      return res.fail('QR code already authorized.', [], 400);
+    }
+
+    // Save authorized user details
+    await setQrSession(token, {
+      status: 'authorized',
+      user: {
+        id: req.user.id,
+        school_id: req.user.school_id,
+        name: req.user.name,
+        email: req.user.email,
+        role: normalizedRole
+      }
+    }, 60); // 1 minute to complete login
+
+    return res.ok({}, 'Web portal login authorized successfully.');
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;
+
