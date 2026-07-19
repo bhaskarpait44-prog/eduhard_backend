@@ -1353,3 +1353,53 @@ exports.getNoticeById = async (req, res, next) => {
     res.ok(notice);
   } catch (err) { next(err); }
 };
+
+exports.listStaffNotices = async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+    const schoolId = req.user.school_id;
+
+    const [notices] = await sequelize.query(`
+      WITH combined_notices AS (
+        SELECT 
+          n.id, n.school_id, n.title, n.body, n.posted_by_user_id, n.posted_by_role::text AS posted_by_role,
+          n.audience::text AS audience, n.is_school_wide, n.target_class_id, n.target_section_id,
+          n.target_student_id, n.target_teacher_id, n.target_subject_id, n.priority::text AS priority,
+          n.expires_at, n.attachment_path, n.is_deleted, n.created_at, n.updated_at,
+          COALESCE(u.name, CONCAT(t.first_name, ' ', t.last_name)) as posted_by_name,
+          'unified' as source
+        FROM notices n
+        LEFT JOIN users u ON u.id = n.posted_by_user_id
+        LEFT JOIN teachers t ON t.email = u.email AND n.posted_by_role = 'teacher'
+        WHERE n.school_id = :schoolId AND n.is_deleted = false
+          AND (n.expires_at IS NULL OR n.expires_at > NOW())
+      )
+      SELECT n.*,
+             (CASE WHEN n.source = 'unified' THEN EXISTS(SELECT 1 FROM notice_reads nr WHERE nr.notice_id = n.id AND nr.user_id = :userId) ELSE false END) as is_read
+      FROM combined_notices n
+      WHERE 
+        n.is_school_wide = true OR
+        LOWER(n.audience::text) IN ('school_wide', 'all_students', 'whole_school', 'all_classes', 'everyone') OR
+        LOWER(n.audience::text) = 'staff'
+      ORDER BY n.created_at DESC
+    `, { replacements: { userId, schoolId } });
+
+    res.ok({ notices, unread_count: notices.filter(n => !n.is_read).length });
+  } catch (err) { next(err); }
+};
+
+exports.markUserNoticeRead = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user.id;
+
+    await sequelize.query(`
+      INSERT INTO notice_reads (notice_id, user_id, read_at)
+      VALUES (:id, :userId, NOW())
+      ON CONFLICT (notice_id, user_id) DO UPDATE SET read_at = NOW()
+    `, { replacements: { id, userId } });
+
+    res.ok({ success: true, message: 'Notice marked as read' });
+  } catch (err) { next(err); }
+};
+

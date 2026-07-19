@@ -110,6 +110,11 @@ router.post('/receptionist/:id/read', requireRole('receptionist', 'admin'), [par
 router.get('/librarian', requireRole('librarian', 'admin'), ctrl.listLibrarianNotices);
 router.post('/librarian/:id/read', requireRole('librarian', 'admin'), [param('id').isInt()], validate, ctrl.markTeacherRead);
 
+// ── Staff ────────────────────────────────────────────────────────────────────
+router.get('/staff', requireRole('staff', 'admin'), ctrl.listStaffNotices);
+router.post('/staff/:id/read', requireRole('staff', 'admin'), [param('id').isInt()], validate, ctrl.markUserNoticeRead);
+
+
 router.post('/accountant', requireRole('admin', 'accountant'), upload.single('attachment'), [
   body('title').notEmpty().withMessage('Title is required'),
   body().custom((val, { req }) => {
