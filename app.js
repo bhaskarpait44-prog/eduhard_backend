@@ -56,6 +56,11 @@ const corsOrigins = (() => {
     // Allow same-origin (no origin header) or explicitly allowed origins
     if (!origin || allowed.includes(origin)) return callback(null, true);
     
+    // In development, allow any localhost or 127.0.0.1 origin with any port
+    if (isDev && (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1'))) {
+      return callback(null, true);
+    }
+    
     if (isDev) {
       console.log(`[CORS] Blocked origin: ${origin}`);
     }
